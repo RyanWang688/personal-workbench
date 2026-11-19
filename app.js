@@ -1,13 +1,21 @@
-import * as db from './db.js';
+import * as db from './db.js?v=2';
 
-const DRAFTS = 'drafts';
 const TRASH = 'trash';
+const BOARD = 'board';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const ls = {
+  get(k, d) { try { const v = localStorage.getItem(`wb:${k}`); return v ? JSON.parse(v) : d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(`wb:${k}`, JSON.stringify(v)); } catch {} },
+};
 
-const state = { columns: [], cards: [], query: '', tab: DRAFTS, urls: new Map(), dragId: null };
+// areas：看板列(kind 'column')、功能区(kind 'zone')、画布(kind 'canvas')，统一存在 columns 表
+const state = {
+  areas: [], cards: [], query: '', urls: new Map(), dragId: null,
+  view: ls.get('view', BOARD), zone: ls.get('zone', 'drafts'), cams: ls.get('cams', {}),
+};
 const channel = 'BroadcastChannel' in window ? new BroadcastChannel('personal-workbench') : null;
 
 // ---------- 文件类型 ----------
@@ -51,31 +59,49 @@ function ago(ts) {
 
 // ---------- 数据 ----------
 const byOrder = (a, b) => a.order - b.order;
-const colName = (id) => id === DRAFTS ? '草稿区' : id === TRASH ? '回收站' : (state.columns.find((c) => c.id === id)?.title || '未知列');
+const kindOf = (a) => a.kind || 'column';
+const areasOf = (kind) => state.areas.filter((a) => kindOf(a) === kind).sort(byOrder);
+const columns = () => areasOf('column');
+const zones = () => areasOf('zone');
+const canvases = () => areasOf('canvas');
+const area = (id) => state.areas.find((a) => a.id === id);
+const isCanvas = (id) => area(id)?.kind === 'canvas';
+const areaName = (id) => id === TRASH ? '回收站' : (area(id)?.title || '未知区域');
+const fallbackZone = () => (area('drafts') ? 'drafts' : zones()[0]?.id);
 const findCard = (id) => state.cards.find((c) => c.id === id);
-function cardsIn(colId, filtered = true) {
-  let list = state.cards.filter((c) => c.columnId === colId);
-  if (filtered && state.query) {
-    const q = state.query.toLowerCase();
-    list = list.filter((c) => (c.name || '').toLowerCase().includes(q) || (c.text || '').toLowerCase().includes(q));
-  }
-  return colId === TRASH ? list.sort((a, b) => (b.trashedAt || 0) - (a.trashedAt || 0)) : list.sort(byOrder);
+const matches = (c) => {
+  if (!state.query) return true;
+  const q = state.query.toLowerCase();
+  return (c.name || '').toLowerCase().includes(q) || (c.text || '').toLowerCase().includes(q);
+};
+function cardsIn(areaId, filtered = true) {
+  let list = state.cards.filter((c) => c.columnId === areaId);
+  if (filtered) list = list.filter(matches);
+  return areaId === TRASH ? list.sort((a, b) => (b.trashedAt || 0) - (a.trashedAt || 0)) : list.sort(byOrder);
 }
-function orderAt(colId, index, excludeId) {
-  const list = cardsIn(colId, false).filter((c) => c.id !== excludeId);
+function orderAt(areaId, index, excludeId) {
+  const list = cardsIn(areaId, false).filter((c) => c.id !== excludeId);
   const prev = list[index - 1], next = list[index];
   if (!prev && !next) return 0;
   if (!prev) return next.order - 1024;
   if (!next) return prev.order + 1024;
   return (prev.order + next.order) / 2;
 }
+const topOrder = (areaId) => Math.max(0, ...cardsIn(areaId, false).map((c) => c.order)) + 1;
+// 当前「默认投放位置」：看板 → 第一列；画布 → 画布视野中央
+function defaultTarget() {
+  if (isCanvas(state.view)) return state.view;
+  return columns()[0]?.id || fallbackZone();
+}
 
 async function load() {
-  const [cols, cards] = await Promise.all([db.getAll('columns'), db.getAll('cards')]);
-  state.columns = cols.sort(byOrder);
+  const [areas, cards] = await Promise.all([db.getAll('columns'), db.getAll('cards')]);
+  state.areas = areas;
   state.cards = cards;
   const live = new Set(cards.map((c) => c.id));
   for (const [id, url] of state.urls) if (!live.has(id)) { URL.revokeObjectURL(url); state.urls.delete(id); }
+  if (state.view !== BOARD && !isCanvas(state.view)) state.view = BOARD;
+  if (state.zone !== TRASH && !area(state.zone)) state.zone = fallbackZone() || TRASH;
 }
 async function changed() {
   await db.setMeta('lastChange', Date.now());
@@ -87,84 +113,144 @@ async function saveCard(card) {
   card.updatedAt = Date.now();
   await db.put('cards', card);
 }
+async function saveArea(a) { await db.put('columns', a); }
 
 async function ensureDefaults() {
-  if (state.columns.length) return;
-  state.columns = ['收件箱', '进行中', '已完成'].map((title, i) => ({ id: uid(), title, order: i * 1024 }));
-  await db.putMany('columns', state.columns);
+  const add = [];
+  if (!columns().length) ['收件箱', '进行中', '已完成'].forEach((title, i) => add.push({ id: uid(), kind: 'column', title, order: i * 1024 }));
+  if (!zones().length) {
+    add.push({ id: 'materials', kind: 'zone', title: '素材区', order: 0, desc: '常用素材：图片、模板、参考资料，随时拖到看板或画布上使用。' });
+    add.push({ id: 'drafts', kind: 'zone', title: '草稿区', order: 1024, desc: '暂时不用的东西放这里，不会丢，随时拖回去。' });
+    add.push({ id: 'temp', kind: 'zone', title: '临时文件区', order: 2048, ttlDays: 7, desc: '中转用的临时文件。' });
+  }
+  if (!canvases().length) add.push({ id: uid(), kind: 'canvas', title: '画布', order: 0 });
+  if (!add.length) return;
+  await db.putMany('columns', add);
+  state.areas.push(...add);
+  if (!area(state.zone)) state.zone = fallbackZone();
 }
 
-// ---------- 渲染 ----------
+// 临时区：过期文件移到回收站（不直接删除）
+async function sweepExpired() {
+  const now = Date.now();
+  const expired = [];
+  for (const z of zones()) {
+    if (!(z.ttlDays > 0)) continue;
+    for (const c of cardsIn(z.id, false)) {
+      if (now - (c.enteredAt || c.createdAt) > z.ttlDays * 86400e3) {
+        c.prevColumnId = c.columnId; c.columnId = TRASH; c.trashedAt = now; c.updatedAt = now;
+        expired.push(c);
+      }
+    }
+  }
+  if (!expired.length) return;
+  await db.putMany('cards', expired);
+  await changed();
+  toast(`临时文件区有 ${expired.length} 个过期文件已移到回收站`);
+}
+
+// ---------- 卡片 HTML ----------
 const highlight = (s) => {
   const t = esc(s);
   if (!state.query) return t;
   const q = esc(state.query).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return t.replace(new RegExp(q, 'gi'), (m) => `<mark>${m}</mark>`);
 };
-function cardHTML(c) {
-  const more = `<button class="more" data-action="card-menu" aria-label="更多操作" aria-haspopup="menu"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>`;
+const MORE = `<button class="more" data-action="card-menu" aria-label="更多操作" aria-haspopup="menu"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>`;
+const HANDLE = `<span class="export-handle" draggable="true" title="拖到桌面导出"><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg></span>`;
+function cardHTML(c, onCanvas = false) {
+  const attrs = onCanvas
+    ? `draggable="false" style="left:${Math.round(c.x || 0)}px;top:${Math.round(c.y || 0)}px;z-index:${Math.max(1, Math.round(c.order) || 1)}"`
+    : 'draggable="true"';
+  const cls = `card${onCanvas ? ' on-canvas' : ''}${onCanvas && !matches(c) ? ' dim' : ''}`;
+  const extra = onCanvas ? HANDLE : '';
   if (c.kind === 'note') {
-    return `<article class="card note" draggable="true" tabindex="0" data-id="${c.id}" aria-label="便签 ${esc(c.name)}">
+    return `<article class="${cls} note" ${attrs} tabindex="0" data-id="${c.id}" aria-label="便签 ${esc(c.name)}">
       <div class="body"><div class="name">${highlight(c.name || '便签')}</div>
       ${c.text ? `<div class="note-text">${highlight(c.text)}</div>` : ''}
-      <div class="meta">便签 · ${fmtDate(c.updatedAt || c.createdAt)}</div></div>${more}</article>`;
+      <div class="meta">便签 · ${fmtDate(c.updatedAt || c.createdAt)}</div></div>${extra}${MORE}</article>`;
   }
   const t = typeOf(c);
   const meta = `${t.label} · ${fmtSize(c.size || 0)} · ${fmtDate(c.createdAt)}`;
   if (t.k === 'image' && extOf(c.name) !== 'heic') {
-    return `<article class="card has-img" draggable="true" tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
-      <img class="thumb-img" data-thumb="${c.id}" alt="" loading="lazy" draggable="false">
-      <div class="body"><div class="name" title="${esc(c.name)}">${highlight(c.name)}</div><div class="meta">${meta}</div></div>${more}</article>`;
+    return `<article class="${cls} has-img" ${attrs} tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
+      <img class="thumb-img" data-thumb="${c.id}" alt="" draggable="false">
+      <div class="body"><div class="name" title="${esc(c.name)}">${highlight(c.name)}</div><div class="meta">${meta}</div></div>${extra}${MORE}</article>`;
   }
   const ext = extOf(c.name).slice(0, 4) || t.label;
-  return `<article class="card" draggable="true" tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
+  return `<article class="${cls}" ${attrs} tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
     <div class="type-icon" style="--c:${t.c}">${esc(ext)}</div>
-    <div class="body"><div class="name" title="${esc(c.name)}">${highlight(c.name)}</div><div class="meta">${meta}</div></div>${more}</article>`;
+    <div class="body"><div class="name" title="${esc(c.name)}">${highlight(c.name)}</div><div class="meta">${meta}</div></div>${extra}${MORE}</article>`;
 }
-function listHTML(colId, emptyText) {
-  const list = cardsIn(colId);
+function listHTML(areaId, emptyText) {
+  const list = cardsIn(areaId);
   if (!list.length) return `<div class="empty">${state.query ? '没有匹配的内容' : emptyText}</div>`;
-  return list.map(cardHTML).join('');
+  return list.map((c) => cardHTML(c)).join('');
 }
+
+// ---------- 渲染 ----------
+const DOTS = `<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>`;
 function render() {
+  renderViews();
+  const onBoard = state.view === BOARD;
+  $('#board').hidden = !onBoard;
+  $('#canvasView').hidden = onBoard;
+  if (onBoard) renderBoard(); else renderCanvas();
+  renderZones();
+  loadThumbs();
+}
+function renderViews() {
+  const count = (id) => cardsIn(id, false).length;
+  const boardCount = columns().reduce((n, c) => n + count(c.id), 0);
+  $('#views').innerHTML = `
+    <button role="tab" class="view-tab" data-view="${BOARD}" aria-selected="${state.view === BOARD}">
+      <svg viewBox="0 0 24 24"><rect x="4" y="4" width="4.5" height="16" rx="1"/><rect x="10" y="4" width="4.5" height="11" rx="1"/><rect x="16" y="4" width="4" height="7" rx="1"/></svg>看板<b>${boardCount}</b></button>
+    ${canvases().map((cv) => `<button role="tab" class="view-tab" data-view="${cv.id}" data-drop="${cv.id}" aria-selected="${state.view === cv.id}">
+      <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="2"/><circle cx="9" cy="9" r="1"/><circle cx="15" cy="15" r="1"/><circle cx="15" cy="9" r="1"/><circle cx="9" cy="15" r="1"/></svg>${esc(cv.title)}<b>${count(cv.id)}</b>
+      ${state.view === cv.id ? `<span class="tab-more" data-action="canvas-menu" role="button" aria-label="画布设置">${DOTS}</span>` : ''}</button>`).join('')}
+    <button class="view-add" data-action="add-canvas" title="新建画布"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>画布</button>`;
+}
+function renderBoard() {
   const board = $('#board');
   const scroll = board.scrollLeft;
   const listScroll = Object.fromEntries($$('.list', board).map((l) => [l.dataset.col, l.scrollTop]));
-  board.innerHTML = state.columns.map((col) => `
+  board.innerHTML = columns().map((col) => `
     <section class="column" data-col-id="${col.id}">
       <header class="col-head">
-        <h2 class="col-title" data-action="rename-col" title="点击重命名">${esc(col.title)}</h2>
+        <h2 class="col-title" data-action="rename-area" title="点击重命名">${esc(col.title)}</h2>
         <span class="col-count">${cardsIn(col.id, false).length}</span>
-        <button class="icon-btn" data-action="col-menu" aria-label="列操作" aria-haspopup="menu"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
+        <button class="icon-btn" data-action="col-menu" aria-label="列操作" aria-haspopup="menu">${DOTS}</button>
       </header>
       <div class="list" data-col="${col.id}">${listHTML(col.id, '把文件拖到这里')}</div>
       <div class="col-foot"><button class="add-inline" data-action="add-note-col"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>添加便签</button></div>
     </section>`).join('') + `<button class="add-column" data-action="add-col"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新建列</button>`;
   board.scrollLeft = scroll;
   $$('.list', board).forEach((l) => { if (listScroll[l.dataset.col]) l.scrollTop = listScroll[l.dataset.col]; });
-
+}
+function renderZones() {
+  const zs = zones();
+  const nt = cardsIn(TRASH, false).length;
+  $('#zoneTabs').innerHTML = zs.map((z) => `<button role="tab" class="tab" data-zone="${z.id}" data-drop="${z.id}" aria-selected="${state.zone === z.id}">${esc(z.title)} <b>${cardsIn(z.id, false).length}</b></button>`).join('')
+    + `<button role="tab" class="tab trash-tab" data-zone="${TRASH}" data-drop="${TRASH}" aria-selected="${state.zone === TRASH}" title="回收站"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg><b>${nt}</b></button>`
+    + `<button class="tab add-zone" data-action="add-zone" title="新建功能区" aria-label="新建功能区"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>`;
+  const z = area(state.zone);
   const dl = $('#draftsList');
-  dl.dataset.col = state.tab;
-  dl.innerHTML = listHTML(state.tab, state.tab === DRAFTS ? '暂时不用的东西拖到这里' : '回收站是空的');
-  $$('.tab').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tab === state.tab)));
-  const nd = cardsIn(DRAFTS, false).length, nt = cardsIn(TRASH, false).length;
-  $('#draftsCount').textContent = nd;
-  $('#trashCount').textContent = nt;
-  $('#draftsBadge').textContent = nd;
-  $('#draftsDesc').textContent = state.tab === DRAFTS
-    ? '暂存区：放进来的东西不会丢，随时拖回看板。'
-    : '删除的卡片先进入这里，可恢复；只有「永久删除」才会真正移除。';
-  $('#draftsFoot').innerHTML = state.tab === TRASH && nt ? `<button class="btn" data-action="empty-trash">清空回收站</button>` : '';
-  loadThumbs();
+  dl.dataset.col = state.zone;
+  dl.innerHTML = listHTML(state.zone, state.zone === TRASH ? '回收站是空的' : `把文件拖到「${esc(z?.title)}」`);
+  let desc;
+  if (state.zone === TRASH) desc = '删除的卡片先进入这里，可恢复；只有「永久删除」才会真正移除。';
+  else desc = (z?.desc || '自定义功能区，放什么都行。') + (z?.ttlDays > 0 ? ` 放入超过 ${z.ttlDays} 天会自动移到回收站。` : '');
+  $('#draftsDesc').textContent = desc;
+  $('#zoneMenuBtn').hidden = state.zone === TRASH;
+  $('#draftsFoot').innerHTML = state.zone === TRASH && nt ? `<button class="btn" data-action="empty-trash">清空回收站</button>` : '';
+  $('#zonesBadge').textContent = zs.reduce((n, z2) => n + cardsIn(z2.id, false).length, 0);
 }
 async function urlFor(id) {
   if (state.urls.has(id)) return state.urls.get(id);
   const card = findCard(id);
-  let blob;
-  if (card?.kind === 'note') blob = new Blob([card.text || ''], { type: 'text/plain;charset=utf-8' });
-  else blob = await db.getBlob(id);
+  if (card?.kind === 'note') return URL.createObjectURL(new Blob([card.text || ''], { type: 'text/plain;charset=utf-8' }));
+  const blob = await db.getBlob(id);
   if (!blob) return null;
-  if (card?.kind === 'note') return URL.createObjectURL(blob); // 便签内容会变，不缓存
   const url = URL.createObjectURL(blob);
   state.urls.set(id, url);
   return url;
@@ -176,22 +262,207 @@ function loadThumbs() {
   });
 }
 
+// ---------- 无限画布 ----------
+const CARD_W = 232;
+const cam = () => state.cams[state.view] || (state.cams[state.view] = { x: 80, y: 60, z: 1 });
+const saveCam = () => ls.set('cams', state.cams);
+function applyCam() {
+  const c = cam();
+  $('#world').style.transform = `translate(${c.x}px, ${c.y}px) scale(${c.z})`;
+  const vp = $('#viewport');
+  vp.style.backgroundPosition = `${c.x}px ${c.y}px`;
+  vp.style.backgroundSize = `${24 * c.z}px ${24 * c.z}px`;
+  $('#zoomLabel').textContent = `${Math.round(c.z * 100)}%`;
+}
+function renderCanvas() {
+  const list = cardsIn(state.view, false);
+  $('#world').innerHTML = list.map((c) => cardHTML(c, true)).join('');
+  $('#canvasEmpty').hidden = list.length > 0;
+  applyCam();
+}
+function toWorld(clientX, clientY) {
+  const r = $('#viewport').getBoundingClientRect(), c = cam();
+  return { x: (clientX - r.left - c.x) / c.z, y: (clientY - r.top - c.y) / c.z };
+}
+function viewCenter() {
+  const r = $('#viewport').getBoundingClientRect();
+  if (!r.width) return { x: 0, y: 0 };
+  const p = toWorld(r.left + r.width / 2, r.top + r.height / 2);
+  return { x: p.x - CARD_W / 2, y: p.y - 40 };
+}
+function zoomAt(factor, clientX, clientY) {
+  const c = cam(), r = $('#viewport').getBoundingClientRect();
+  if (clientX == null) { clientX = r.left + r.width / 2; clientY = r.top + r.height / 2; }
+  const z = Math.min(3, Math.max(0.15, c.z * factor));
+  const px = clientX - r.left, py = clientY - r.top;
+  c.x = px - (px - c.x) * (z / c.z);
+  c.y = py - (py - c.y) * (z / c.z);
+  c.z = z;
+  applyCam(); saveCam();
+}
+function zoomFit() {
+  const els = $$('#world .card');
+  const c = cam();
+  if (!els.length) { Object.assign(c, { x: 80, y: 60, z: 1 }); applyCam(); saveCam(); return; }
+  let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+  for (const el of els) {
+    const x = el.offsetLeft, y = el.offsetTop;
+    x1 = Math.min(x1, x); y1 = Math.min(y1, y); x2 = Math.max(x2, x + el.offsetWidth); y2 = Math.max(y2, y + el.offsetHeight);
+  }
+  const r = $('#viewport').getBoundingClientRect(), pad = 60;
+  const z = Math.min(1.2, Math.max(0.15, Math.min((r.width - pad * 2) / (x2 - x1), (r.height - pad * 2) / (y2 - y1))));
+  Object.assign(c, { z, x: (r.width - (x2 - x1) * z) / 2 - x1 * z, y: (r.height - (y2 - y1) * z) / 2 - y1 * z });
+  applyCam(); saveCam();
+}
+async function tidyCanvas() {
+  const list = cardsIn(state.view, false);
+  if (!list.length) return;
+  await waitImgs();
+  const cols = Math.max(1, Math.ceil(Math.sqrt(list.length * 1.6)));
+  const heights = new Array(cols).fill(0);
+  for (const card of list) {
+    const el = $(`#world .card[data-id="${card.id}"]`);
+    const i = heights.indexOf(Math.min(...heights));
+    card.x = i * (CARD_W + 52); card.y = heights[i];
+    heights[i] += (el?.offsetHeight || 80) + 24;
+  }
+  await db.putMany('cards', list);
+  await changed();
+  zoomFit();
+}
+
+// 画布交互：平移、缩放、拖动卡片
+const vp = $('#viewport');
+const pointers = new Map();
+let pan = null, pinch = null, cardDrag = null, suppressClick = false;
+vp.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 && e.pointerType === 'mouse') return;
+  const cardEl = e.target.closest('.card');
+  if (cardEl && !e.target.closest('.more, .export-handle')) {
+    const card = findCard(cardEl.dataset.id);
+    cardDrag = { el: cardEl, card, sx: e.clientX, sy: e.clientY, x: card.x || 0, y: card.y || 0, moved: false, id: e.pointerId };
+    try { cardEl.setPointerCapture(e.pointerId); } catch {}
+    return;
+  }
+  if (cardEl) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  try { vp.setPointerCapture(e.pointerId); } catch {}
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) }; pan = null;
+  } else {
+    const c = cam();
+    pan = { sx: e.clientX, sy: e.clientY, x: c.x, y: c.y, moved: false };
+  }
+});
+vp.addEventListener('pointermove', (e) => {
+  if (cardDrag && e.pointerId === cardDrag.id) {
+    const dx = e.clientX - cardDrag.sx, dy = e.clientY - cardDrag.sy;
+    if (!cardDrag.moved && Math.hypot(dx, dy) < 4) return;
+    if (!cardDrag.moved) {
+      cardDrag.moved = true;
+      cardDrag.el.classList.add('lifting');
+      cardDrag.el.style.zIndex = topOrder(state.view) + 1;
+      document.body.classList.add('is-dragging-card');
+    }
+    const z = cam().z;
+    cardDrag.el.style.left = `${cardDrag.x + dx / z}px`;
+    cardDrag.el.style.top = `${cardDrag.y + dy / z}px`;
+    highlightZoneUnder(e.clientX, e.clientY, cardDrag.el);
+    return;
+  }
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    zoomAt(d / pinch.d, (a.x + b.x) / 2, (a.y + b.y) / 2);
+    pinch.d = d;
+  } else if (pan) {
+    const c = cam();
+    c.x = pan.x + e.clientX - pan.sx; c.y = pan.y + e.clientY - pan.sy;
+    if (Math.hypot(e.clientX - pan.sx, e.clientY - pan.sy) > 3) { pan.moved = true; vp.classList.add('panning'); }
+    applyCam();
+  }
+});
+async function endPointer(e) {
+  if (cardDrag && e.pointerId === cardDrag.id) {
+    const d = cardDrag; cardDrag = null;
+    document.body.classList.remove('is-dragging-card');
+    clearDropUI();
+    if (!d.moved) return;
+    suppressClick = true; setTimeout(() => { suppressClick = false; }, 0);
+    d.el.classList.remove('lifting');
+    const zone = e.type === 'pointerup' ? zoneUnder(e.clientX, e.clientY, d.el) : null;
+    if (zone) return moveCard(d.card.id, zone, 0);
+    d.card.x = parseFloat(d.el.style.left); d.card.y = parseFloat(d.el.style.top);
+    d.card.order = topOrder(state.view);
+    await saveCard(d.card);
+    await changed();
+    return;
+  }
+  if (!pointers.has(e.pointerId)) return;
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinch = null;
+  if (pan) { vp.classList.remove('panning'); saveCam(); }
+  if (!pointers.size) pan = null;
+}
+vp.addEventListener('pointerup', endPointer);
+vp.addEventListener('pointercancel', endPointer);
+// 拖动画布卡片时，经过右侧功能区就高亮，松手即放入
+function zoneUnder(x, y, el) {
+  el.style.pointerEvents = 'none';
+  const hit = document.elementFromPoint(x, y);
+  el.style.pointerEvents = '';
+  const t = hit?.closest('#drafts [data-drop], #draftsList, .view-tab[data-drop]');
+  if (!t) return null;
+  const id = t.dataset.drop || t.dataset.col;
+  return id && id !== state.view ? id : null;
+}
+function highlightZoneUnder(x, y, el) {
+  clearDropUI();
+  const id = zoneUnder(x, y, el);
+  if (!id) return;
+  const t = id === state.zone ? $('#draftsList') : $(`[data-drop="${CSS.escape(id)}"]`);
+  t?.classList.add('drop-active');
+}
+vp.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  if (e.ctrlKey || e.metaKey) return zoomAt(Math.exp(-e.deltaY * 0.0025), e.clientX, e.clientY);
+  const c = cam();
+  c.x -= e.deltaX; c.y -= e.deltaY;
+  applyCam();
+  clearTimeout(vp._t); vp._t = setTimeout(saveCam, 200);
+}, { passive: false });
+vp.addEventListener('dblclick', async (e) => {
+  if (e.target.closest('.card')) return;
+  const p = toWorld(e.clientX, e.clientY);
+  await newNote(state.view, { x: p.x - CARD_W / 2, y: p.y - 30 });
+});
+
 // ---------- 添加文件 ----------
-async function addFiles(files, colId, index = null) {
+async function addFiles(files, areaId, index = null, pos = null) {
   files = files.filter((f) => f && f.name !== '.DS_Store');
   if (!files.length) return;
-  if (!colId) colId = state.columns[0]?.id || DRAFTS;
-  if (index == null) index = cardsIn(colId, false).length;
+  if (!areaId || !area(areaId)) areaId = defaultTarget();
+  const canvas = isCanvas(areaId);
+  if (canvas && !pos) pos = state.view === areaId ? viewCenter() : { x: 0, y: 0 };
+  if (index == null) index = cardsIn(areaId, false).length;
   let ok = 0;
+  const added = [];
   const t = files.length > 1 ? toast(`正在保存 0/${files.length}…`, { sticky: true }) : null;
+  const perRow = Math.max(1, Math.ceil(Math.sqrt(files.length)));
   for (const f of files) {
+    const now = Date.now();
     const card = {
-      id: uid(), kind: 'file', name: f.name || `粘贴的文件-${Date.now()}`, type: f.type || '', size: f.size,
-      columnId: colId, order: orderAt(colId, index + ok), createdAt: Date.now(), updatedAt: Date.now(),
+      id: uid(), kind: 'file', name: f.name || `粘贴的文件-${now}`, type: f.type || '', size: f.size,
+      columnId: areaId, order: canvas ? topOrder(areaId) : orderAt(areaId, index + ok), createdAt: now, updatedAt: now, enteredAt: now,
     };
+    if (canvas) { card.x = pos.x + (ok % perRow) * (CARD_W + 20); card.y = pos.y + Math.floor(ok / perRow) * 120; }
     try {
       await db.addFile(card, f);
       state.cards.push(card);
+      added.push(card);
       ok++;
       if (t) t.set(`正在保存 ${ok}/${files.length}…`);
     } catch (e) {
@@ -202,13 +473,28 @@ async function addFiles(files, colId, index = null) {
   }
   t?.close();
   if (ok) {
-    toast(`已保存 ${ok} 个文件到「${colName(colId)}」`);
+    toast(`已保存 ${ok} 个文件到「${areaName(areaId)}」`);
     requestPersist();
     await changed();
+    if (canvas && ok > 1 && state.view === areaId) await masonry(added, pos);
   }
 }
-
-// 递归读取拖入的文件夹
+// 按真实高度瀑布流排列一组画布卡片，避免重叠
+const waitImgs = () => Promise.all($$('#world img[data-thumb]').map((img) => (img.complete && img.naturalWidth) ? 0
+  : new Promise((r) => { img.addEventListener('load', r, { once: true }); img.addEventListener('error', r, { once: true }); setTimeout(r, 1500); })));
+async function masonry(list, pos) {
+  await waitImgs();
+  const cols = Math.min(4, Math.max(1, Math.ceil(Math.sqrt(list.length))));
+  const heights = new Array(cols).fill(0);
+  for (const card of list) {
+    const el = $(`#world .card[data-id="${card.id}"]`);
+    const i = heights.indexOf(Math.min(...heights));
+    card.x = pos.x + i * (CARD_W + 52); card.y = pos.y + heights[i];
+    heights[i] += (el?.offsetHeight || 80) + 20;
+    if (el) { el.style.left = `${card.x}px`; el.style.top = `${card.y}px`; }
+  }
+  await db.putMany('cards', list);
+}
 async function filesFromDataTransfer(dt) {
   const entries = [...(dt.items || [])].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
   if (!entries.length || !entries.some((e) => e.isDirectory)) return [...(dt.files || [])];
@@ -229,21 +515,29 @@ async function filesFromDataTransfer(dt) {
 }
 
 // ---------- 卡片操作 ----------
-async function moveCard(id, colId, index = 0) {
+async function moveCard(id, areaId, index = 0, pos = null) {
   const card = findCard(id);
   if (!card) return;
-  if (colId === TRASH) return trashCard(id);
-  card.order = orderAt(colId, index, id);
+  if (areaId === TRASH) return trashCard(id);
+  if (isCanvas(areaId)) {
+    const p = pos || (state.view === areaId ? viewCenter() : { x: 0, y: 0 });
+    card.x = p.x; card.y = p.y;
+    card.order = topOrder(areaId);
+  } else {
+    card.order = orderAt(areaId, index, id);
+  }
+  if (card.columnId !== areaId) card.enteredAt = Date.now();
   if (card.columnId === TRASH) delete card.trashedAt;
-  card.columnId = colId;
+  const moved = card.columnId !== areaId;
+  card.columnId = areaId;
   await saveCard(card);
   await changed();
+  if (moved && areaId !== state.view && !columns().some((c) => c.id === areaId && state.view === BOARD)) toast(`已移到「${areaName(areaId)}」`);
 }
 async function trashCard(id) {
   const card = findCard(id);
   if (!card || card.columnId === TRASH) return;
-  const from = card.columnId;
-  card.prevColumnId = from;
+  card.prevColumnId = card.columnId;
   card.columnId = TRASH;
   card.trashedAt = Date.now();
   await saveCard(card);
@@ -253,13 +547,14 @@ async function trashCard(id) {
 async function restoreCard(id) {
   const card = findCard(id);
   if (!card) return;
-  const target = state.columns.some((c) => c.id === card.prevColumnId) || card.prevColumnId === DRAFTS ? card.prevColumnId : (state.columns[0]?.id || DRAFTS);
-  card.order = orderAt(target, cardsIn(target, false).length, id);
+  const target = area(card.prevColumnId) ? card.prevColumnId : (columns()[0]?.id || fallbackZone());
+  card.order = isCanvas(target) ? topOrder(target) : orderAt(target, cardsIn(target, false).length, id);
   card.columnId = target;
+  card.enteredAt = Date.now();
   delete card.trashedAt;
   await saveCard(card);
   await changed();
-  toast(`已恢复到「${colName(target)}」`);
+  toast(`已恢复到「${areaName(target)}」`);
 }
 async function purgeCard(id) {
   await db.deleteCard(id);
@@ -276,12 +571,15 @@ async function download(id) {
   a.download = card.kind === 'note' ? `${card.name || '便签'}.txt` : card.name;
   document.body.appendChild(a); a.click(); a.remove();
 }
-async function newNote(colId) {
-  colId = colId || state.columns[0]?.id || DRAFTS;
+async function newNote(areaId, pos) {
+  areaId = areaId || defaultTarget();
   const res = await noteEditor({ name: '', text: '' });
   if (!res) return;
-  const card = { id: uid(), kind: 'note', name: res.name || '未命名便签', text: res.text, columnId: colId,
-    order: orderAt(colId, cardsIn(colId, false).length), createdAt: Date.now(), updatedAt: Date.now() };
+  const now = Date.now();
+  const canvas = isCanvas(areaId);
+  const card = { id: uid(), kind: 'note', name: res.name || '未命名便签', text: res.text, columnId: areaId,
+    order: canvas ? topOrder(areaId) : orderAt(areaId, cardsIn(areaId, false).length), createdAt: now, updatedAt: now, enteredAt: now };
+  if (canvas) Object.assign(card, pos || viewCenter());
   await db.put('cards', card);
   state.cards.push(card);
   await changed();
@@ -295,44 +593,66 @@ async function editNote(card) {
   await changed();
 }
 
-// ---------- 列操作 ----------
-async function addColumn() {
-  const title = await prompt({ title: '新建列', placeholder: '例如：资料、待审阅…', ok: '创建' });
+// ---------- 区域（列 / 功能区 / 画布）操作 ----------
+const KIND_LABEL = { column: '列', zone: '功能区', canvas: '画布' };
+async function addArea(kind) {
+  const title = await prompt({ title: `新建${KIND_LABEL[kind]}`, placeholder: kind === 'zone' ? '例如：灵感、参考图…' : kind === 'canvas' ? '例如：项目脑图' : '例如：资料、待审阅…', ok: '创建' });
   if (!title) return;
-  const last = state.columns[state.columns.length - 1];
-  const col = { id: uid(), title, order: last ? last.order + 1024 : 0 };
-  await db.put('columns', col);
-  state.columns.push(col);
+  const list = areasOf(kind);
+  const a = { id: uid(), kind, title, order: list.length ? list[list.length - 1].order + 1024 : 0 };
+  await saveArea(a);
+  state.areas.push(a);
+  if (kind === 'zone') { state.zone = a.id; ls.set('zone', a.id); }
+  if (kind === 'canvas') setView(a.id);
   await changed();
-  $('#board').scrollTo({ left: $('#board').scrollWidth, behavior: 'smooth' });
+  if (kind === 'column') $('#board').scrollTo({ left: $('#board').scrollWidth, behavior: 'smooth' });
 }
-async function renameColumn(col) {
-  const title = await prompt({ title: '重命名列', value: col.title, ok: '保存' });
-  if (!title || title === col.title) return;
-  col.title = title;
-  await db.put('columns', col);
-  await changed();
-}
-async function moveColumn(col, dir) {
-  const i = state.columns.indexOf(col), j = i + dir;
-  if (j < 0 || j >= state.columns.length) return;
-  const other = state.columns[j];
-  [col.order, other.order] = [other.order, col.order];
-  await db.putMany('columns', [col, other]);
-  state.columns.sort(byOrder);
+async function renameArea(a) {
+  const title = await prompt({ title: `重命名${KIND_LABEL[kindOf(a)]}`, value: a.title, ok: '保存' });
+  if (!title || title === a.title) return;
+  a.title = title;
+  await saveArea(a);
   await changed();
 }
-async function deleteColumn(col) {
-  const cards = cardsIn(col.id, false);
-  if (state.columns.length <= 1) return toast('至少保留一列', { error: true });
-  const ok = await confirmBox({ title: `删除列「${col.title}」？`, body: cards.length ? `列里的 ${cards.length} 张卡片会移到草稿区，不会丢失。` : '这一列是空的。', ok: '删除列', danger: true });
+async function moveArea(a, dir) {
+  const list = areasOf(kindOf(a));
+  const i = list.indexOf(a), j = i + dir;
+  if (j < 0 || j >= list.length) return;
+  const other = list[j];
+  [a.order, other.order] = [other.order, a.order];
+  await db.putMany('columns', [a, other]);
+  await changed();
+}
+async function deleteArea(a) {
+  const kind = kindOf(a);
+  if (areasOf(kind).length <= 1) return toast(`至少保留一个${KIND_LABEL[kind]}`, { error: true });
+  const cards = cardsIn(a.id, false);
+  let target = kind === 'zone' ? zones().find((z) => z.id !== a.id)?.id : fallbackZone();
+  if (target === a.id) target = zones().find((z) => z.id !== a.id)?.id;
+  const ok = await confirmBox({ title: `删除${KIND_LABEL[kind]}「${a.title}」？`, body: cards.length ? `里面的 ${cards.length} 张卡片会移到「${areaName(target)}」，不会丢失。` : `这个${KIND_LABEL[kind]}是空的。`, ok: '删除', danger: true });
   if (!ok) return;
-  let order = orderAt(DRAFTS, cardsIn(DRAFTS, false).length);
-  for (const c of cards) { c.columnId = DRAFTS; c.order = order; order += 1024; }
+  let order = orderAt(target, cardsIn(target, false).length);
+  for (const c of cards) { c.columnId = target; c.order = order; c.enteredAt = Date.now(); order += 1024; }
   if (cards.length) await db.putMany('cards', cards);
-  await db.del('columns', col.id);
-  state.columns = state.columns.filter((c) => c !== col);
+  await db.del('columns', a.id);
+  state.areas = state.areas.filter((x) => x !== a);
+  if (state.view === a.id) setView(BOARD);
+  if (state.zone === a.id) { state.zone = target; ls.set('zone', target); }
   await changed();
+}
+async function setZoneTtl(z) {
+  const v = await prompt({ title: `「${z.title}」自动清理`, value: String(z.ttlDays || ''), placeholder: '天数，留空或 0 表示不自动清理', ok: '保存', optional: true });
+  if (v == null) return;
+  const n = Math.max(0, Math.floor(Number(v) || 0));
+  z.ttlDays = n || undefined;
+  await saveArea(z);
+  await changed();
+  toast(n ? `放入超过 ${n} 天的卡片会自动移到回收站` : '已关闭自动清理');
+  sweepExpired();
+}
+function setView(v) {
+  state.view = v;
+  ls.set('view', v);
 }
 
 // ---------- 预览 ----------
@@ -342,22 +662,19 @@ async function preview(id) {
   if (card.kind === 'note') return editNote(card);
   const url = await urlFor(id);
   const t = typeOf(card);
-  const v = $('#viewer'), inner = $('#viewerInner');
   let body;
   if (!url) body = `<div class="viewer-none">找不到文件内容</div>`;
   else if (t.k === 'image') body = `<img src="${url}" alt="${esc(card.name)}">`;
   else if (t.k === 'video') body = `<video src="${url}" controls autoplay></video>`;
   else if (t.k === 'audio') body = `<audio src="${url}" controls autoplay></audio>`;
   else if (t.k === 'pdf') body = `<iframe src="${url}" title="${esc(card.name)}"></iframe>`;
-  else if (isTextual(card) && card.size < 2 * 1024 * 1024) {
-    const text = await (await db.getBlob(id)).text();
-    body = `<pre>${esc(text)}</pre>`;
-  } else body = `<div class="viewer-none"><div class="type-icon" style="--c:${t.c}">${esc(extOf(card.name).slice(0, 4) || t.label)}</div><div>此类型无法在浏览器内预览</div><button class="btn primary" data-action="download" data-id="${id}">下载文件</button></div>`;
-  inner.innerHTML = `<div class="viewer-head"><div class="name">${esc(card.name)}</div><span class="meta">${fmtSize(card.size)}</span>
+  else if (isTextual(card) && card.size < 2 * 1024 * 1024) body = `<pre>${esc(await (await db.getBlob(id)).text())}</pre>`;
+  else body = `<div class="viewer-none"><div class="type-icon" style="--c:${t.c}">${esc(extOf(card.name).slice(0, 4) || t.label)}</div><div>此类型无法在浏览器内预览</div><button class="btn primary" data-action="download" data-id="${id}">下载文件</button></div>`;
+  $('#viewerInner').innerHTML = `<div class="viewer-head"><div class="name">${esc(card.name)}</div><span class="meta">${fmtSize(card.size)}</span>
     <button class="icon-btn" data-action="download" data-id="${id}" aria-label="下载"><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg></button>
     <button class="icon-btn" data-action="close-viewer" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
     <div class="viewer-body">${body}</div>`;
-  v.showModal();
+  $('#viewer').showModal();
 }
 // 关闭时清空内容，确保视频/音频停止播放（不只依赖 close 事件）
 function closeViewer() { const v = $('#viewer'); if (v.open) v.close(); $('#viewerInner').innerHTML = ''; }
@@ -393,8 +710,8 @@ function dialog(html, onSubmit) {
 }
 // 确认按钮放在 DOM 前面（回车即确认），CSS 用 row-reverse 让它显示在右侧
 const actions = (ok, danger) => `<div class="modal-actions"><button class="btn ${danger ? 'danger' : 'primary'}" value="ok">${ok}</button><button class="btn" value="cancel" formnovalidate>取消</button></div>`;
-const prompt = ({ title, value = '', placeholder = '', ok = '确定' }) =>
-  dialog(`<h3>${esc(title)}</h3><input type="text" name="v" value="${esc(value)}" placeholder="${esc(placeholder)}" maxlength="120" required>${actions(ok)}`,
+const prompt = ({ title, value = '', placeholder = '', ok = '确定', optional = false }) =>
+  dialog(`<h3>${esc(title)}</h3><input type="text" name="v" value="${esc(value)}" placeholder="${esc(placeholder)}" maxlength="120" ${optional ? '' : 'required'}>${actions(ok)}`,
     (f) => f.v.value.trim());
 const confirmBox = ({ title, body = '', ok = '确定', danger }) =>
   dialog(`<h3>${esc(title)}</h3>${body ? `<p>${esc(body)}</p>` : ''}${actions(ok, danger)}`, () => true);
@@ -433,28 +750,35 @@ function cardMenu(anchor, card) {
         if (await confirmBox({ title: '永久删除？', body: `「${card.name}」将被彻底删除，无法恢复。`, ok: '永久删除', danger: true })) {
           await purgeCard(card.id); await changed();
         } } });
-  } else {
-    items.push({ text: card.kind === 'note' ? '编辑' : '预览', run: () => preview(card.id) },
-      { text: '下载', run: () => download(card.id) },
-      { text: '重命名', run: async () => {
-        const n = await prompt({ title: '重命名', value: card.name, ok: '保存' });
-        if (n && n !== card.name) { card.name = n; await saveCard(card); await changed(); } } },
-      '-', { label: '移动到' });
-    for (const col of state.columns) if (col.id !== card.columnId) items.push({ text: col.title, run: () => moveCard(card.id, col.id, cardsIn(col.id, false).length) });
-    if (card.columnId !== DRAFTS) items.push({ text: '草稿区', run: () => moveCard(card.id, DRAFTS, 0) });
-    items.push('-', { text: '删除', danger: true, run: () => trashCard(card.id) });
+    return openMenu(anchor, items);
   }
+  items.push({ text: card.kind === 'note' ? '编辑' : '预览', run: () => preview(card.id) },
+    { text: '下载', run: () => download(card.id) },
+    { text: '重命名', run: async () => {
+      const n = await prompt({ title: '重命名', value: card.name, ok: '保存' });
+      if (n && n !== card.name) { card.name = n; await saveCard(card); await changed(); } } });
+  const dest = (list, label) => {
+    const opts = list.filter((a) => a.id !== card.columnId);
+    if (!opts.length) return;
+    items.push('-', { label });
+    opts.forEach((a) => items.push({ text: a.title, run: () => moveCard(card.id, a.id, kindOf(a) === 'zone' ? 0 : cardsIn(a.id, false).length) }));
+  };
+  dest(columns(), '移到看板');
+  dest(canvases(), '放到画布');
+  dest(zones(), '放入功能区');
+  items.push('-', { text: '删除', danger: true, run: () => trashCard(card.id) });
   openMenu(anchor, items);
 }
-function colMenu(anchor, col) {
-  const i = state.columns.indexOf(col);
-  const items = [
-    { text: '重命名', run: () => renameColumn(col) },
-    { text: '添加便签', run: () => newNote(col.id) },
-  ];
-  if (i > 0) items.push({ text: '向左移', run: () => moveColumn(col, -1) });
-  if (i < state.columns.length - 1) items.push({ text: '向右移', run: () => moveColumn(col, 1) });
-  items.push('-', { text: '删除列', danger: true, run: () => deleteColumn(col) });
+function areaMenu(anchor, a) {
+  const kind = kindOf(a);
+  const list = areasOf(kind), i = list.indexOf(a);
+  const prev = kind === 'column' ? '向左移' : '前移', next = kind === 'column' ? '向右移' : '后移';
+  const items = [{ text: '重命名', run: () => renameArea(a) }];
+  if (kind !== 'canvas') items.push({ text: '添加便签', run: () => newNote(a.id) });
+  if (kind === 'zone') items.push({ text: a.ttlDays ? `自动清理：${a.ttlDays} 天` : '设置自动清理…', run: () => setZoneTtl(a) });
+  if (i > 0) items.push({ text: prev, run: () => moveArea(a, -1) });
+  if (i < list.length - 1) items.push({ text: next, run: () => moveArea(a, 1) });
+  items.push('-', { text: `删除${KIND_LABEL[kind]}`, danger: true, run: () => deleteArea(a) });
   openMenu(anchor, items);
 }
 
@@ -466,6 +790,7 @@ function toast(text, { error, action, onAction, sticky } = {}) {
   const span = document.createElement('span');
   span.textContent = text;
   el.appendChild(span);
+  const close = () => el.remove();
   if (action) {
     const b = document.createElement('button');
     b.textContent = action;
@@ -473,8 +798,8 @@ function toast(text, { error, action, onAction, sticky } = {}) {
     el.appendChild(b);
   }
   $('#toasts').appendChild(el);
-  const close = () => el.remove();
-  if (!sticky) setTimeout(close, action ? 6000 : error ? 6000 : 3000);
+  while ($('#toasts').children.length > 3) $('#toasts').firstChild.remove();
+  if (!sticky) setTimeout(close, action || error ? 6000 : 3000);
   return { close, set: (t) => { span.textContent = t; } };
 }
 
@@ -491,7 +816,7 @@ async function refreshStatus() {
     persisted = await navigator.storage?.persisted?.() || false;
     ({ usage: used = 0, quota = 0 } = (await navigator.storage?.estimate?.()) || {});
   } catch {}
-  chip.textContent = `已用 ${fmtSize(used)}${quota ? ` / ${fmtSize(quota)}` : ''} · ${persisted ? '持久存储已开启' : '普通存储'}`;
+  chip.textContent = `已用 ${fmtSize(used)}${quota ? ` / ${fmtSize(quota)}` : ''} · ${persisted ? '持久存储' : '普通存储'}`;
   chip.className = `status-chip ${persisted ? 'ok' : 'warn'}`;
   const [lastBackup, lastChange] = await Promise.all([db.getMeta('lastBackup', 0), db.getMeta('lastChange', 0)]);
   const bc = $('#backupChip');
@@ -501,19 +826,19 @@ async function refreshStatus() {
 }
 async function storageInfo() {
   const persisted = await navigator.storage?.persisted?.();
-  await dialog(`<h3>数据存在哪里？</h3>
+  const r = await dialog(`<h3>数据存在哪里？</h3>
     <p>所有文件和卡片保存在本浏览器内置的 IndexedDB 数据库中，不会上传到任何服务器。每个文件写入后都会回读校验大小。</p>
-    <p>持久存储：<b>${persisted ? '已开启' : '未开启'}</b>。${persisted ? '浏览器不会因空间紧张自动清理这些数据。' : '浏览器可能在磁盘空间不足时清理数据，建议点「申请持久存储」或定期备份。'}</p>
+    <p>持久存储：<b>${persisted ? '已开启' : '未开启'}</b>。${persisted ? '浏览器不会因空间紧张自动清理这些数据。' : '浏览器可能在磁盘空间不足时清理数据，建议点「申请持久存储」并定期备份。'}</p>
     <p>注意：清除浏览器数据、使用无痕模式或换设备时数据不会跟随，请用「备份」导出 .wbk 文件保存到网盘或硬盘。</p>
-    <div class="modal-actions"><button class="btn primary" value="cancel">知道了</button>${persisted ? '' : '<button class="btn" value="ok">申请持久存储</button>'}</div>`, () => true)
-    .then((r) => r && requestPersist());
+    <div class="modal-actions"><button class="btn primary" value="cancel">知道了</button>${persisted ? '' : '<button class="btn" value="ok">申请持久存储</button>'}</div>`, () => true);
+  if (r) requestPersist();
 }
 async function doBackup() {
   const t = toast('正在打包备份…', { sticky: true });
   try {
     const { blob, count, fileCount } = await db.exportBackup();
-    const d = new Date();
-    const name = `工作台备份-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}.wbk`;
+    const d = new Date(), p = (n) => String(n).padStart(2, '0');
+    const name = `工作台备份-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.wbk`;
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
@@ -537,6 +862,7 @@ async function doRestore(file) {
     await db.importBackup(data, (i, total) => t.set(`正在恢复 ${i}/${total}…`));
     t.close();
     await load();
+    await ensureDefaults();
     toast(`已恢复 ${n} 张卡片`);
     await changed();
   } catch (e) {
@@ -544,21 +870,20 @@ async function doRestore(file) {
   }
 }
 
-// ---------- 拖拽 ----------
+// ---------- 拖拽（HTML5：看板 / 功能区 / 拖入拖出） ----------
 let indicator = null;
 function clearDropUI() {
   indicator?.remove(); indicator = null;
   $$('.drop-active').forEach((el) => el.classList.remove('drop-active'));
 }
-function dropIndex(list, y) {
+function dropBefore(list, y) {
   const cards = $$('.card:not(.dragging)', list);
-  const i = cards.findIndex((c) => { const r = c.getBoundingClientRect(); return y < r.top + r.height / 2; });
-  return { index: i < 0 ? cards.length : i, before: cards[i] || null };
+  return cards.find((c) => { const r = c.getBoundingClientRect(); return y < r.top + r.height / 2; }) || null;
 }
-// 把「可见列表中的位置」映射成「完整列表中的位置」（搜索过滤时两者不同）
-function realIndex(colId, before) {
-  if (!before) return cardsIn(colId, false).filter((c) => c.id !== state.dragId).length;
-  return cardsIn(colId, false).filter((c) => c.id !== state.dragId).findIndex((c) => c.id === before.dataset.id);
+// 可见位置 → 完整列表中的位置（搜索过滤时两者不同）
+function realIndex(areaId, before) {
+  const list = cardsIn(areaId, false).filter((c) => c.id !== state.dragId);
+  return before ? list.findIndex((c) => c.id === before.dataset.id) : list.length;
 }
 const isFileDrag = (e) => !state.dragId && [...(e.dataTransfer?.types || [])].includes('Files');
 
@@ -575,6 +900,7 @@ document.addEventListener('dragstart', (e) => {
   e.dataTransfer.effectAllowed = 'copyMove';
   e.dataTransfer.setData('application/x-workbench-card', card.id);
   e.dataTransfer.setData('text/plain', card.kind === 'note' ? (card.text || card.name) : card.name);
+  if (e.target.closest('.export-handle')) e.dataTransfer.setDragImage(el, 20, 20);
   // Chrome / Edge：拖到桌面或文件夹即可导出文件
   if (card.kind === 'note') {
     const url = URL.createObjectURL(new Blob([card.text || ''], { type: 'text/plain' }));
@@ -594,7 +920,6 @@ document.addEventListener('dragend', () => {
 let fileDepth = 0;
 document.addEventListener('dragenter', (e) => {
   if (isFileDrag(e)) { fileDepth++; document.body.classList.add('file-over'); }
-  // 窄屏：拖着卡片经过「草稿区」按钮时自动展开
   if (state.dragId && e.target.closest?.('.drafts-toggle')) document.body.classList.add('drafts-open');
 });
 document.addEventListener('dragleave', (e) => {
@@ -604,17 +929,17 @@ document.addEventListener('dragover', (e) => {
   const fileDrag = isFileDrag(e);
   if (!fileDrag && !state.dragId) return;
   e.preventDefault(); // 防止浏览器直接打开文件
-  const tab = e.target.closest?.('[data-drop]');
-  const list = e.target.closest?.('.list');
   clearDropUI();
   e.dataTransfer.dropEffect = fileDrag ? 'copy' : 'move';
-  if (tab) { tab.classList.add('drop-active'); return; }
+  const tab = e.target.closest?.('[data-drop]');
+  if (tab && !(fileDrag && tab.dataset.drop === TRASH)) { tab.classList.add('drop-active'); return; }
+  if (e.target.closest?.('#viewport')) { $('#viewport').classList.add('drop-active'); return; }
+  const list = e.target.closest?.('.list');
   if (!list || (fileDrag && list.dataset.col === TRASH)) { if (!fileDrag) e.dataTransfer.dropEffect = 'none'; return; }
   list.classList.add('drop-active');
-  const { before } = dropIndex(list, e.clientY);
   indicator = document.createElement('div');
   indicator.className = 'drop-indicator';
-  list.insertBefore(indicator, before || null);
+  list.insertBefore(indicator, dropBefore(list, e.clientY));
 });
 document.addEventListener('drop', async (e) => {
   const fileDrag = isFileDrag(e);
@@ -622,40 +947,45 @@ document.addEventListener('drop', async (e) => {
   e.preventDefault();
   const dragId = state.dragId;
   const tab = e.target.closest?.('[data-drop]');
-  const list = e.target.closest?.('.list');
-  const before = list ? dropIndex(list, e.clientY).before : null;
+  const onCanvas = !tab && e.target.closest?.('#viewport');
+  const list = !tab && !onCanvas && e.target.closest?.('.list');
+  const before = list ? dropBefore(list, e.clientY) : null;
   fileDepth = 0;
   document.body.classList.remove('file-over');
   clearDropUI();
-  let colId = tab ? tab.dataset.drop : list?.dataset.col;
+  let target = tab ? tab.dataset.drop : onCanvas ? state.view : list?.dataset.col;
+  const pos = onCanvas ? (() => { const p = toWorld(e.clientX, e.clientY); return { x: p.x - CARD_W / 2, y: p.y - 30 }; })() : null;
   if (fileDrag) {
     const files = await filesFromDataTransfer(e.dataTransfer);
-    if (!colId || colId === TRASH) colId = state.columns[0]?.id;
-    return addFiles(files, colId, list && colId === list.dataset.col ? realIndex(colId, before) : null);
+    if (!target || target === TRASH) target = defaultTarget();
+    return addFiles(files, target, list ? realIndex(target, before) : null, pos);
   }
-  if (!colId) return;
-  if (tab) return moveCard(dragId, colId, 0);
-  state.dragId = dragId;
-  const idx = realIndex(colId, before);
-  await moveCard(dragId, colId, idx);
+  if (!target || target === findCard(dragId)?.columnId && tab) return;
+  await moveCard(dragId, target, tab ? 0 : realIndex(target, before), pos);
 });
 
 // ---------- 点击 / 键盘 ----------
 document.addEventListener('click', async (e) => {
-  if (!e.target.closest('#menu') && !e.target.closest('[data-action="card-menu"], [data-action="col-menu"]')) closeMenu();
-  const tab = e.target.closest('.tab');
-  if (tab) { state.tab = tab.dataset.tab; return render(); }
+  if (!e.target.closest('#menu') && !e.target.closest('[aria-haspopup="menu"], [data-action="canvas-menu"]')) closeMenu();
+  if (suppressClick) return;
   const btn = e.target.closest('[data-action]');
+  const viewTab = e.target.closest('[data-view]');
+  if (viewTab && !btn) { setView(viewTab.dataset.view); return render(); }
+  const zoneTab = e.target.closest('[data-zone]');
+  if (zoneTab) { state.zone = zoneTab.dataset.zone; ls.set('zone', state.zone); return renderZones(), loadThumbs(); }
   const cardEl = e.target.closest('.card');
   const colEl = e.target.closest('.column');
-  const col = colEl && state.columns.find((c) => c.id === colEl.dataset.colId);
+  const col = colEl && area(colEl.dataset.colId);
   if (!btn) { if (cardEl) preview(cardEl.dataset.id); return; }
-  const a = btn.dataset.action;
-  switch (a) {
+  switch (btn.dataset.action) {
     case 'card-menu': return menuAnchor === btn ? closeMenu() : cardMenu(btn, findCard(cardEl.dataset.id));
-    case 'col-menu': return menuAnchor === btn ? closeMenu() : colMenu(btn, col);
-    case 'rename-col': return renameColumn(col);
-    case 'add-col': return addColumn();
+    case 'col-menu': return menuAnchor === btn ? closeMenu() : areaMenu(btn, col);
+    case 'zone-menu': return menuAnchor === btn ? closeMenu() : areaMenu(btn, area(state.zone));
+    case 'canvas-menu': return menuAnchor === btn ? closeMenu() : areaMenu(btn, area(state.view));
+    case 'rename-area': return renameArea(col);
+    case 'add-col': return addArea('column');
+    case 'add-zone': return addArea('zone');
+    case 'add-canvas': return addArea('canvas');
     case 'add-note-col': return newNote(col.id);
     case 'new-note': return newNote();
     case 'add-files': return $('#fileInput').click();
@@ -664,6 +994,11 @@ document.addEventListener('click', async (e) => {
     case 'storage-info': return storageInfo();
     case 'download': return download(btn.dataset.id);
     case 'close-viewer': return closeViewer();
+    case 'zoom-in': return zoomAt(1.2);
+    case 'zoom-out': return zoomAt(1 / 1.2);
+    case 'zoom-reset': return zoomAt(1 / cam().z);
+    case 'zoom-fit': return zoomFit();
+    case 'tidy': return tidyCanvas();
     case 'toggle-drafts': {
       const open = document.body.classList.toggle('drafts-open');
       $('.drafts-toggle').setAttribute('aria-expanded', String(open));
@@ -682,9 +1017,19 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { closeMenu(); document.body.classList.remove('drafts-open'); }
   const cardEl = e.target.closest?.('.card');
   if (cardEl && e.target === cardEl) {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); preview(cardEl.dataset.id); }
-    if (e.key === 'Delete') { const c = findCard(cardEl.dataset.id); c.columnId === TRASH ? null : trashCard(c.id); }
-    if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) { e.preventDefault(); cardMenu($('.more', cardEl), findCard(cardEl.dataset.id)); }
+    const card = findCard(cardEl.dataset.id);
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); preview(card.id); }
+    if (e.key === 'Delete' && card.columnId !== TRASH) trashCard(card.id);
+    if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) { e.preventDefault(); cardMenu($('.more', cardEl), card); }
+    // 画布上用方向键微调位置
+    if (cardEl.classList.contains('on-canvas') && e.key.startsWith('Arrow')) {
+      e.preventDefault();
+      const s = e.shiftKey ? 40 : 10;
+      card.x = (card.x || 0) + (e.key === 'ArrowLeft' ? -s : e.key === 'ArrowRight' ? s : 0);
+      card.y = (card.y || 0) + (e.key === 'ArrowUp' ? -s : e.key === 'ArrowDown' ? s : 0);
+      cardEl.style.left = `${card.x}px`; cardEl.style.top = `${card.y}px`;
+      clearTimeout(cardEl._t); cardEl._t = setTimeout(() => saveCard(card), 300);
+    }
   }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#search').focus(); }
 });
@@ -701,9 +1046,10 @@ document.addEventListener('paste', (e) => {
   const text = e.clipboardData?.getData('text/plain');
   if (text?.trim()) {
     e.preventDefault();
-    const colId = state.columns[0]?.id || DRAFTS;
-    const card = { id: uid(), kind: 'note', name: text.trim().split('\n')[0].slice(0, 40), text, columnId: colId,
-      order: orderAt(colId, cardsIn(colId, false).length), createdAt: Date.now(), updatedAt: Date.now() };
+    const areaId = defaultTarget(), now = Date.now();
+    const card = { id: uid(), kind: 'note', name: text.trim().split('\n')[0].slice(0, 40), text, columnId: areaId,
+      order: isCanvas(areaId) ? topOrder(areaId) : orderAt(areaId, cardsIn(areaId, false).length), createdAt: now, updatedAt: now, enteredAt: now };
+    if (isCanvas(areaId)) Object.assign(card, viewCenter());
     db.put('cards', card).then(() => { state.cards.push(card); toast('已粘贴为便签'); changed(); });
   }
 });
@@ -717,7 +1063,6 @@ $('#restoreInput').addEventListener('change', (e) => { const f = e.target.files[
 window.addEventListener('resize', closeMenu);
 $('#board').addEventListener('scroll', closeMenu, { passive: true });
 
-// 多个标签页之间保持同步
 channel && (channel.onmessage = async () => { await load(); render(); refreshStatus(); });
 
 // ---------- 启动 ----------
@@ -729,6 +1074,8 @@ channel && (channel.onmessage = async () => { await load(); render(); refreshSta
     render();
     refreshStatus();
     if (state.cards.length) requestPersist();
+    await sweepExpired();
+    setInterval(sweepExpired, 3600e3);
   } catch (e) {
     console.error(e);
     $('#board').innerHTML = `<div class="empty" style="margin:40px auto;max-width:420px">无法打开本地数据库：${esc(e.message || e)}<br>请确认没有使用无痕模式，或刷新重试。</div>`;

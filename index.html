@@ -4,11 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>个人工作台</title>
-  <meta name="description" content="拖拽式看板文件工作台：任意类型文件拖入拖出，草稿区暂存，本地数据库持久保存。">
+  <meta name="description" content="模块化文件工作台：看板 + 无限画布 + 素材区/草稿区/临时文件区，任意文件拖入拖出，本地数据库持久保存。">
   <meta name="theme-color" content="#f6f5f2" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#16171a" media="(prefers-color-scheme: dark)">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233b5bdb'/%3E%3Crect x='7' y='8' width='5' height='16' rx='1.5' fill='white'/%3E%3Crect x='13.5' y='8' width='5' height='11' rx='1.5' fill='white' opacity='.8'/%3E%3Crect x='20' y='8' width='5' height='7' rx='1.5' fill='white' opacity='.6'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css?v=1">
+  <link rel="stylesheet" href="style.css?v=2">
 </head>
 <body>
   <header class="topbar">
@@ -18,53 +18,73 @@
     </div>
     <label class="search">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-      <input id="search" type="search" placeholder="搜索文件和便签…" autocomplete="off" aria-label="搜索">
+      <input id="search" type="search" placeholder="搜索文件和便签…  Ctrl+K" autocomplete="off" aria-label="搜索">
     </label>
     <div class="actions">
-      <button class="btn" data-action="add-files" title="选择文件添加到第一列">
+      <button class="btn" data-action="add-files" title="选择文件添加到当前页面">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>添加文件</span>
       </button>
       <button class="btn" data-action="new-note" title="新建便签">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h10l4 4v12H5z"/><path d="M9 12h6M9 16h4"/></svg><span>便签</span>
       </button>
-      <button class="btn" data-action="backup" id="backupBtn" title="导出完整备份（含所有文件）">
+      <button class="btn" data-action="backup" title="导出完整备份（含所有文件）">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg><span>备份</span>
       </button>
       <button class="btn ghost" data-action="restore" title="从备份恢复">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V8m0 0-4 4m4-4 4 4"/><path d="M5 5h14"/></svg><span>恢复</span>
       </button>
-      <button class="btn ghost drafts-toggle" data-action="toggle-drafts" aria-controls="drafts" aria-expanded="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v12H4z"/><path d="M8 7V5h8v2"/></svg><span>草稿区</span><b class="badge" id="draftsBadge">0</b>
+      <button class="btn ghost drafts-toggle" data-action="toggle-drafts" aria-controls="drafts" aria-expanded="false" title="功能区">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M14 4v16"/></svg><span>功能区</span><b class="badge" id="zonesBadge">0</b>
       </button>
     </div>
   </header>
 
-  <div class="statusbar" id="statusbar">
-    <button class="status-chip" data-action="storage-info" id="storageChip">正在检查存储…</button>
-    <button class="status-chip" data-action="backup" id="backupChip">尚未备份</button>
-    <span class="hint">提示：从桌面拖入文件；按住卡片拖到桌面即可导出（Chrome / Edge）；可直接 Ctrl+V 粘贴</span>
-  </div>
+  <nav class="viewbar" aria-label="页面">
+    <div class="views" id="views" role="tablist"></div>
+    <div class="status">
+      <button class="status-chip" data-action="storage-info" id="storageChip">正在检查存储…</button>
+      <button class="status-chip" data-action="backup" id="backupChip">尚未备份</button>
+    </div>
+  </nav>
 
   <main class="layout">
     <section class="board" id="board" aria-label="看板"></section>
 
-    <aside class="drafts" id="drafts" aria-label="草稿区">
-      <div class="drafts-head">
-        <div class="tabs" role="tablist">
-          <button role="tab" class="tab" data-tab="drafts" data-drop="drafts" aria-selected="true">草稿区 <b id="draftsCount">0</b></button>
-          <button role="tab" class="tab" data-tab="trash" data-drop="trash" aria-selected="false">回收站 <b id="trashCount">0</b></button>
+    <section class="canvas-view" id="canvasView" aria-label="画布" hidden>
+      <div class="viewport" id="viewport" tabindex="-1">
+        <div class="world" id="world"></div>
+        <div class="canvas-empty" id="canvasEmpty">
+          <b>无限画布</b>
+          <span>把文件拖进来，随意摆放 · 双击空白处新建便签<br>拖动空白处平移 · Ctrl + 滚轮缩放</span>
         </div>
-        <button class="icon-btn close-drafts" data-action="toggle-drafts" aria-label="关闭草稿区">
+      </div>
+      <div class="canvas-tools" role="toolbar" aria-label="画布工具">
+        <button class="icon-btn" data-action="zoom-out" aria-label="缩小"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+        <button class="zoom-label" data-action="zoom-reset" id="zoomLabel" title="重置为 100%">100%</button>
+        <button class="icon-btn" data-action="zoom-in" aria-label="放大"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+        <span class="sep"></span>
+        <button class="icon-btn" data-action="zoom-fit" aria-label="显示全部" title="显示全部"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+        <button class="icon-btn" data-action="tidy" aria-label="整理排列" title="整理排列"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg></button>
+      </div>
+    </section>
+
+    <aside class="drafts" id="drafts" aria-label="功能区">
+      <div class="drafts-head">
+        <div class="zone-tabs" id="zoneTabs" role="tablist"></div>
+        <button class="icon-btn close-drafts" data-action="toggle-drafts" aria-label="关闭功能区">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
         </button>
       </div>
-      <p class="drafts-desc" id="draftsDesc"></p>
+      <div class="zone-bar">
+        <p class="drafts-desc" id="draftsDesc"></p>
+        <button class="icon-btn" data-action="zone-menu" id="zoneMenuBtn" aria-label="功能区设置" aria-haspopup="menu"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
+      </div>
       <div class="list" id="draftsList"></div>
       <div class="drafts-foot" id="draftsFoot"></div>
     </aside>
   </main>
 
-  <div class="drop-overlay" id="dropOverlay" aria-hidden="true"><div>松开鼠标，文件将添加到对应列</div></div>
+  <div class="drop-overlay" id="dropOverlay" aria-hidden="true"><div>松开鼠标，文件将添加到这里</div></div>
   <div class="menu" id="menu" role="menu" hidden></div>
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
@@ -74,6 +94,6 @@
   <input type="file" id="fileInput" multiple hidden>
   <input type="file" id="restoreInput" accept=".wbk" hidden>
   <noscript>此工作台需要启用 JavaScript。</noscript>
-  <script type="module" src="app.js?v=1"></script>
+  <script type="module" src="app.js?v=2"></script>
 </body>
 </html>
