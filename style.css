@@ -378,6 +378,42 @@ body.file-over .drop-overlay { display: flex; }
   .column, .add-column { --col-w: calc(100vw - 48px); scroll-snap-align: start; }
   .more { opacity: 1; }
 }
+/* ---------- 智能关联 / 长按完成 / 打包动画 ---------- */
+.card { -webkit-touch-callout: none; -webkit-user-select: none; }
+.link-badge { display: inline-flex; align-items: center; gap: 2px; margin-left: 6px; padding: 0 6px 0 4px; height: 17px; border-radius: 9px; vertical-align: 1px;
+  font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-soft); }
+.link-badge svg { width: 12px; height: 12px; stroke-width: 2.2; }
+.card.related { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent), var(--shadow); }
+.card.gather { border-color: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 35%, transparent), var(--shadow); animation: gather-pulse .6s ease-in-out infinite alternate; }
+@keyframes gather-pulse { to { box-shadow: 0 0 0 6px color-mix(in srgb, var(--ok) 15%, transparent), var(--shadow); } }
+.card.pressing { transform: scale(.965) !important; transition: transform .5s cubic-bezier(.2,.8,.2,1); }
+.press-ring { position: fixed; z-index: 95; pointer-events: none; display: flex; align-items: center; gap: 8px; transform: translate(-22px, -22px); animation: fade-in .15s; }
+.press-ring.flip { flex-direction: row-reverse; transform: translate(calc(-100% + 22px), -22px); }
+.press-ring svg { width: 44px; height: 44px; transform: rotate(-90deg); filter: drop-shadow(0 2px 6px rgba(0,0,0,.25)); }
+.press-ring circle { fill: none; stroke-width: 4; }
+.press-ring .track { stroke: rgba(255,255,255,.55); fill: rgba(20,20,30,.35); }
+.press-ring .bar { stroke: var(--ok); stroke-linecap: round; stroke-dasharray: 113.1; stroke-dashoffset: 113.1; animation: ring-fill var(--dur, 540ms) linear forwards; }
+@keyframes ring-fill { to { stroke-dashoffset: 0; } }
+.press-ring span { padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #fff; background: rgba(20,20,30,.78); white-space: nowrap; }
+.archive-tab.glow { background: color-mix(in srgb, var(--ok) 18%, var(--surface)); border-color: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 20%, transparent); }
+.pack-layer { position: fixed; inset: 0; z-index: 90; pointer-events: none; background: rgba(10,10,15,.28); }
+.pack-clone { position: fixed !important; margin: 0; overflow: hidden; pointer-events: none; box-shadow: var(--shadow-lg); transform-origin: center; }
+.pack-box { position: fixed; width: 180px; height: 150px; margin: -75px 0 0 -90px; transform-origin: center bottom; }
+.pack-body { position: absolute; left: 0; right: 0; bottom: 0; height: 112px; border-radius: 10px 10px 14px 14px; overflow: hidden;
+  background: linear-gradient(180deg, #e3b07a, #c98a4f); box-shadow: inset 0 -10px 18px rgba(120,60,10,.25), 0 18px 40px rgba(0,0,0,.35);
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-end; padding: 0 12px 14px; color: #4a2a0d; }
+.pack-tape { position: absolute; top: 0; left: 50%; width: 34px; height: 100%; margin-left: -17px; background: rgba(255,240,215,.35); }
+.pack-title { position: relative; max-width: 100%; padding: 3px 10px; border-radius: 6px; background: #fffaf2; font-weight: 700; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,.15); }
+.pack-count { position: relative; margin-top: 4px; font-size: 11px; font-weight: 600; opacity: .8; }
+.pack-lid { position: absolute; left: -8px; right: -8px; top: 26px; height: 22px; border-radius: 6px; z-index: 1;
+  background: linear-gradient(180deg, #edc08d, #d69a5d); box-shadow: 0 4px 10px rgba(80,40,0,.25);
+  transform-origin: 4% 100%; transform: translateY(-14px) rotate(-32deg); transition: transform .38s cubic-bezier(.3,1.5,.5,1); }
+.pack-box.closed .pack-lid { transform: none; }
+.pack-check { position: absolute; z-index: 2; right: -14px; top: 4px; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--ok); color: #fff; box-shadow: 0 4px 14px rgba(0,0,0,.3); transform: scale(0); transition: transform .35s .18s cubic-bezier(.3,1.7,.5,1); }
+.pack-check svg { width: 22px; height: 22px; stroke-width: 3; }
+.pack-box.closed .pack-check { transform: scale(1); }
+
 /* ---------- 动效 ---------- */
 @keyframes fade-up { from { opacity: 0; transform: translateY(8px); } }
 @keyframes fade-in { from { opacity: 0; } }

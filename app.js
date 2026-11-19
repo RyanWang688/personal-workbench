@@ -180,22 +180,62 @@ function metaText(c, t) {
   bits.push(fmtSize(c.size || 0));
   return bits.join(' · ');
 }
+// ---------- 智能关联：同一项目的文件自动归组 ----------
+// 去掉「-预览 / 封面 / 第N页 / 终稿 / v2 / (2) / 日期」等后缀后，名称相同或以「名称 + 分隔符」开头即视为同一项目；
+// 转换生成的文件通过 sourceId 关联到原文件。
+const SEP = '[\\s_\\-–—.·]';
+const SUFFIX = new RegExp(`(${SEP}*(预览图?|封面|缩略图|第\\s*\\d+\\s*页|终稿|定稿|最终版?|修改版|初稿|final|copy|副本|v\\d+(\\.\\d+)*|\\(\\d+\\)|（\\d+）|\\d{8}|\\d{4}-\\d{1,2}-\\d{1,2}))+$`, 'i');
+function baseTitle(c) {
+  let s = (c.name || '').replace(/\.[a-z0-9]{1,6}$/i, '').trim(), prev;
+  do { prev = s; s = s.replace(SUFFIX, '').trim(); } while (s !== prev && s);
+  return s.replace(new RegExp(`${SEP}+$`), '') || (c.name || '').replace(/\.[^.]+$/, '');
+}
+const relKey = (c) => { const k = baseTitle(c).toLowerCase(); return k.length >= 2 ? k : null; };
+const isActive = (c) => c.columnId !== TRASH && area(c.columnId)?.kind !== 'folder';
+function buildGroups() {
+  const live = state.cards.filter(isActive);
+  const parent = new Map(live.map((c) => [c.id, c.id]));
+  const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+  const union = (a, b) => { if (parent.has(a) && parent.has(b)) parent.set(find(a), find(b)); };
+  const keyed = live.map((c) => [c, relKey(c)]).filter(([, k]) => k);
+  const sepRe = new RegExp(`^${SEP}`);
+  for (let i = 0; i < keyed.length; i++) {
+    for (let j = i + 1; j < keyed.length; j++) {
+      const [a, ka] = keyed[i], [b, kb] = keyed[j];
+      const [short, long] = ka.length <= kb.length ? [ka, kb] : [kb, ka];
+      if (ka === kb || (long.startsWith(short) && sepRe.test(long.slice(short.length)))) union(a.id, b.id);
+    }
+  }
+  for (const c of live) if (c.sourceId) union(c.id, c.sourceId);
+  const groups = new Map();
+  for (const c of live) { const r = find(c.id); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(c.id); }
+  state.groups = new Map();
+  for (const ids of groups.values()) for (const id of ids) state.groups.set(id, ids);
+}
+const relatedIds = (id) => state.groups?.get(id) || [id];
+const LINK_SVG = `<svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>`;
+function linkBadge(c) {
+  const n = relatedIds(c.id).length;
+  return n > 1 ? `<span class="link-badge" title="自动关联了 ${n} 个同项目文件，长按任意一个即可一起打包完成">${LINK_SVG}${n}</span>` : '';
+}
+const IS_TOUCH = matchMedia('(hover: none) and (pointer: coarse)').matches;
+
 const thumbStateOf = (c) => c.kind !== 'file' ? 'none' : (c.thumb || (pv.likelyThumb(c) ? 'pending' : 'none'));
 const PLAY = `<span class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/></svg></span>`;
 function cardHTML(c, onCanvas = false) {
   const attrs = onCanvas
     ? `draggable="false" style="left:${Math.round(c.x || 0)}px;top:${Math.round(c.y || 0)}px;z-index:${Math.max(1, Math.round(c.order) || 1)}"`
-    : 'draggable="true"';
+    : `draggable="${IS_TOUCH ? 'false' : 'true'}"`;
   const cls = `card${onCanvas ? ' on-canvas' : ''}${onCanvas && !matches(c) ? ' dim' : ''}`;
   const extra = onCanvas ? HANDLE : '';
   if (c.kind === 'note') {
     return `<article class="${cls} note" ${attrs} tabindex="0" data-id="${c.id}" aria-label="便签 ${esc(c.name)}">
       <div class="body"><div class="name">${highlight(c.name || '便签')}</div>
       ${c.text ? `<div class="note-text">${highlight(c.text)}</div>` : ''}
-      <div class="meta">便签 · ${fmtDate(c.updatedAt || c.createdAt)}</div></div>${extra}${MORE}</article>`;
+      <div class="meta">便签 · ${fmtDate(c.updatedAt || c.createdAt)}${linkBadge(c)}</div></div>${extra}${MORE}</article>`;
   }
   const t = typeOf(c);
-  const meta = metaText(c, t);
+  const meta = metaText(c, t) + linkBadge(c);
   const ext = extOf(c.name).slice(0, 5) || t.label;
   const name = `<div class="name" title="${esc(c.name)}&#10;添加于 ${fmtDate(c.createdAt)}">${highlight(c.name)}</div>`;
   const st = thumbStateOf(c);
@@ -222,6 +262,7 @@ function listHTML(areaId, emptyText) {
 const DOTS = `<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>`;
 function render() {
   const before = snapshot();
+  buildGroups();
   renderViews();
   const onBoard = state.view === BOARD, onArchive = state.view === ARCHIVE;
   $('#board').hidden = !onBoard;
@@ -398,7 +439,7 @@ function renderArchive() {
     <header class="archive-head">
       <div class="ah-text">
         <h2>已完成项目</h2>
-        <div class="meta">彻底完成的项目归档在这里，长期保存不会丢。把卡片拖到文件夹上即可归档；也可以在看板列菜单里「整列归档」。</div>
+        <div class="meta">在看板上<b>长按任意卡片</b>即可完成项目：同名的关联文件会自动打包成文件夹放到这里。也可以把卡片拖到文件夹上，或在列菜单里「整列归档」。</div>
       </div>
       <button class="btn primary" data-action="add-folder"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>新建项目文件夹</span></button>
     </header>
@@ -412,7 +453,7 @@ function renderArchive() {
         <button class="more" data-action="folder-menu" data-id="${f.id}" aria-label="文件夹设置" aria-haspopup="menu">${DOTS}</button>
       </div>`;
     }).join('')}</div>`
-    : `<div class="archive-empty">${FOLDER_SVG}<b>${state.query ? '没有匹配的项目' : '还没有已完成的项目'}</b><span>${state.query ? '' : '新建一个项目文件夹，或把看板上做完的卡片拖到顶部「已完成项目」标签上。'}</span></div>`}`;
+    : `<div class="archive-empty">${FOLDER_SVG}<b>${state.query ? '没有匹配的项目' : '还没有已完成的项目'}</b><span>${state.query ? '' : '回到看板，长按一个做完的文件 —— 它和同项目的文件会被自动打包送到这里。'}</span></div>`}`;
 }
 async function createFolder(title) {
   const list = folders();
@@ -422,19 +463,26 @@ async function createFolder(title) {
   return f;
 }
 // 批量归档，可撤销
-async function archiveCards(cards, folderId) {
+async function archiveCards(cards, folderId, { animated = false, message, newFolder = false } = {}) {
   if (!cards.length) return;
   const prev = cards.map((c) => ({ c, columnId: c.columnId, order: c.order, x: c.x, y: c.y }));
-  await Promise.all(cards.map((c) => animateOut(c.id)));
+  if (!animated) await Promise.all(cards.map((c) => animateOut(c.id)));
   let order = orderAt(folderId, cardsIn(folderId, false).length);
   for (const c of cards) { c.columnId = folderId; c.order = order; c.enteredAt = Date.now(); c.updatedAt = Date.now(); order += 1024; }
   await db.putMany('cards', cards);
   await changed();
-  toast(`已归档 ${cards.length} 个到「${areaName(folderId)}」`, {
+  toast(message || `已归档 ${cards.length} 个到「${areaName(folderId)}」`, {
     action: '撤销',
     onAction: async () => {
       for (const p of prev) Object.assign(p.c, { columnId: p.columnId, order: p.order, x: p.x, y: p.y });
       await db.putMany('cards', cards);
+      // 撤销时，如果文件夹是这次新建的且已空，一并移除
+      const f = area(folderId);
+      if (newFolder && f && !cardsIn(folderId, false).length) {
+        await db.del('columns', folderId);
+        state.areas = state.areas.filter((x) => x !== f);
+        if (state.folder === folderId) { state.folder = null; ls.set('folder', null); }
+      }
       await changed();
     },
   });
@@ -725,7 +773,7 @@ vp.addEventListener('dblclick', async (e) => {
 });
 
 // ---------- 添加文件 ----------
-async function addFiles(files, areaId, index = null, pos = null, { quiet = false } = {}) {
+async function addFiles(files, areaId, index = null, pos = null, { quiet = false, extra = {} } = {}) {
   files = files.filter((f) => f && f.name !== '.DS_Store');
   if (!files.length) return [];
   if (!areaId || !area(areaId)) areaId = defaultTarget();
@@ -740,7 +788,7 @@ async function addFiles(files, areaId, index = null, pos = null, { quiet = false
     const now = Date.now();
     const card = {
       id: uid(), kind: 'file', name: f.name || `粘贴的文件-${now}`, type: f.type || '', size: f.size,
-      columnId: areaId, order: canvas ? topOrder(areaId) : orderAt(areaId, index + ok), createdAt: now, updatedAt: now, enteredAt: now,
+      columnId: areaId, order: canvas ? topOrder(areaId) : orderAt(areaId, index + ok), createdAt: now, updatedAt: now, enteredAt: now, ...extra,
     };
     if (canvas) { card.x = pos.x + (ok % perRow) * (CARD_W + 20); card.y = pos.y + Math.floor(ok / perRow) * 120; }
     try {
@@ -1005,7 +1053,7 @@ async function runConvert(btn) {
     const canvas = isCanvas(areaId);
     const idx = canvas ? null : cardsIn(areaId, false).findIndex((c) => c.id === card.id) + 1;
     const pos = canvas ? { x: (card.x || 0) + CARD_W + 60, y: card.y || 0 } : null;
-    const added = await addFiles(files, areaId, idx, pos, { quiet: true });
+    const added = await addFiles(files, areaId, idx, pos, { quiet: true, extra: { sourceId: card.sourceId || card.id } });
     say(`✓ 已生成 ${added.length} 个文件，放在「${areaName(areaId)}」原文件旁边`);
     toast(`转换完成：${added.map((c) => c.name).slice(0, 2).join('、')}${added.length > 2 ? ` 等 ${added.length} 个` : ''}`,
       { action: '下载', onAction: () => added.forEach((c, i) => setTimeout(() => download(c.id), i * 300)) });
@@ -1091,6 +1139,10 @@ function cardMenu(anchor, card) {
           await purgeCard(card.id); await changed();
         } } });
     return openMenu(anchor, items);
+  }
+  if (isActive(card)) {
+    const n = relatedIds(card.id).length;
+    items.push({ text: n > 1 ? `✓ 完成项目（打包 ${n} 个关联文件）` : '✓ 完成项目并归档', run: () => completeProject(card.id) }, '-');
   }
   items.push({ text: card.kind === 'note' ? '编辑' : '预览', run: () => preview(card.id) },
     { text: '下载', run: () => download(card.id) },
@@ -1219,6 +1271,156 @@ async function doRestore(file) {
   }
 }
 
+// ---------- 悬停：高亮同项目的关联文件 ----------
+let hoverGroup = null;
+function highlightGroup(id, cls = 'related') {
+  $$(`.card.${cls}`).forEach((el) => el.classList.remove(cls));
+  if (!id) return;
+  const ids = relatedIds(id);
+  if (ids.length < 2 && cls === 'related') return;
+  for (const rid of ids) $$(`.card[data-id="${CSS.escape(rid)}"]`).forEach((el) => el.classList.add(cls));
+}
+document.addEventListener('pointerover', (e) => {
+  if (e.pointerType !== 'mouse' || press) return;
+  const card = e.target.closest?.('.card');
+  const id = card && isActive(findCard(card.dataset.id) || {}) ? card.dataset.id : null;
+  if (id === hoverGroup) return;
+  hoverGroup = id;
+  highlightGroup(id);
+});
+
+// ---------- 长按完成项目：自动打包关联文件 → 已完成项目 ----------
+const PRESS_DELAY = 160, PRESS_TOTAL = 700;
+let press = null, pressFired = false;
+function cancelPress() {
+  if (!press) return;
+  clearTimeout(press.t1); clearTimeout(press.t2);
+  press.el.classList.remove('pressing');
+  press.ring?.remove();
+  highlightGroup(null, 'gather');
+  press = null;
+}
+document.addEventListener('pointerdown', (e) => {
+  pressFired = false;
+  if (e.button !== 0) return;
+  const el = e.target.closest?.('.card');
+  if (!el || e.target.closest('.more, .export-handle')) return;
+  const card = findCard(el.dataset.id);
+  if (!card || !isActive(card)) return;
+  cancelPress();
+  press = { el, id: card.id, x: e.clientX, y: e.clientY, touch: e.pointerType !== 'mouse' };
+  press.t1 = setTimeout(() => {
+    if (!press) return;
+    el.classList.add('pressing');
+    highlightGroup(card.id, 'gather');
+    const n = relatedIds(card.id).length;
+    const ring = document.createElement('div');
+    ring.className = 'press-ring';
+    // 触屏时把进度环放到手指上方，避免被手指挡住；靠右时文字翻到左边
+    ring.style.left = `${press.x}px`; ring.style.top = `${press.touch ? Math.max(30, press.y - 64) : press.y}px`;
+    if (press.x > innerWidth - 220) ring.classList.add('flip');
+    ring.style.setProperty('--dur', `${PRESS_TOTAL - PRESS_DELAY}ms`);
+    ring.innerHTML = `<svg viewBox="0 0 44 44"><circle class="track" cx="22" cy="22" r="18"/><circle class="bar" cx="22" cy="22" r="18"/></svg><span>按住完成项目${n > 1 ? ` · ${n} 个文件` : ''}</span>`;
+    document.body.appendChild(ring);
+    press.ring = ring;
+  }, PRESS_DELAY);
+  press.t2 = setTimeout(() => {
+    if (!press) return;
+    const id = press.id;
+    pressFired = true;
+    cardDrag = null; // 画布上不要再移动卡片
+    cancelPress();
+    navigator.vibrate?.(25);
+    completeProject(id);
+  }, PRESS_TOTAL);
+}, true);
+document.addEventListener('pointermove', (e) => {
+  if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > (press.touch ? 10 : 6)) cancelPress();
+}, true);
+['pointerup', 'pointercancel', 'dragstart', 'wheel', 'scroll'].forEach((ev) => document.addEventListener(ev, cancelPress, true));
+document.addEventListener('visibilitychange', cancelPress);
+// 长按触发后，只吞掉「松手那一下」产生的 click（松手后立即复位，不影响之后点撤销等操作）
+document.addEventListener('pointerup', () => { if (pressFired) setTimeout(() => { pressFired = false; }, 0); }, true);
+document.addEventListener('click', (e) => { if (pressFired) { e.stopPropagation(); e.preventDefault(); pressFired = false; } }, true);
+document.addEventListener('contextmenu', (e) => { if ((press || pressFired) && e.target.closest?.('.card')) { e.preventDefault(); e.stopPropagation(); } }, true);
+document.addEventListener('dragstart', (e) => { if (pressFired) e.preventDefault(); }, true);
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+async function completeProject(id) {
+  const card = findCard(id);
+  if (!card || !isActive(card)) return;
+  buildGroups();
+  const cards = relatedIds(id).map(findCard).filter((c) => c && isActive(c));
+  const title = baseTitle(card);
+  let folder = folders().find((f) => f.title === title);
+  const isNew = !folder;
+  await playPackAnimation(cards, title);
+  if (!folder) folder = await createFolder(title);
+  await archiveCards(cards, folder.id, {
+    animated: true, newFolder: isNew,
+    message: `「${title}」已完成，打包了 ${cards.length} 个文件${isNew ? '' : '（并入已有文件夹）'}`,
+  });
+  bumpArchiveTab();
+}
+function bumpArchiveTab() {
+  const tab = $('.archive-tab');
+  if (!tab || reduceMotion.matches) return;
+  tab.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.16)', offset: 0.35 }, { transform: 'scale(.96)', offset: 0.7 }, { transform: 'scale(1)' }], { duration: 520, easing: 'ease-out' });
+  tab.classList.add('glow');
+  setTimeout(() => tab.classList.remove('glow'), 1200);
+}
+const BOX_HTML = (title, n) => `<div class="pack-lid"></div><div class="pack-body"><span class="pack-tape"></span><span class="pack-title">${esc(title)}</span><span class="pack-count">${n} 个文件</span></div>
+  <span class="pack-check"><svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></span>`;
+async function playPackAnimation(cards, title) {
+  if (reduceMotion.matches) return;
+  const els = cards.map((c) => $$(`.card[data-id="${CSS.escape(c.id)}"]`).find((el) => el.offsetParent)).filter(Boolean);
+  const layer = document.createElement('div');
+  layer.className = 'pack-layer';
+  const box = document.createElement('div');
+  box.className = 'pack-box';
+  box.innerHTML = BOX_HTML(title, cards.length);
+  const bx = innerWidth / 2, by = innerHeight / 2;
+  box.style.left = `${bx}px`; box.style.top = `${by}px`;
+  layer.appendChild(box);
+  document.body.appendChild(layer);
+  const ease = 'cubic-bezier(.2,.8,.2,1)';
+  layer.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: 'forwards' });
+  await box.animate([{ transform: 'scale(.3) translateY(30px)', opacity: 0 }, { transform: 'scale(1.06)', opacity: 1, offset: 0.7 }, { transform: 'scale(1)', opacity: 1 }],
+    { duration: 340, easing: ease, fill: 'forwards' }).finished;
+  // 卡片依次飞进箱子
+  await Promise.all(els.map((el, i) => {
+    const r = el.getBoundingClientRect();
+    const cl = el.cloneNode(true);
+    cl.classList.remove('pressing', 'gather', 'related', 'dragging');
+    cl.classList.add('pack-clone');
+    Object.assign(cl.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px`, zIndex: '' });
+    layer.insertBefore(cl, box);
+    el.style.visibility = 'hidden';
+    const dx = bx - (r.left + r.width / 2), dy = by - 10 - (r.top + r.height / 2);
+    const rot = (i % 2 ? 1 : -1) * (6 + (i % 3) * 3);
+    return cl.animate([
+      { transform: 'none', opacity: 1 },
+      { transform: `translate(${dx}px, ${dy - 90}px) scale(.42) rotate(${rot}deg)`, opacity: 1, offset: 0.65 },
+      { transform: `translate(${dx}px, ${dy + 10}px) scale(.18) rotate(${rot}deg)`, opacity: 0 },
+    ], { duration: 680, delay: Math.min(i, 8) * 90, easing: 'cubic-bezier(.45,0,.25,1)', fill: 'forwards' }).finished;
+  }));
+  box.classList.add('closed');
+  box.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.05, .95)' }, { transform: 'scale(1)' }], { duration: 260, easing: 'ease-out' });
+  await wait(420);
+  const tab = $('.archive-tab');
+  const tr = tab?.getBoundingClientRect();
+  if (tr && tr.width) {
+    const tx = tr.left + tr.width / 2 - bx, ty = tr.top + tr.height / 2 - by;
+    layer.animate([{ backgroundColor: getComputedStyle(layer).backgroundColor }, { backgroundColor: 'transparent' }], { duration: 560, fill: 'forwards' });
+    await box.animate([
+      { transform: 'none', opacity: 1 },
+      { transform: `translate(${tx * 0.35}px, ${ty * 0.35 - 40}px) scale(.7)`, opacity: 1, offset: 0.4 },
+      { transform: `translate(${tx}px, ${ty}px) scale(.12)`, opacity: 0.4 },
+    ], { duration: 560, easing: 'cubic-bezier(.5,0,.3,1)', fill: 'forwards' }).finished;
+  }
+  layer.remove();
+}
+
 // ---------- 拖拽（HTML5：看板 / 功能区 / 拖入拖出） ----------
 let indicator = null;
 function clearDropUI() {
@@ -1240,6 +1442,7 @@ document.addEventListener('pointerover', (e) => {
   const card = e.target.closest?.('.card');
   if (card && findCard(card.dataset.id)?.kind === 'file') urlFor(card.dataset.id); // 预先准备，以便拖到桌面
 });
+document.addEventListener('pointerleave', () => { hoverGroup = null; highlightGroup(null); });
 document.addEventListener('dragstart', (e) => {
   const el = e.target.closest?.('.card');
   if (!el) return;
