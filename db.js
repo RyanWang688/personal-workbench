@@ -66,7 +66,11 @@ export async function addFile(card, blob) {
 export const deleteCard = (id) => tx(['cards', 'blobs'], 'readwrite', (t) => {
   t.objectStore('cards').delete(id);
   t.objectStore('blobs').delete(id);
+  t.objectStore('blobs').delete(`thumb:${id}`);
 });
+// 缩略图与原文件分开存（id 前缀 thumb:），不进备份，可随时重新生成
+export const putThumb = (id, blob) => put('blobs', { id: `thumb:${id}`, data: blob, type: blob.type, size: blob.size });
+export const getThumb = (id) => getBlob(`thumb:${id}`);
 
 export async function getMeta(key, fallback = null) {
   const rec = await tx(['meta'], 'readonly', (t) => wrap(t.objectStore('meta').get(key)));

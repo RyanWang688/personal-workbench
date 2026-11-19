@@ -1,4 +1,5 @@
-import * as db from './db.js?v=2';
+import * as db from './db.js?v=3';
+import * as pv from './preview.js?v=3';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -15,7 +16,9 @@ const ls = {
 const state = {
   areas: [], cards: [], query: '', urls: new Map(), dragId: null,
   view: ls.get('view', BOARD), zone: ls.get('zone', 'drafts'), cams: ls.get('cams', {}),
+  fresh: new Set(), // 新加入的卡片，渲染时播放入场动画
 };
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const channel = 'BroadcastChannel' in window ? new BroadcastChannel('personal-workbench') : null;
 
 // ---------- 文件类型 ----------
@@ -23,6 +26,7 @@ const TYPES = [
   { k: 'image', label: '图片', c: '#7048e8', test: (t, e) => t.startsWith('image/') || /^(png|jpe?g|gif|webp|svg|bmp|heic|avif|ico)$/.test(e) },
   { k: 'video', label: '视频', c: '#e8590c', test: (t, e) => t.startsWith('video/') || /^(mp4|mov|webm|mkv|avi)$/.test(e) },
   { k: 'audio', label: '音频', c: '#d6336c', test: (t, e) => t.startsWith('audio/') || /^(mp3|wav|m4a|flac|ogg|aac)$/.test(e) },
+  { k: 'design', label: '设计稿', c: '#c2255c', test: (t, e) => /^(afpub|afdesign|afphoto|psd|psb|ai|sketch|fig|xd|indd|cdr)$/.test(e) },
   { k: 'pdf', label: 'PDF', c: '#e03131', test: (t, e) => t === 'application/pdf' || e === 'pdf' },
   { k: 'doc', label: '文档', c: '#1c7ed6', test: (t, e) => /^(docx?|rtf|odt|pages)$/.test(e) },
   { k: 'sheet', label: '表格', c: '#2b8a3e', test: (t, e) => /^(xlsx?|csv|ods|numbers|tsv)$/.test(e) },
@@ -99,7 +103,7 @@ async function load() {
   state.areas = areas;
   state.cards = cards;
   const live = new Set(cards.map((c) => c.id));
-  for (const [id, url] of state.urls) if (!live.has(id)) { URL.revokeObjectURL(url); state.urls.delete(id); }
+  for (const [key, url] of state.urls) if (!live.has(key.replace(/^thumb:/, ''))) { URL.revokeObjectURL(url); state.urls.delete(key); }
   if (state.view !== BOARD && !isCanvas(state.view)) state.view = BOARD;
   if (state.zone !== TRASH && !area(state.zone)) state.zone = fallbackZone() || TRASH;
 }
@@ -158,6 +162,19 @@ const highlight = (s) => {
 };
 const MORE = `<button class="more" data-action="card-menu" aria-label="更多操作" aria-haspopup="menu"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>`;
 const HANDLE = `<span class="export-handle" draggable="true" title="拖到桌面导出"><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg></span>`;
+const fmtDur = (s) => { s = Math.round(s || 0); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+function metaText(c, t) {
+  const i = c.info || {};
+  const bits = [t.label];
+  if (i.pages) bits.push(`${i.pages} 页`);
+  if (i.sheets > 1) bits.push(`${i.sheets} 个表`);
+  if (i.duration) bits.push(fmtDur(i.duration));
+  else if (i.w && i.h) bits.push(`${i.w}×${i.h}`);
+  bits.push(fmtSize(c.size || 0));
+  return bits.join(' · ');
+}
+const thumbStateOf = (c) => c.kind !== 'file' ? 'none' : (c.thumb || (pv.likelyThumb(c) ? 'pending' : 'none'));
+const PLAY = `<span class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/></svg></span>`;
 function cardHTML(c, onCanvas = false) {
   const attrs = onCanvas
     ? `draggable="false" style="left:${Math.round(c.x || 0)}px;top:${Math.round(c.y || 0)}px;z-index:${Math.max(1, Math.round(c.order) || 1)}"`
@@ -171,16 +188,22 @@ function cardHTML(c, onCanvas = false) {
       <div class="meta">便签 · ${fmtDate(c.updatedAt || c.createdAt)}</div></div>${extra}${MORE}</article>`;
   }
   const t = typeOf(c);
-  const meta = `${t.label} · ${fmtSize(c.size || 0)} · ${fmtDate(c.createdAt)}`;
-  if (t.k === 'image' && extOf(c.name) !== 'heic') {
+  const meta = metaText(c, t);
+  const ext = extOf(c.name).slice(0, 5) || t.label;
+  const name = `<div class="name" title="${esc(c.name)}&#10;添加于 ${fmtDate(c.createdAt)}">${highlight(c.name)}</div>`;
+  const st = thumbStateOf(c);
+  if (st !== 'none') {
+    const badge = t.k === 'image' ? '' : `<span class="thumb-badge" style="--c:${t.c}">${esc(ext)}</span>`;
+    const url = state.urls.get(`thumb:${c.id}`);
+    const media = st === 'ok'
+      ? `<div class="thumb fit-${c.thumbFit || 'cover'}"><img class="thumb-img${url ? ' loaded' : ''}" data-thumb="${c.id}" ${url ? `src="${url}"` : ''} alt="" draggable="false">${t.k === 'video' ? PLAY : ''}${badge}</div>`
+      : `<div class="thumb skel" aria-label="正在生成预览">${badge}</div>`;
     return `<article class="${cls} has-img" ${attrs} tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
-      <img class="thumb-img" data-thumb="${c.id}" alt="" draggable="false">
-      <div class="body"><div class="name" title="${esc(c.name)}">${highlight(c.name)}</div><div class="meta">${meta}</div></div>${extra}${MORE}</article>`;
+      ${media}<div class="body">${name}<div class="meta">${meta}</div></div>${extra}${MORE}</article>`;
   }
-  const ext = extOf(c.name).slice(0, 4) || t.label;
   return `<article class="${cls}" ${attrs} tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
-    <div class="type-icon" style="--c:${t.c}">${esc(ext)}</div>
-    <div class="body"><div class="name" title="${esc(c.name)}">${highlight(c.name)}</div><div class="meta">${meta}</div></div>${extra}${MORE}</article>`;
+    <div class="type-icon" style="--c:${t.c}">${esc(ext.slice(0, 4))}</div>
+    <div class="body">${name}<div class="meta">${meta}</div></div>${extra}${MORE}</article>`;
 }
 function listHTML(areaId, emptyText) {
   const list = cardsIn(areaId);
@@ -191,6 +214,7 @@ function listHTML(areaId, emptyText) {
 // ---------- 渲染 ----------
 const DOTS = `<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>`;
 function render() {
+  const before = snapshot();
   renderViews();
   const onBoard = state.view === BOARD;
   $('#board').hidden = !onBoard;
@@ -198,6 +222,102 @@ function render() {
   if (onBoard) renderBoard(); else renderCanvas();
   renderZones();
   loadThumbs();
+  playFlip(before);
+  queueThumbs();
+}
+// 渲染期间若用户正在拖拽 / 菜单打开，稍后再刷新，避免打断操作
+let renderTimer = 0;
+function renderSoon() {
+  clearTimeout(renderTimer);
+  renderTimer = setTimeout(() => {
+    if (cardDrag || state.dragId || !$('#menu').hidden || pan) return renderSoon();
+    render();
+  }, 60);
+}
+
+// ---------- 智能动画（FLIP）：卡片移动、排序、尺寸变化时平滑过渡，新卡片入场 ----------
+function snapshot() {
+  const m = new Map();
+  if (reduceMotion.matches) return m;
+  $$('.card[data-id]').forEach((el) => { if (el.offsetParent) m.set(el.dataset.id, el.getBoundingClientRect()); });
+  return m;
+}
+function playFlip(before) {
+  if (reduceMotion.matches) { state.fresh.clear(); return; }
+  let n = 0;
+  $$('.card[data-id]').forEach((el) => {
+    if (!el.offsetParent) return;
+    const id = el.dataset.id, old = before.get(id);
+    const ease = 'cubic-bezier(.2,.8,.2,1)';
+    if (old) {
+      const now = el.getBoundingClientRect();
+      const dx = old.left - now.left, dy = old.top - now.top;
+      if (Math.abs(dx) < 1 && Math.abs(dy) < 1 && Math.abs(old.height - now.height) < 1) return;
+      const z = el.classList.contains('on-canvas') ? cam().z : 1;
+      el.animate([{ transform: `translate(${dx / z}px, ${dy / z}px)` }, { transform: 'none' }], { duration: 320, easing: ease });
+    } else if (state.fresh.has(id)) {
+      el.animate([{ opacity: 0, transform: 'translateY(10px) scale(.96)' }, { opacity: 1, transform: 'none' }],
+        { duration: 360, delay: Math.min(n++, 10) * 45, easing: ease, fill: 'backwards' });
+    }
+  });
+  state.fresh.clear();
+}
+async function animateOut(id) {
+  const el = $(`.card[data-id="${CSS.escape(id)}"]`);
+  if (!el || !el.offsetParent || reduceMotion.matches) return;
+  await el.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(.9)' }], { duration: 170, easing: 'ease-in', fill: 'forwards' }).finished.catch(() => {});
+}
+
+// ---------- 缩略图队列 ----------
+const thumbQ = [], queued = new Set();
+let thumbBusy = false;
+function queueThumbs() {
+  for (const c of state.cards) {
+    if (c.kind === 'file' && !c.thumb && c.columnId !== TRASH && !queued.has(c.id)) { queued.add(c.id); thumbQ.push(c.id); }
+  }
+  runThumbs();
+}
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('超时')), ms))]);
+async function runThumbs() {
+  if (thumbBusy) return;
+  thumbBusy = true;
+  while (thumbQ.length) {
+    const id = thumbQ.shift();
+    queued.delete(id);
+    const c = findCard(id);
+    if (!c || c.thumb) continue;
+    try {
+      const blob = await db.getBlob(id);
+      if (!blob) continue;
+      const r = await withTimeout(pv.makeThumb(c, blob), 45000);
+      if (r?.blob) { await db.putThumb(id, r.blob); c.thumb = 'ok'; c.thumbFit = r.fit; c.info = r.info; }
+      else c.thumb = 'none';
+    } catch (e) {
+      console.warn('预览生成失败', c.name, e);
+      if (/组件加载失败/.test(e.message)) { thumbQ.length = 0; queued.clear(); break; } // 离线：下次再试
+      c.thumb = 'none';
+    }
+    if (!findCard(id)) continue;
+    await db.put('cards', c);
+    refreshCard(c);
+  }
+  thumbBusy = false;
+}
+// 只替换这一张卡片的 DOM（不整页重绘，不会打断用户点击 / 悬停），周围卡片用 FLIP 平滑让位
+function refreshCard(c) {
+  const els = $$(`.card[data-id="${CSS.escape(c.id)}"]`);
+  if (!els.length) return;
+  const before = snapshot();
+  for (const el of els) {
+    if (el.matches(':active') || el.classList.contains('dragging') || el.classList.contains('lifting')) { renderSoon(); return; }
+    const tpl = document.createElement('template');
+    tpl.innerHTML = cardHTML(c, el.classList.contains('on-canvas')).trim();
+    const next = tpl.content.firstElementChild;
+    el.replaceWith(next);
+    if (!reduceMotion.matches) next.animate([{ opacity: 0.4 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' });
+  }
+  loadThumbs();
+  playFlip(before);
 }
 function renderViews() {
   const count = (id) => cardsIn(id, false).length;
@@ -255,10 +375,21 @@ async function urlFor(id) {
   state.urls.set(id, url);
   return url;
 }
+async function thumbUrl(id) {
+  const key = `thumb:${id}`;
+  if (state.urls.has(key)) return state.urls.get(key);
+  const b = await db.getThumb(id);
+  if (!b) { const c = findCard(id); if (c) { c.thumb = undefined; queueThumbs(); } return null; }
+  const url = URL.createObjectURL(b);
+  state.urls.set(key, url);
+  return url;
+}
 function loadThumbs() {
-  $$('img[data-thumb]').forEach(async (img) => {
-    const url = await urlFor(img.dataset.thumb);
-    if (url) img.src = url;
+  $$('img[data-thumb]:not([src])').forEach(async (img) => {
+    const url = await thumbUrl(img.dataset.thumb);
+    if (!url) return;
+    img.onload = () => img.classList.add('loaded');
+    img.src = url;
   });
 }
 
@@ -290,20 +421,35 @@ function viewCenter() {
   const p = toWorld(r.left + r.width / 2, r.top + r.height / 2);
   return { x: p.x - CARD_W / 2, y: p.y - 40 };
 }
-function zoomAt(factor, clientX, clientY) {
+// 镜头缓动：按钮缩放 / 显示全部时平滑过渡
+let camAnim = 0;
+function tweenCam(to) {
+  const c = cam();
+  cancelAnimationFrame(camAnim);
+  if (reduceMotion.matches) { Object.assign(c, to); applyCam(); saveCam(); return; }
+  const from = { ...c }, t0 = performance.now(), dur = 280;
+  const step = (now) => {
+    const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+    c.x = from.x + (to.x - from.x) * e; c.y = from.y + (to.y - from.y) * e; c.z = from.z + (to.z - from.z) * e;
+    applyCam();
+    if (k < 1) camAnim = requestAnimationFrame(step); else saveCam();
+  };
+  camAnim = requestAnimationFrame(step);
+}
+function zoomAt(factor, clientX, clientY, animate = false) {
   const c = cam(), r = $('#viewport').getBoundingClientRect();
   if (clientX == null) { clientX = r.left + r.width / 2; clientY = r.top + r.height / 2; }
   const z = Math.min(3, Math.max(0.15, c.z * factor));
   const px = clientX - r.left, py = clientY - r.top;
-  c.x = px - (px - c.x) * (z / c.z);
-  c.y = py - (py - c.y) * (z / c.z);
-  c.z = z;
+  const to = { x: px - (px - c.x) * (z / c.z), y: py - (py - c.y) * (z / c.z), z };
+  if (animate) return tweenCam(to);
+  Object.assign(c, to);
   applyCam(); saveCam();
 }
 function zoomFit() {
   const els = $$('#world .card');
   const c = cam();
-  if (!els.length) { Object.assign(c, { x: 80, y: 60, z: 1 }); applyCam(); saveCam(); return; }
+  if (!els.length) return tweenCam({ x: 80, y: 60, z: 1 });
   let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
   for (const el of els) {
     const x = el.offsetLeft, y = el.offsetTop;
@@ -311,8 +457,7 @@ function zoomFit() {
   }
   const r = $('#viewport').getBoundingClientRect(), pad = 60;
   const z = Math.min(1.2, Math.max(0.15, Math.min((r.width - pad * 2) / (x2 - x1), (r.height - pad * 2) / (y2 - y1))));
-  Object.assign(c, { z, x: (r.width - (x2 - x1) * z) / 2 - x1 * z, y: (r.height - (y2 - y1) * z) / 2 - y1 * z });
-  applyCam(); saveCam();
+  tweenCam({ z, x: (r.width - (x2 - x1) * z) / 2 - x1 * z, y: (r.height - (y2 - y1) * z) / 2 - y1 * z });
 }
 async function tidyCanvas() {
   const list = cardsIn(state.view, false);
@@ -441,9 +586,9 @@ vp.addEventListener('dblclick', async (e) => {
 });
 
 // ---------- 添加文件 ----------
-async function addFiles(files, areaId, index = null, pos = null) {
+async function addFiles(files, areaId, index = null, pos = null, { quiet = false } = {}) {
   files = files.filter((f) => f && f.name !== '.DS_Store');
-  if (!files.length) return;
+  if (!files.length) return [];
   if (!areaId || !area(areaId)) areaId = defaultTarget();
   const canvas = isCanvas(areaId);
   if (canvas && !pos) pos = state.view === areaId ? viewCenter() : { x: 0, y: 0 };
@@ -462,6 +607,7 @@ async function addFiles(files, areaId, index = null, pos = null) {
     try {
       await db.addFile(card, f);
       state.cards.push(card);
+      state.fresh.add(card.id);
       added.push(card);
       ok++;
       if (t) t.set(`正在保存 ${ok}/${files.length}…`);
@@ -473,11 +619,12 @@ async function addFiles(files, areaId, index = null, pos = null) {
   }
   t?.close();
   if (ok) {
-    toast(`已保存 ${ok} 个文件到「${areaName(areaId)}」`);
+    if (!quiet) toast(`已保存 ${ok} 个文件到「${areaName(areaId)}」`);
     requestPersist();
     await changed();
     if (canvas && ok > 1 && state.view === areaId) await masonry(added, pos);
   }
+  return added;
 }
 // 按真实高度瀑布流排列一组画布卡片，避免重叠
 const waitImgs = () => Promise.all($$('#world img[data-thumb]').map((img) => (img.complete && img.naturalWidth) ? 0
@@ -537,6 +684,7 @@ async function moveCard(id, areaId, index = 0, pos = null) {
 async function trashCard(id) {
   const card = findCard(id);
   if (!card || card.columnId === TRASH) return;
+  if (state.zone !== TRASH) await animateOut(id);
   card.prevColumnId = card.columnId;
   card.columnId = TRASH;
   card.trashedAt = Date.now();
@@ -556,10 +704,13 @@ async function restoreCard(id) {
   await changed();
   toast(`已恢复到「${areaName(target)}」`);
 }
-async function purgeCard(id) {
+async function purgeCard(id, anim = true) {
+  if (anim) await animateOut(id);
   await db.deleteCard(id);
-  const url = state.urls.get(id);
-  if (url) { URL.revokeObjectURL(url); state.urls.delete(id); }
+  for (const key of [id, `thumb:${id}`]) {
+    const url = state.urls.get(key);
+    if (url) { URL.revokeObjectURL(url); state.urls.delete(key); }
+  }
   state.cards = state.cards.filter((c) => c.id !== id);
 }
 async function download(id) {
@@ -582,6 +733,7 @@ async function newNote(areaId, pos) {
   if (canvas) Object.assign(card, pos || viewCenter());
   await db.put('cards', card);
   state.cards.push(card);
+  state.fresh.add(card.id);
   await changed();
 }
 async function editNote(card) {
@@ -660,25 +812,72 @@ async function preview(id) {
   const card = findCard(id);
   if (!card) return;
   if (card.kind === 'note') return editNote(card);
-  const url = await urlFor(id);
   const t = typeOf(card);
-  let body;
-  if (!url) body = `<div class="viewer-none">找不到文件内容</div>`;
-  else if (t.k === 'image') body = `<img src="${url}" alt="${esc(card.name)}">`;
-  else if (t.k === 'video') body = `<video src="${url}" controls autoplay></video>`;
-  else if (t.k === 'audio') body = `<audio src="${url}" controls autoplay></audio>`;
-  else if (t.k === 'pdf') body = `<iframe src="${url}" title="${esc(card.name)}"></iframe>`;
-  else if (isTextual(card) && card.size < 2 * 1024 * 1024) body = `<pre>${esc(await (await db.getBlob(id)).text())}</pre>`;
-  else body = `<div class="viewer-none"><div class="type-icon" style="--c:${t.c}">${esc(extOf(card.name).slice(0, 4) || t.label)}</div><div>此类型无法在浏览器内预览</div><button class="btn primary" data-action="download" data-id="${id}">下载文件</button></div>`;
-  $('#viewerInner').innerHTML = `<div class="viewer-head"><div class="name">${esc(card.name)}</div><span class="meta">${fmtSize(card.size)}</span>
-    <button class="icon-btn" data-action="download" data-id="${id}" aria-label="下载"><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg></button>
+  const fam = pv.family(card);
+  const convs = pv.conversionsFor(card, card.thumb === 'ok');
+  $('#viewerInner').innerHTML = `<div class="viewer-head"><div class="type-icon sm" style="--c:${t.c}">${esc(extOf(card.name).slice(0, 4) || t.label)}</div>
+    <div class="vh-text"><div class="name">${esc(card.name)}</div><div class="meta">${metaText(card, t)}</div></div>
+    <button class="icon-btn" data-action="download" data-id="${id}" aria-label="下载原文件" title="下载原文件"><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg></button>
     <button class="icon-btn" data-action="close-viewer" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
-    <div class="viewer-body">${body}</div>`;
+    <div class="viewer-body" id="viewerBody"><div class="spinner" aria-label="加载中"></div></div>
+    ${convs.length ? `<div class="convert-bar"><span class="cv-label"><svg viewBox="0 0 24 24"><path d="M4 7h13l-3-3M20 17H7l3 3"/></svg>转换为</span>
+      ${convs.map((c) => `<button class="chip" data-action="convert" data-conv="${c.id}" data-id="${id}">${esc(c.label)}</button>`).join('')}
+      <span class="cv-status" id="cvStatus" aria-live="polite"></span></div>` : ''}`;
   $('#viewer').showModal();
+  const bodyEl = $('#viewerBody');
+  const url = await urlFor(id);
+  let html, mount;
+  try {
+    if (!url) html = `<div class="viewer-none">找不到文件内容</div>`;
+    else if (fam === 'image') html = `<img src="${url}" alt="${esc(card.name)}">`;
+    else if (fam === 'video') html = `<video src="${url}" controls autoplay></video>`;
+    else if (fam === 'audio') {
+      const tu = card.thumb === 'ok' ? await thumbUrl(id) : null;
+      html = `<div class="audio-view">${tu ? `<img src="${tu}" alt="">` : ''}<audio src="${url}" controls autoplay></audio></div>`;
+    } else if (fam === 'pdf' && extOf(card.name) === 'pdf') html = `<iframe src="${url}" title="${esc(card.name)}"></iframe>`;
+    else {
+      const rich = await pv.richPreview(card, await db.getBlob(id), card.thumb === 'ok' ? await thumbUrl(id) : null);
+      if (rich) ({ html, mount } = rich);
+      else if (isTextual(card) && card.size < 2 * 1024 * 1024) html = `<pre>${esc(await (await db.getBlob(id)).text())}</pre>`;
+      else if (card.thumb === 'ok') html = `<figure class="embed-preview"><img src="${await thumbUrl(id)}" alt=""></figure>`;
+    }
+  } catch (e) {
+    console.warn(e);
+    html = `<div class="viewer-none">预览失败：${esc(e.message || e)}</div>`;
+  }
+  if (!html) html = `<div class="viewer-none"><div class="type-icon" style="--c:${t.c}">${esc(extOf(card.name).slice(0, 4) || t.label)}</div><div>此类型无法在浏览器内预览</div><button class="btn primary" data-action="download" data-id="${id}">下载文件</button></div>`;
+  if (!$('#viewer').open || $('#viewerBody') !== bodyEl) return; // 已关闭或切换
+  bodyEl.innerHTML = html;
+  bodyEl.classList.add('ready');
+  mount?.(bodyEl);
+}
+async function runConvert(btn) {
+  const card = findCard(btn.dataset.id);
+  if (!card || btn.classList.contains('busy')) return;
+  const status = $('#cvStatus');
+  const say = (s) => { if (status) status.textContent = s; };
+  btn.classList.add('busy');
+  say('正在转换…');
+  try {
+    const files = await pv.convert(card, await db.getBlob(card.id), btn.dataset.conv, say);
+    const areaId = card.columnId === TRASH ? defaultTarget() : card.columnId;
+    const canvas = isCanvas(areaId);
+    const idx = canvas ? null : cardsIn(areaId, false).findIndex((c) => c.id === card.id) + 1;
+    const pos = canvas ? { x: (card.x || 0) + CARD_W + 60, y: card.y || 0 } : null;
+    const added = await addFiles(files, areaId, idx, pos, { quiet: true });
+    say(`✓ 已生成 ${added.length} 个文件，放在「${areaName(areaId)}」原文件旁边`);
+    toast(`转换完成：${added.map((c) => c.name).slice(0, 2).join('、')}${added.length > 2 ? ` 等 ${added.length} 个` : ''}`,
+      { action: '下载', onAction: () => added.forEach((c, i) => setTimeout(() => download(c.id), i * 300)) });
+  } catch (e) {
+    console.warn(e);
+    say('');
+    toast(`转换失败：${e.message || e}`, { error: true });
+  } finally {
+    btn.classList.remove('busy');
+  }
 }
 // 关闭时清空内容，确保视频/音频停止播放（不只依赖 close 事件）
 function closeViewer() { const v = $('#viewer'); if (v.open) v.close(); $('#viewerInner').innerHTML = ''; }
-$('#viewer').addEventListener('close', () => { $('#viewerInner').innerHTML = ''; });
 $('#viewer').addEventListener('cancel', (e) => { e.preventDefault(); closeViewer(); });
 $('#viewer').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeViewer(); });
 
@@ -818,7 +1017,8 @@ async function refreshStatus() {
   } catch {}
   chip.textContent = `已用 ${fmtSize(used)}${quota ? ` / ${fmtSize(quota)}` : ''} · ${persisted ? '持久存储' : '普通存储'}`;
   chip.className = `status-chip ${persisted ? 'ok' : 'warn'}`;
-  const [lastBackup, lastChange] = await Promise.all([db.getMeta('lastBackup', 0), db.getMeta('lastChange', 0)]);
+  let lastBackup = 0, lastChange = 0;
+  try { [lastBackup, lastChange] = await Promise.all([db.getMeta('lastBackup', 0), db.getMeta('lastChange', 0)]); } catch { return; }
   const bc = $('#backupChip');
   const stale = state.cards.length && lastChange > lastBackup && (!lastBackup || Date.now() - lastBackup > 3 * 86400e3);
   bc.textContent = lastBackup ? `上次备份 ${ago(lastBackup)}${lastChange > lastBackup ? ' · 有新改动' : ''}` : '尚未备份';
@@ -994,9 +1194,10 @@ document.addEventListener('click', async (e) => {
     case 'storage-info': return storageInfo();
     case 'download': return download(btn.dataset.id);
     case 'close-viewer': return closeViewer();
-    case 'zoom-in': return zoomAt(1.2);
-    case 'zoom-out': return zoomAt(1 / 1.2);
-    case 'zoom-reset': return zoomAt(1 / cam().z);
+    case 'zoom-in': return zoomAt(1.25, null, null, true);
+    case 'zoom-out': return zoomAt(1 / 1.25, null, null, true);
+    case 'zoom-reset': return zoomAt(1 / cam().z, null, null, true);
+    case 'convert': return runConvert(btn);
     case 'zoom-fit': return zoomFit();
     case 'tidy': return tidyCanvas();
     case 'toggle-drafts': {
@@ -1007,7 +1208,8 @@ document.addEventListener('click', async (e) => {
     case 'empty-trash': {
       const list = cardsIn(TRASH, false);
       if (!(await confirmBox({ title: '清空回收站？', body: `${list.length} 张卡片将被永久删除，无法恢复。建议先备份。`, ok: '永久删除', danger: true }))) return;
-      for (const c of list) await purgeCard(c.id);
+      await Promise.all(list.map((c) => animateOut(c.id)));
+      for (const c of list) await purgeCard(c.id, false);
       toast(`已永久删除 ${list.length} 张卡片`);
       return changed();
     }
@@ -1050,7 +1252,7 @@ document.addEventListener('paste', (e) => {
     const card = { id: uid(), kind: 'note', name: text.trim().split('\n')[0].slice(0, 40), text, columnId: areaId,
       order: isCanvas(areaId) ? topOrder(areaId) : orderAt(areaId, cardsIn(areaId, false).length), createdAt: now, updatedAt: now, enteredAt: now };
     if (isCanvas(areaId)) Object.assign(card, viewCenter());
-    db.put('cards', card).then(() => { state.cards.push(card); toast('已粘贴为便签'); changed(); });
+    db.put('cards', card).then(() => { state.cards.push(card); state.fresh.add(card.id); toast('已粘贴为便签'); changed(); });
   }
 });
 let searchTimer;
