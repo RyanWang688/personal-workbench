@@ -3,6 +3,8 @@ import * as pv from './preview.js?v=3';
 
 const TRASH = 'trash';
 const BOARD = 'board';
+const ARCHIVE = 'archive';      // 「已完成项目」页面
+const PICK = 'archive-pick';    // 拖到「已完成项目」标签上 → 选择文件夹
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
@@ -17,6 +19,7 @@ const state = {
   areas: [], cards: [], query: '', urls: new Map(), dragId: null,
   view: ls.get('view', BOARD), zone: ls.get('zone', 'drafts'), cams: ls.get('cams', {}),
   fresh: new Set(), // 新加入的卡片，渲染时播放入场动画
+  folder: ls.get('folder', null), // 「已完成项目」里当前打开的文件夹
 };
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const channel = 'BroadcastChannel' in window ? new BroadcastChannel('personal-workbench') : null;
@@ -93,8 +96,11 @@ function orderAt(areaId, index, excludeId) {
 }
 const topOrder = (areaId) => Math.max(0, ...cardsIn(areaId, false).map((c) => c.order)) + 1;
 // 当前「默认投放位置」：看板 → 第一列；画布 → 画布视野中央
+const folders = () => areasOf('folder');
+const openFolder = () => (state.view === ARCHIVE && area(state.folder)?.kind === 'folder' ? state.folder : null);
 function defaultTarget() {
   if (isCanvas(state.view)) return state.view;
+  if (openFolder()) return openFolder();
   return columns()[0]?.id || fallbackZone();
 }
 
@@ -104,7 +110,8 @@ async function load() {
   state.cards = cards;
   const live = new Set(cards.map((c) => c.id));
   for (const [key, url] of state.urls) if (!live.has(key.replace(/^thumb:/, ''))) { URL.revokeObjectURL(url); state.urls.delete(key); }
-  if (state.view !== BOARD && !isCanvas(state.view)) state.view = BOARD;
+  if (state.view !== BOARD && state.view !== ARCHIVE && !isCanvas(state.view)) state.view = BOARD;
+  if (state.folder && !area(state.folder)) state.folder = null;
   if (state.zone !== TRASH && !area(state.zone)) state.zone = fallbackZone() || TRASH;
 }
 async function changed() {
@@ -216,10 +223,11 @@ const DOTS = `<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx=
 function render() {
   const before = snapshot();
   renderViews();
-  const onBoard = state.view === BOARD;
+  const onBoard = state.view === BOARD, onArchive = state.view === ARCHIVE;
   $('#board').hidden = !onBoard;
-  $('#canvasView').hidden = onBoard;
-  if (onBoard) renderBoard(); else renderCanvas();
+  $('#archiveView').hidden = !onArchive;
+  $('#canvasView').hidden = onBoard || onArchive;
+  if (onBoard) renderBoard(); else if (onArchive) renderArchive(); else renderCanvas();
   renderZones();
   loadThumbs();
   playFlip(before);
@@ -325,6 +333,9 @@ function renderViews() {
   $('#views').innerHTML = `
     <button role="tab" class="view-tab" data-view="${BOARD}" aria-selected="${state.view === BOARD}">
       <svg viewBox="0 0 24 24"><rect x="4" y="4" width="4.5" height="16" rx="1"/><rect x="10" y="4" width="4.5" height="11" rx="1"/><rect x="16" y="4" width="4" height="7" rx="1"/></svg>看板<b>${boardCount}</b></button>
+    <button role="tab" class="view-tab archive-tab" data-view="${ARCHIVE}" data-drop="${PICK}" aria-selected="${state.view === ARCHIVE}" title="彻底完成的项目归档在这里；把卡片拖到这里即可归档">
+      ${FOLDER_SVG}已完成项目<b>${folders().length}</b></button>
+    <span class="view-sep" aria-hidden="true"></span>
     ${canvases().map((cv) => `<button role="tab" class="view-tab" data-view="${cv.id}" data-drop="${cv.id}" aria-selected="${state.view === cv.id}">
       <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="2"/><circle cx="9" cy="9" r="1"/><circle cx="15" cy="15" r="1"/><circle cx="15" cy="9" r="1"/><circle cx="9" cy="15" r="1"/></svg>${esc(cv.title)}<b>${count(cv.id)}</b>
       ${state.view === cv.id ? `<span class="tab-more" data-action="canvas-menu" role="button" aria-label="画布设置">${DOTS}</span>` : ''}</button>`).join('')}
@@ -347,6 +358,134 @@ function renderBoard() {
   board.scrollLeft = scroll;
   $$('.list', board).forEach((l) => { if (listScroll[l.dataset.col]) l.scrollTop = listScroll[l.dataset.col]; });
 }
+// ---------- 已完成项目（归档文件夹） ----------
+const FOLDER_SVG = `<svg viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="m9 13.5 2 2 4-4"/></svg>`;
+const folderSize = (id) => cardsIn(id, false).reduce((n, c) => n + (c.size || 0), 0);
+function folderCover(f) {
+  const list = cardsIn(f.id, false).slice(0, 4);
+  if (!list.length) return `<div class="cover-empty">${FOLDER_SVG}</div>`;
+  return `<div class="cover-grid n${list.length}">${list.map((c) => {
+    if (c.thumb === 'ok') {
+      const url = state.urls.get(`thumb:${c.id}`);
+      return `<img class="thumb-img${url ? ' loaded' : ''}" data-thumb="${c.id}" ${url ? `src="${url}"` : ''} alt="" draggable="false">`;
+    }
+    const t = typeOf(c);
+    return `<span class="cover-type" style="--c:${c.kind === 'note' ? '#f0b429' : t.c}">${esc(c.kind === 'note' ? '便签' : (extOf(c.name).slice(0, 4) || t.label))}</span>`;
+  }).join('')}</div>`;
+}
+function renderArchive() {
+  const el = $('#archiveView');
+  const fid = openFolder();
+  if (fid) {
+    const f = area(fid), n = cardsIn(fid, false).length;
+    el.innerHTML = `
+      <header class="archive-head">
+        <button class="icon-btn back" data-action="folder-back" aria-label="返回已完成项目"><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></button>
+        <div class="ah-text">
+          <div class="crumb"><button class="crumb-link" data-action="folder-back">已完成项目</button><span>/</span></div>
+          <h2>${esc(f.title)}</h2>
+          <div class="meta">${n} 个文件 · ${fmtSize(folderSize(fid))} · 归档于 ${fmtDate(f.doneAt || Date.now())}</div>
+        </div>
+        <button class="btn" data-action="folder-zip" ${n ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg><span>打包下载</span></button>
+        <button class="icon-btn" data-action="folder-menu" aria-label="文件夹设置" aria-haspopup="menu">${DOTS}</button>
+      </header>
+      <div class="list folder-list" data-col="${fid}">${listHTML(fid, '把卡片或文件拖到这里归档')}</div>`;
+    return;
+  }
+  const q = state.query.toLowerCase();
+  const fs = folders().filter((f) => !q || f.title.toLowerCase().includes(q) || cardsIn(f.id).length);
+  el.innerHTML = `
+    <header class="archive-head">
+      <div class="ah-text">
+        <h2>已完成项目</h2>
+        <div class="meta">彻底完成的项目归档在这里，长期保存不会丢。把卡片拖到文件夹上即可归档；也可以在看板列菜单里「整列归档」。</div>
+      </div>
+      <button class="btn primary" data-action="add-folder"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>新建项目文件夹</span></button>
+    </header>
+    ${fs.length ? `<div class="folder-grid">${fs.map((f) => {
+      const n = cardsIn(f.id, false).length;
+      return `<div class="folder" role="button" tabindex="0" data-folder="${f.id}" data-drop="${f.id}" aria-label="项目文件夹 ${esc(f.title)}，${n} 个文件">
+        <div class="folder-tab" aria-hidden="true"></div>
+        <div class="folder-cover">${folderCover(f)}</div>
+        <div class="folder-info"><div class="folder-name">${highlight(f.title)}</div>
+          <div class="meta">${n} 个文件 · ${fmtSize(folderSize(f.id))} · ${fmtDate(f.doneAt || Date.now())}</div></div>
+        <button class="more" data-action="folder-menu" data-id="${f.id}" aria-label="文件夹设置" aria-haspopup="menu">${DOTS}</button>
+      </div>`;
+    }).join('')}</div>`
+    : `<div class="archive-empty">${FOLDER_SVG}<b>${state.query ? '没有匹配的项目' : '还没有已完成的项目'}</b><span>${state.query ? '' : '新建一个项目文件夹，或把看板上做完的卡片拖到顶部「已完成项目」标签上。'}</span></div>`}`;
+}
+async function createFolder(title) {
+  const list = folders();
+  const f = { id: uid(), kind: 'folder', title, order: list.length ? list[list.length - 1].order + 1024 : 0, doneAt: Date.now() };
+  await saveArea(f);
+  state.areas.push(f);
+  return f;
+}
+// 批量归档，可撤销
+async function archiveCards(cards, folderId) {
+  if (!cards.length) return;
+  const prev = cards.map((c) => ({ c, columnId: c.columnId, order: c.order, x: c.x, y: c.y }));
+  await Promise.all(cards.map((c) => animateOut(c.id)));
+  let order = orderAt(folderId, cardsIn(folderId, false).length);
+  for (const c of cards) { c.columnId = folderId; c.order = order; c.enteredAt = Date.now(); c.updatedAt = Date.now(); order += 1024; }
+  await db.putMany('cards', cards);
+  await changed();
+  toast(`已归档 ${cards.length} 个到「${areaName(folderId)}」`, {
+    action: '撤销',
+    onAction: async () => {
+      for (const p of prev) Object.assign(p.c, { columnId: p.columnId, order: p.order, x: p.x, y: p.y });
+      await db.putMany('cards', cards);
+      await changed();
+    },
+  });
+}
+async function pickFolder() {
+  const fs = folders();
+  const res = await dialog(`<h3>归档到哪个项目文件夹？</h3>
+    <div class="pick-list">${fs.map((f, i) => `<label class="pick"><input type="radio" name="f" value="${f.id}" ${i === 0 ? 'checked' : ''}><span>${esc(f.title)}</span><small>${cardsIn(f.id, false).length} 个文件</small></label>`).join('')}
+      <label class="pick new"><input type="radio" name="f" value="__new" ${fs.length ? '' : 'checked'}><input type="text" name="n" placeholder="新建项目文件夹，输入名称…" maxlength="80"></label></div>
+    ${actions('归档')}`, (f) => ({ id: f.querySelector('input[name="f"]:checked')?.value, name: f.n.value.trim() }));
+  if (!res) return null;
+  if (res.name || res.id === '__new' || !res.id) return (await createFolder(res.name || `项目 ${new Date().toLocaleDateString('zh-CN')}`)).id;
+  return res.id;
+}
+async function archiveColumn(col) {
+  const cards = cardsIn(col.id, false);
+  if (!cards.length) return toast('这一列是空的');
+  const name = await prompt({ title: `把「${col.title}」的 ${cards.length} 张卡片归档为已完成项目`, value: '', placeholder: '项目名称，例如：物理宣传册', ok: '归档' });
+  if (!name) return;
+  const f = await createFolder(name);
+  await archiveCards(cards, f.id);
+}
+async function zipFolder(f) {
+  const cards = cardsIn(f.id, false);
+  if (!cards.length) return toast('文件夹是空的');
+  const t = toast('正在打包…', { sticky: true });
+  try {
+    const JSZip = await pv.lib('zip');
+    const z = new JSZip(), used = new Set();
+    for (const c of cards) {
+      const raw = (c.kind === 'note' ? `${c.name || '便签'}.txt` : c.name).replace(/[\\/:*?"<>|]/g, '_');
+      let name = raw, i = 2;
+      while (used.has(name)) name = raw.replace(/(\.[^.]*)?$/, ` (${i++})$1`);
+      used.add(name);
+      const data = c.kind === 'note' ? (c.text || '') : await db.getBlob(c.id);
+      if (data != null) z.file(name, data);
+    }
+    const blob = await z.generateAsync({ type: 'blob', compression: 'STORE' }, (m) => t.set(`正在打包 ${Math.round(m.percent)}%…`));
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${f.title.replace(/[\\/:*?"<>|]/g, '_')}.zip`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    t.close();
+    toast(`已打包 ${cards.length} 个文件（${fmtSize(blob.size)}）`);
+  } catch (e) {
+    t.close();
+    toast(`打包失败：${e.message || e}`, { error: true });
+  }
+}
+
 function renderZones() {
   const zs = zones();
   const nt = cardsIn(TRASH, false).length;
@@ -746,10 +885,11 @@ async function editNote(card) {
 }
 
 // ---------- 区域（列 / 功能区 / 画布）操作 ----------
-const KIND_LABEL = { column: '列', zone: '功能区', canvas: '画布' };
+const KIND_LABEL = { column: '列', zone: '功能区', canvas: '画布', folder: '项目文件夹' };
 async function addArea(kind) {
-  const title = await prompt({ title: `新建${KIND_LABEL[kind]}`, placeholder: kind === 'zone' ? '例如：灵感、参考图…' : kind === 'canvas' ? '例如：项目脑图' : '例如：资料、待审阅…', ok: '创建' });
+  const title = await prompt({ title: `新建${KIND_LABEL[kind]}`, placeholder: kind === 'zone' ? '例如：灵感、参考图…' : kind === 'canvas' ? '例如：项目脑图' : kind === 'folder' ? '例如：物理宣传册' : '例如：资料、待审阅…', ok: '创建' });
   if (!title) return;
+  if (kind === 'folder') { await createFolder(title); return changed(); }
   const list = areasOf(kind);
   const a = { id: uid(), kind, title, order: list.length ? list[list.length - 1].order + 1024 : 0 };
   await saveArea(a);
@@ -777,7 +917,7 @@ async function moveArea(a, dir) {
 }
 async function deleteArea(a) {
   const kind = kindOf(a);
-  if (areasOf(kind).length <= 1) return toast(`至少保留一个${KIND_LABEL[kind]}`, { error: true });
+  if (kind !== 'folder' && areasOf(kind).length <= 1) return toast(`至少保留一个${KIND_LABEL[kind]}`, { error: true });
   const cards = cardsIn(a.id, false);
   let target = kind === 'zone' ? zones().find((z) => z.id !== a.id)?.id : fallbackZone();
   if (target === a.id) target = zones().find((z) => z.id !== a.id)?.id;
@@ -789,6 +929,7 @@ async function deleteArea(a) {
   await db.del('columns', a.id);
   state.areas = state.areas.filter((x) => x !== a);
   if (state.view === a.id) setView(BOARD);
+  if (state.folder === a.id) { state.folder = null; ls.set('folder', null); }
   if (state.zone === a.id) { state.zone = target; ls.set('zone', target); }
   await changed();
 }
@@ -965,6 +1106,12 @@ function cardMenu(anchor, card) {
   dest(columns(), '移到看板');
   dest(canvases(), '放到画布');
   dest(zones(), '放入功能区');
+  items.push('-', { label: '归档到已完成项目' });
+  folders().filter((f) => f.id !== card.columnId).forEach((f) => items.push({ text: f.title, run: () => archiveCards([card], f.id) }));
+  items.push({ text: '新建项目文件夹并归档…', run: async () => {
+    const n = await prompt({ title: '新建项目文件夹', placeholder: '项目名称', ok: '创建并归档' });
+    if (n) archiveCards([card], (await createFolder(n)).id);
+  } });
   items.push('-', { text: '删除', danger: true, run: () => trashCard(card.id) });
   openMenu(anchor, items);
 }
@@ -973,7 +1120,9 @@ function areaMenu(anchor, a) {
   const list = areasOf(kind), i = list.indexOf(a);
   const prev = kind === 'column' ? '向左移' : '前移', next = kind === 'column' ? '向右移' : '后移';
   const items = [{ text: '重命名', run: () => renameArea(a) }];
-  if (kind !== 'canvas') items.push({ text: '添加便签', run: () => newNote(a.id) });
+  if (kind !== 'canvas' && kind !== 'folder') items.push({ text: '添加便签', run: () => newNote(a.id) });
+  if (kind === 'column') items.push({ text: '整列归档到已完成项目…', run: () => archiveColumn(a) });
+  if (kind === 'folder') items.push({ text: '打包下载 zip', run: () => zipFolder(a) });
   if (kind === 'zone') items.push({ text: a.ttlDays ? `自动清理：${a.ttlDays} 天` : '设置自动清理…', run: () => setZoneTtl(a) });
   if (i > 0) items.push({ text: prev, run: () => moveArea(a, -1) });
   if (i < list.length - 1) items.push({ text: next, run: () => moveArea(a, 1) });
@@ -1157,8 +1306,13 @@ document.addEventListener('drop', async (e) => {
   const pos = onCanvas ? (() => { const p = toWorld(e.clientX, e.clientY); return { x: p.x - CARD_W / 2, y: p.y - 30 }; })() : null;
   if (fileDrag) {
     const files = await filesFromDataTransfer(e.dataTransfer);
+    if (target === PICK) target = await pickFolder();
     if (!target || target === TRASH) target = defaultTarget();
     return addFiles(files, target, list ? realIndex(target, before) : null, pos);
+  }
+  if (target === PICK) {
+    const fid = await pickFolder();
+    return fid && archiveCards([findCard(dragId)].filter(Boolean), fid);
   }
   if (!target || target === findCard(dragId)?.columnId && tab) return;
   await moveCard(dragId, target, tab ? 0 : realIndex(target, before), pos);
@@ -1170,7 +1324,12 @@ document.addEventListener('click', async (e) => {
   if (suppressClick) return;
   const btn = e.target.closest('[data-action]');
   const viewTab = e.target.closest('[data-view]');
-  if (viewTab && !btn) { setView(viewTab.dataset.view); return render(); }
+  if (viewTab && !btn) {
+    if (viewTab.dataset.view === ARCHIVE && state.view === ARCHIVE) { state.folder = null; ls.set('folder', null); }
+    setView(viewTab.dataset.view); return render();
+  }
+  const folderEl = e.target.closest('[data-folder]');
+  if (folderEl && !btn) { state.folder = folderEl.dataset.folder; ls.set('folder', state.folder); return render(); }
   const zoneTab = e.target.closest('[data-zone]');
   if (zoneTab) { state.zone = zoneTab.dataset.zone; ls.set('zone', state.zone); return renderZones(), loadThumbs(); }
   const cardEl = e.target.closest('.card');
@@ -1186,6 +1345,10 @@ document.addEventListener('click', async (e) => {
     case 'add-col': return addArea('column');
     case 'add-zone': return addArea('zone');
     case 'add-canvas': return addArea('canvas');
+    case 'add-folder': return addArea('folder');
+    case 'folder-back': state.folder = null; ls.set('folder', null); return render();
+    case 'folder-zip': return zipFolder(area(openFolder()));
+    case 'folder-menu': return menuAnchor === btn ? closeMenu() : areaMenu(btn, area(btn.dataset.id || openFolder()));
     case 'add-note-col': return newNote(col.id);
     case 'new-note': return newNote();
     case 'add-files': return $('#fileInput').click();
@@ -1233,6 +1396,7 @@ document.addEventListener('keydown', (e) => {
       clearTimeout(cardEl._t); cardEl._t = setTimeout(() => saveCard(card), 300);
     }
   }
+  if (e.target.matches?.('[data-folder]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); e.target.click(); }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#search').focus(); }
 });
 document.addEventListener('contextmenu', (e) => {

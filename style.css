@@ -117,6 +117,57 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 [hidden] { display: none !important; }
 .board { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 14px; padding: 4px 20px 20px; overflow-x: auto; overflow-y: hidden; }
 
+/* ---------- 已完成项目 ---------- */
+.view-sep { width: 1px; height: 20px; background: var(--border); margin: 0 6px; flex-shrink: 0; }
+.archive-tab svg { color: var(--ok); }
+.archive-view { flex: 1; min-width: 0; overflow-y: auto; padding: 8px 20px 32px; }
+.archive-head { display: flex; align-items: center; gap: 12px; margin: 4px 0 18px; }
+.ah-text { flex: 1; min-width: 0; }
+.archive-head h2 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: .01em; }
+.archive-head .meta { font-size: 13px; color: var(--text-3); margin-top: 2px; }
+.archive-head .back { width: 36px; height: 36px; border: 1px solid var(--border); background: var(--surface); }
+.crumb { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); }
+.crumb-link { border: 0; background: none; padding: 0; color: var(--accent); font-size: 12px; }
+.crumb-link:hover { text-decoration: underline; }
+.btn[disabled] { opacity: .45; pointer-events: none; }
+.folder-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 22px 18px; }
+.folder { position: relative; cursor: pointer; border-radius: 14px; padding: 10px; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow);
+  transition: transform .2s cubic-bezier(.2,.8,.2,1), box-shadow .2s, border-color .2s; animation: fade-up .35s cubic-bezier(.2,.8,.2,1) backwards; }
+.folder:nth-child(2) { animation-delay: .04s; } .folder:nth-child(3) { animation-delay: .08s; } .folder:nth-child(4) { animation-delay: .12s; } .folder:nth-child(n+5) { animation-delay: .16s; }
+.folder:hover { transform: translateY(-3px); box-shadow: 0 4px 8px rgba(20,20,30,.06), 0 14px 32px rgba(20,20,30,.12); }
+.folder:hover .more { opacity: 1; }
+.folder.drop-active { border-color: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 30%, transparent); transform: translateY(-3px) scale(1.02); }
+.folder-tab { position: absolute; top: -9px; left: 14px; width: 72px; height: 12px; border-radius: 8px 8px 0 0; background: color-mix(in srgb, var(--ok) 55%, var(--surface)); }
+.folder-cover { height: 150px; border-radius: 9px; overflow: hidden; background: color-mix(in srgb, var(--ok) 10%, var(--surface-2)); }
+.cover-grid { display: grid; height: 100%; gap: 3px; }
+.cover-grid.n2 { grid-template-columns: 1fr 1fr; }
+.cover-grid.n3 { grid-template-columns: 2fr 1fr; grid-template-rows: 1fr 1fr; }
+.cover-grid.n3 > :first-child { grid-row: span 2; }
+.cover-grid.n4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.cover-grid > * { min-width: 0; min-height: 0; width: 100%; height: 100%; }
+.cover-grid img { object-fit: cover; object-position: top; background: #fff; }
+.cover-type { display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 12px; text-transform: uppercase; background: var(--c); }
+.cover-empty { height: 100%; display: grid; place-items: center; color: color-mix(in srgb, var(--ok) 60%, var(--text-3)); }
+.cover-empty svg { width: 48px; height: 48px; stroke-width: 1.3; }
+.folder-info { padding: 10px 30px 2px 4px; }
+.folder-name { font-weight: 650; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder .meta { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+.folder .more { top: auto; bottom: 8px; right: 6px; }
+.archive-empty { display: grid; justify-items: center; gap: 8px; padding: 70px 20px; text-align: center; color: var(--text-3); border: 1.5px dashed var(--border); border-radius: 16px; }
+.archive-empty svg { width: 52px; height: 52px; stroke-width: 1.2; color: var(--ok); }
+.archive-empty b { color: var(--text-2); font-size: 16px; }
+.folder-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); align-content: start; gap: 12px; padding: 4px; border-radius: 12px; min-height: 200px; overflow: visible; }
+.folder-list .drop-indicator { display: none; }
+.folder-list.drop-active { background: color-mix(in srgb, var(--ok) 8%, transparent); outline: 2px dashed color-mix(in srgb, var(--ok) 50%, transparent); }
+.folder-list .empty { grid-column: 1 / -1; padding: 50px; }
+.pick-list { display: grid; gap: 6px; max-height: 300px; overflow-y: auto; }
+.pick { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; cursor: pointer; transition: border-color .15s, background .15s; }
+.pick:has(input:checked) { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 8%, transparent); }
+.pick span { flex: 1; font-weight: 550; }
+.pick small { color: var(--text-3); }
+.pick input[type="radio"] { accent-color: var(--ok); }
+.pick.new input[type="text"] { flex: 1; border: 0; background: transparent; padding: 0; outline: none; }
+
 /* ---------- 无限画布 ---------- */
 .canvas-view { flex: 1; min-width: 0; position: relative; margin: 4px 0 0 20px; border: 1px solid var(--border); border-bottom: 0; border-radius: 14px 14px 0 0; overflow: hidden; background: var(--surface-2); }
 .viewport { position: absolute; inset: 0; overflow: hidden; cursor: grab; touch-action: none; outline: none;
@@ -314,6 +365,11 @@ body.file-over .drop-overlay { display: flex; }
   .actions .badge { min-width: 18px; height: 18px; padding: 0 5px; font-size: 11px; }
   .actions .btn span { display: none; }
   .viewbar { padding: 8px 16px; flex-wrap: wrap; gap: 6px; }
+  .archive-view { padding: 8px 16px 24px; }
+  .archive-head { flex-wrap: wrap; }
+  .archive-head .btn.primary { width: 100%; justify-content: center; }
+  .folder-grid, .folder-list { grid-template-columns: 1fr 1fr; gap: 16px 10px; }
+  .folder-cover { height: 110px; }
   .views { flex-basis: 100%; }
   .status { margin-left: 0; }
   .canvas-view { margin: 4px 16px 0; }
