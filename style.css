@@ -171,8 +171,10 @@ body.dragging-folder .folder:not(.folder-dragging) { border-style: dashed; }
 .folder.merge-target .folder-tab, .folder.merge-open .folder-tab { transform: rotate(-10deg) translateY(-4px); }
 .folder.merged { animation: merged-glow 1.2s ease-out; }
 @keyframes merged-glow { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent); } 100% { box-shadow: 0 0 0 18px transparent; } }
-.folder-tab { position: absolute; top: -9px; left: 14px; width: 72px; height: 12px; border-radius: 8px 8px 0 0; background: color-mix(in srgb, var(--ok) 55%, var(--surface)); }
-.folder-cover { height: 150px; border-radius: 9px; overflow: hidden; background: color-mix(in srgb, var(--ok) 10%, var(--surface-2)); }
+.folder { --fc: var(--ok); }
+.folder:hover { border-color: color-mix(in srgb, var(--fc) 45%, var(--border)); }
+.folder-tab { position: absolute; top: -9px; left: 14px; width: 72px; height: 12px; border-radius: 8px 8px 0 0; background: color-mix(in srgb, var(--fc) 75%, var(--surface)); }
+.folder-cover { height: 150px; border-radius: 9px; overflow: hidden; background: color-mix(in srgb, var(--fc) 14%, var(--surface-2)); box-shadow: inset 0 3px 0 color-mix(in srgb, var(--fc) 70%, transparent); }
 .cover-grid { display: grid; height: 100%; gap: 3px; }
 .cover-grid.n2 { grid-template-columns: 1fr 1fr; }
 .cover-grid.n3 { grid-template-columns: 2fr 1fr; grid-template-rows: 1fr 1fr; }
@@ -181,7 +183,35 @@ body.dragging-folder .folder:not(.folder-dragging) { border-style: dashed; }
 .cover-grid > * { min-width: 0; min-height: 0; width: 100%; height: 100%; }
 .cover-grid img { object-fit: cover; object-position: top; background: #fff; }
 .cover-type { display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 12px; text-transform: uppercase; background: var(--c); }
-.cover-empty { height: 100%; display: grid; place-items: center; color: color-mix(in srgb, var(--ok) 60%, var(--text-3)); }
+.cover-empty { height: 100%; display: grid; place-items: center; color: color-mix(in srgb, var(--fc) 70%, var(--text-3)); }
+/* 分类栏 */
+.cat-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -4px 0 20px; }
+.cat-chip { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface); color: var(--text-2); font-weight: 550; transition: background .15s, border-color .15s, transform .15s; }
+.cat-chip b { font-size: 12px; color: var(--text-3); font-weight: 600; }
+.cat-chip:hover { color: var(--text); border-color: color-mix(in srgb, var(--text) 25%, var(--border)); }
+.cat-chip[aria-selected="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
+.cat-chip[aria-selected="true"] b { color: color-mix(in srgb, var(--bg) 70%, transparent); }
+.cat-chip.drop-active { border-color: var(--ok); background: var(--ok-soft); color: var(--ok); transform: translateY(-2px) scale(1.04); }
+body.dragging-folder .cat-chip[data-catdrop] { border-style: dashed; }
+.cat-add { height: 32px; padding: 0 12px; border-radius: 9px; border: 1px dashed var(--border); background: transparent; color: var(--text-3); }
+.cat-add:hover { color: var(--accent); border-color: var(--accent); }
+.cat-sec + .cat-sec { margin-top: 28px; }
+.cat-h { display: flex; align-items: baseline; gap: 8px; margin: 0 0 14px; font-size: 14px; font-weight: 650; color: var(--text-2); letter-spacing: .04em; }
+.cat-h::before { content: ""; width: 10px; height: 10px; align-self: center; background: var(--text-3); clip-path: polygon(0 0, 100% 0, 100% 100%); }
+.cat-h b { font-size: 12px; color: var(--text-3); font-weight: 500; }
+.archive-empty.slim { padding: 40px 20px; }
+/* 优先级：方形印章字标 */
+.prio { display: inline-grid; place-items: center; width: 18px; height: 18px; margin-right: 6px; vertical-align: 1px; flex-shrink: 0;
+  border: 1.5px solid var(--pc); border-radius: 3px; color: var(--pc); font-size: 11px; font-weight: 800; line-height: 1;
+  background: color-mix(in srgb, var(--pc) 10%, transparent); }
+.card.prio-1, .card.prio-2 { border-left-width: 3px; }
+.card.prio-1 { border-left-color: #e03131 !important; }
+.card.prio-2 { border-left-color: #e8590c !important; }
+.menu .sw { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+.menu .prio { margin-right: 0; }
+.menu .chk { margin-left: auto; color: var(--accent); font-weight: 700; }
+.menu { max-height: min(70vh, 560px); overflow-y: auto; }
+.sel-btn .prio { width: 16px; height: 16px; font-size: 10px; margin: 0; }
 .cover-empty svg { width: 48px; height: 48px; stroke-width: 1.3; }
 .folder-info { padding: 10px 30px 2px 4px; }
 .folder-name { font-weight: 650; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

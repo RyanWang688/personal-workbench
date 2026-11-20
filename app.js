@@ -21,6 +21,8 @@ const state = {
   fresh: new Set(), // 新加入的卡片，渲染时播放入场动画
   folder: ls.get('folder', null), // 「已完成项目」里当前打开的文件夹
   selected: new Set(), // 多选中的卡片
+  archCat: ls.get('archCat', 'all'), // 已完成项目的分类筛选
+  cats: [], // 已完成项目的分类（含空分类）
 };
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const channel = 'BroadcastChannel' in window ? new BroadcastChannel('personal-workbench') : null;
@@ -113,6 +115,7 @@ async function load() {
   for (const [key, url] of state.urls) if (!live.has(key.replace(/^thumb:/, ''))) { URL.revokeObjectURL(url); state.urls.delete(key); }
   if (state.view !== BOARD && state.view !== ARCHIVE && !isCanvas(state.view)) state.view = BOARD;
   if (state.folder && !area(state.folder)) state.folder = null;
+  state.cats = await db.getMeta('categories', []).catch(() => []);
   if (state.zone !== TRASH && !area(state.zone)) state.zone = fallbackZone() || TRASH;
 }
 async function changed() {
@@ -307,22 +310,32 @@ const selBtn = (c) => `<button class="sel" data-action="select" aria-pressed="${
 
 const thumbStateOf = (c) => c.kind !== 'file' ? 'none' : (c.thumb || (pv.likelyThumb(c) ? 'pending' : 'none'));
 const PLAY = `<span class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/></svg></span>`;
+// 优先级：方形印章字标（与「方寸」的方块语言一致），不用圆点
+const PRIO = { 1: { t: '急', label: '紧急', c: '#e03131' }, 2: { t: '高', label: '高', c: '#e8590c' }, 3: { t: '低', label: '低', c: '#868e96' } };
+const prioTag = (c) => { const p = PRIO[c.prio]; return p ? `<span class="prio" style="--pc:${p.c}" title="优先级：${p.label}">${p.t}</span>` : ''; };
+async function setPrio(ids, level) {
+  const cards = ids.map(findCard).filter(Boolean);
+  cards.forEach((c) => { if (level) c.prio = level; else delete c.prio; c.updatedAt = Date.now(); });
+  await db.putMany('cards', cards);
+  await changed();
+  toast(level ? `已设为「${PRIO[level].label}」优先级${cards.length > 1 ? `（${cards.length} 个）` : ''}` : '已清除优先级');
+}
 function cardHTML(c, onCanvas = false) {
   const attrs = onCanvas
     ? `draggable="false" style="left:${Math.round(c.x || 0)}px;top:${Math.round(c.y || 0)}px;z-index:${Math.max(1, Math.round(c.order) || 1)}"`
     : `draggable="${IS_TOUCH ? 'false' : 'true'}"`;
-  const cls = `card${onCanvas ? ' on-canvas' : ''}${onCanvas && !matches(c) ? ' dim' : ''}${state.selected.has(c.id) ? ' selected' : ''}`;
+  const cls = `card${onCanvas ? ' on-canvas' : ''}${onCanvas && !matches(c) ? ' dim' : ''}${state.selected.has(c.id) ? ' selected' : ''}${PRIO[c.prio] ? ` prio-${c.prio}` : ''}`;
   const extra = (onCanvas ? HANDLE : '') + (c.columnId !== TRASH ? selBtn(c) : '');
   if (c.kind === 'note') {
     return `<article class="${cls} note" ${attrs} tabindex="0" data-id="${c.id}" aria-label="便签 ${esc(c.name)}">
-      <div class="body"><div class="name">${highlight(c.name || '便签')}</div>
+      <div class="body"><div class="name">${prioTag(c)}${highlight(c.name || '便签')}</div>
       ${c.text ? `<div class="note-text">${highlight(c.text)}</div>` : ''}
       <div class="meta">便签 · ${fmtDate(c.updatedAt || c.createdAt)}${linkBadge(c)}</div></div>${extra}${MORE}</article>`;
   }
   const t = typeOf(c);
   const meta = metaText(c, t) + linkBadge(c);
   const ext = extOf(c.name).slice(0, 5) || t.label;
-  const name = `<div class="name" title="${esc(c.name)}&#10;添加于 ${fmtDate(c.createdAt)}">${highlight(c.name)}</div>`;
+  const name = `<div class="name" title="${esc(c.name)}&#10;添加于 ${fmtDate(c.createdAt)}">${prioTag(c)}${highlight(c.name)}</div>`;
   const st = thumbStateOf(c);
   if (st !== 'none') {
     const badge = t.k === 'image' ? '' : `<span class="thumb-badge" style="--c:${t.c}">${esc(ext)}</span>`;
@@ -524,28 +537,101 @@ function renderArchive() {
     return;
   }
   const q = state.query.toLowerCase();
-  const fs = folders().filter((f) => !q || f.title.toLowerCase().includes(q) || cardsIn(f.id).length);
+  const all = folders().filter((f) => !q || f.title.toLowerCase().includes(q) || cardsIn(f.id).length);
+  const cats = allCats();
+  const cur = state.archCat === '__none' || cats.includes(state.archCat) ? state.archCat : 'all';
+  const inCat = (name) => all.filter((f) => (name === '__none' ? !f.category || !cats.includes(f.category) : f.category === name));
+  const tile = (f) => {
+    const n = cardsIn(f.id, false).length;
+    return `<div class="folder" role="button" tabindex="0" draggable="${IS_TOUCH ? 'false' : 'true'}" data-folder="${f.id}" data-drop="${f.id}" style="--fc:${folderColor(f)}" aria-label="项目文件夹 ${esc(f.title)}，${n} 个文件" title="拖到另一个文件夹上可以合并，拖到上方分类上可以归类">
+      <span class="merge-hint" aria-hidden="true">松开合并</span>
+      <div class="folder-tab" aria-hidden="true"></div>
+      <div class="folder-cover">${folderCover(f)}</div>
+      <div class="folder-info"><div class="folder-name">${highlight(f.title)}</div>
+        <div class="meta">${n} 个文件 · ${fmtSize(folderSize(f.id))} · ${fmtDate(f.doneAt || Date.now())}</div></div>
+      <button class="more" data-action="folder-menu" data-id="${f.id}" aria-label="文件夹设置" aria-haspopup="menu">${DOTS}</button>
+    </div>`;
+  };
+  const grid = (list) => `<div class="folder-grid">${list.map(tile).join('')}</div>`;
+  const uncategorized = inCat('__none');
+  const chip = (key, label, n, drop) => `<button class="cat-chip" role="tab" aria-selected="${cur === key}" data-cat="${esc(key)}" ${drop != null ? `data-catdrop="${esc(drop)}"` : ''}>${esc(label)}<b>${n}</b></button>`;
+  const bar = folders().length ? `<div class="cat-bar" role="tablist" aria-label="分类">
+      ${chip('all', '全部', all.length)}
+      ${cats.map((c) => chip(c, c, inCat(c).length, c)).join('')}
+      ${cats.length ? chip('__none', '未分类', uncategorized.length, '') : ''}
+      <button class="cat-add" data-action="cat-add" title="新建分类，然后把文件夹拖到分类上">+ 分类</button>
+    </div>` : '';
+  let body;
+  if (!all.length) body = `<div class="archive-empty">${FOLDER_SVG}<b>${state.query ? '没有匹配的项目' : '还没有已完成的项目'}</b><span>${state.query ? '' : '回到看板，长按一个做完的文件 —— 它和同项目的文件会被自动打包送到这里。'}</span></div>`;
+  else if (cur !== 'all') body = inCat(cur).length ? grid(inCat(cur)) : `<div class="archive-empty slim"><b>这个分类还是空的</b><span>把文件夹拖到上方的「${esc(cur === '__none' ? '未分类' : cur)}」标签上，或在文件夹菜单里选择分类。</span></div>`;
+  else if (!cats.length) body = grid(all);
+  else body = [...cats, '__none'].map((c) => { const list = inCat(c); return list.length ? `<section class="cat-sec"><h3 class="cat-h"><span>${esc(c === '__none' ? '未分类' : c)}</span><b>${list.length}</b></h3>${grid(list)}</section>` : ''; }).join('');
   el.innerHTML = `
     <header class="archive-head">
       <div class="ah-text">
         <h2>已完成项目</h2>
-        <div class="meta">在看板上<b>长按任意卡片</b>即可完成项目：同名的关联文件会自动打包成文件夹放到这里。也可以把卡片拖到文件夹上，或在列菜单里「整列归档」。</div>
+        <div class="meta">在看板上<b>长按任意卡片</b>即可完成项目：同名的关联文件会自动打包成文件夹放到这里。文件夹可以拖到分类上归类，拖到另一个文件夹上合并。</div>
       </div>
       <button class="btn primary" data-action="add-folder"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>新建项目文件夹</span></button>
     </header>
-    ${fs.length ? `<div class="folder-grid">${fs.map((f) => {
-      const n = cardsIn(f.id, false).length;
-      return `<div class="folder" role="button" tabindex="0" draggable="${IS_TOUCH ? 'false' : 'true'}" data-folder="${f.id}" data-drop="${f.id}" aria-label="项目文件夹 ${esc(f.title)}，${n} 个文件" title="拖到另一个文件夹上可以合并">
-        <span class="merge-hint" aria-hidden="true">松开合并</span>
-        <div class="folder-tab" aria-hidden="true"></div>
-        <div class="folder-cover">${folderCover(f)}</div>
-        <div class="folder-info"><div class="folder-name">${highlight(f.title)}</div>
-          <div class="meta">${n} 个文件 · ${fmtSize(folderSize(f.id))} · ${fmtDate(f.doneAt || Date.now())}</div></div>
-        <button class="more" data-action="folder-menu" data-id="${f.id}" aria-label="文件夹设置" aria-haspopup="menu">${DOTS}</button>
-      </div>`;
-    }).join('')}</div>`
-    : `<div class="archive-empty">${FOLDER_SVG}<b>${state.query ? '没有匹配的项目' : '还没有已完成的项目'}</b><span>${state.query ? '' : '回到看板，长按一个做完的文件 —— 它和同项目的文件会被自动打包送到这里。'}</span></div>`}`;
+    ${bar}${body}`;
 }
+// ---------- 文件夹颜色与分类 ----------
+const FCOLORS = [
+  { n: '苔绿', c: '#37b24d' }, { n: '靛蓝', c: '#4c6ef5' }, { n: '赭橙', c: '#f76707' }, { n: '玫红', c: '#e64980' },
+  { n: '葡萄紫', c: '#7950f2' }, { n: '青碧', c: '#1098ad' }, { n: '琥珀', c: '#f59f00' }, { n: '石墨', c: '#868e96' },
+];
+// 没手动选过颜色的文件夹按排列顺序轮流取色，相邻的不会撞色
+const folderColor = (f) => FCOLORS[(f.color ?? Math.max(0, folders().indexOf(f))) % FCOLORS.length].c;
+const allCats = () => [...new Set([...(state.cats || []), ...folders().map((f) => f.category).filter(Boolean)])];
+async function saveCats() { await db.setMeta('categories', state.cats || []); }
+async function addCategory(thenAssign) {
+  const name = await prompt({ title: '新建分类', placeholder: '例如：宣传物料、课程资料、客户交付', ok: '创建' });
+  if (!name) return null;
+  state.cats = [...new Set([...(state.cats || []), name])];
+  await saveCats();
+  if (thenAssign) await setFolderCat(thenAssign, name);
+  else { await changed(); toast(`已新建分类「${name}」，把文件夹拖到它上面即可归类`); }
+  return name;
+}
+async function setFolderCat(f, name) {
+  const prev = f.category;
+  if (name) f.category = name; else delete f.category;
+  await saveArea(f);
+  await changed();
+  const el = $(`.folder[data-folder="${CSS.escape(f.id)}"]`);
+  el?.classList.add('merged'); setTimeout(() => el?.classList.remove('merged'), 1200);
+  toast(name ? `「${f.title}」已归入「${name}」` : `「${f.title}」已移出分类`, { action: '撤销', onAction: async () => { if (prev) f.category = prev; else delete f.category; await saveArea(f); await changed(); } });
+}
+async function renameCategory(old) {
+  const name = await prompt({ title: '重命名分类', value: old, ok: '保存' });
+  if (!name || name === old) return;
+  state.cats = (state.cats || []).map((c) => (c === old ? name : c));
+  if (!state.cats.includes(name)) state.cats.push(name);
+  const fs = folders().filter((f) => f.category === old);
+  fs.forEach((f) => { f.category = name; });
+  await db.putMany('columns', fs);
+  await saveCats();
+  if (state.archCat === old) { state.archCat = name; ls.set('archCat', name); }
+  await changed();
+}
+async function deleteCategory(name) {
+  const fs = folders().filter((f) => f.category === name);
+  if (!(await confirmBox({ title: `删除分类「${name}」？`, body: fs.length ? `里面的 ${fs.length} 个文件夹会变成「未分类」，文件夹和文件都不会删除。` : '这个分类是空的。', ok: '删除分类', danger: true }))) return;
+  fs.forEach((f) => { delete f.category; });
+  if (fs.length) await db.putMany('columns', fs);
+  state.cats = (state.cats || []).filter((c) => c !== name);
+  await saveCats();
+  if (state.archCat === name) { state.archCat = 'all'; ls.set('archCat', 'all'); }
+  await changed();
+}
+document.addEventListener('contextmenu', (e) => {
+  const chipEl = e.target.closest?.('.cat-chip[data-catdrop]');
+  if (!chipEl || !chipEl.dataset.catdrop) return;
+  e.preventDefault();
+  const name = chipEl.dataset.catdrop;
+  openMenu(chipEl, [{ text: '重命名分类', run: () => renameCategory(name) }, '-', { text: '删除分类', danger: true, run: () => deleteCategory(name) }]);
+});
 // ---------- 文件夹合并：拖一个文件夹到另一个上 ----------
 function mergedTitle(a, b) {
   let p = '';
@@ -615,7 +701,10 @@ document.addEventListener('dragstart', (e) => {
 document.addEventListener('dragover', (e) => {
   if (!dragFolder) return;
   const t = e.target.closest?.('.folder[data-folder]');
+  const chipEl = e.target.closest?.('.cat-chip[data-catdrop]');
   $$('.folder.merge-target').forEach((el) => { if (el !== t) el.classList.remove('merge-target'); });
+  $$('.cat-chip.drop-active').forEach((el) => { if (el !== chipEl) el.classList.remove('drop-active'); });
+  if (chipEl) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; chipEl.classList.add('drop-active'); return; }
   if (!t || t.dataset.folder === dragFolder) return;
   e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
@@ -623,20 +712,22 @@ document.addEventListener('dragover', (e) => {
 });
 document.addEventListener('drop', (e) => {
   if (!dragFolder) return;
-  const t = e.target.closest?.('.folder[data-folder]');
   const src = dragFolder;
+  const chipEl = e.target.closest?.('.cat-chip[data-catdrop]');
+  if (chipEl) { e.preventDefault(); const f = area(src); if (f) setFolderCat(f, chipEl.dataset.catdrop || null); return; }
+  const t = e.target.closest?.('.folder[data-folder]');
   if (t && t.dataset.folder !== src) { e.preventDefault(); mergeFolders(src, t.dataset.folder); }
 });
 document.addEventListener('dragend', () => {
   if (!dragFolder) return;
   dragFolder = null;
   document.body.classList.remove('dragging-folder');
-  $$('.folder-dragging, .merge-target').forEach((el) => el.classList.remove('folder-dragging', 'merge-target'));
+  $$('.folder-dragging, .merge-target, .cat-chip.drop-active').forEach((el) => el.classList.remove('folder-dragging', 'merge-target', 'drop-active'));
 });
 
 async function createFolder(title) {
   const list = folders();
-  const f = { id: uid(), kind: 'folder', title, order: list.length ? list[list.length - 1].order + 1024 : 0, doneAt: Date.now() };
+  const f = { id: uid(), kind: 'folder', title, order: list.length ? list[list.length - 1].order + 1024 : 0, doneAt: Date.now(), color: list.length % FCOLORS.length };
   await saveArea(f);
   state.areas.push(f);
   return f;
@@ -1300,7 +1391,7 @@ let menuAnchor = null;
 function openMenu(anchor, items) {
   const m = $('#menu');
   m.innerHTML = items.map((it, i) => it === '-' ? '<hr>' : it.label && !it.run ? `<div class="label">${esc(it.label)}</div>`
-    : `<button role="menuitem" data-i="${i}" class="${it.danger ? 'danger' : ''}">${esc(it.text)}</button>`).join('');
+    : `<button role="menuitem" data-i="${i}" class="${it.danger ? 'danger' : ''}">${it.swatch ? `<span class="sw" style="background:${it.swatch}"></span>` : ''}${it.tag ? `<span class="prio" style="--pc:${it.tag.c}">${it.tag.t}</span>` : ''}${esc(it.text)}${it.checked ? '<span class="chk">✓</span>' : ''}</button>`).join('');
   m.hidden = false;
   m.onclick = (e) => { const b = e.target.closest('button[data-i]'); if (!b) return; closeMenu(); items[b.dataset.i].run(); };
   const r = anchor.getBoundingClientRect();
@@ -1337,6 +1428,10 @@ function cardMenu(anchor, card) {
     } });
     items.push('-');
   }
+  items.push({ label: '优先级' });
+  for (const lv of [1, 2, 3]) items.push({ text: PRIO[lv].label, tag: PRIO[lv], checked: card.prio === lv, run: () => setPrio([card.id], lv) });
+  if (card.prio) items.push({ text: '清除优先级', run: () => setPrio([card.id], 0) });
+  items.push('-');
   items.push({ text: card.kind === 'note' ? '编辑' : '预览', run: () => preview(card.id) },
     { text: '下载', run: () => download(card.id) },
     { text: '重命名', run: async () => {
@@ -1369,6 +1464,12 @@ function areaMenu(anchor, a) {
   if (kind === 'column') items.push({ text: '整列归档到已完成项目…', run: () => archiveColumn(a) });
   if (kind === 'folder') {
     items.push({ text: '打包下载 zip', run: () => zipFolder(a) });
+    items.push({ label: '分类' });
+    allCats().forEach((c) => items.push({ text: c, checked: a.category === c, run: () => setFolderCat(a, c) }));
+    items.push({ text: '新建分类…', run: () => addCategory(a) });
+    if (a.category) items.push({ text: '移出分类', run: () => setFolderCat(a, null) });
+    items.push({ label: '颜色' });
+    FCOLORS.forEach((fc, i) => items.push({ text: fc.n, swatch: fc.c, checked: folderColor(a) === fc.c, run: async () => { a.color = i; await saveArea(a); await changed(); } }));
     const others = folders().filter((f) => f.id !== a.id);
     if (others.length) { items.push({ label: '合并到…' }); others.forEach((f) => items.push({ text: f.title, run: () => mergeFolders(a.id, f.id) })); }
   }
@@ -1821,6 +1922,7 @@ function renderSelBar() {
   bar.innerHTML = `<span class="sel-count">已选 <b>${ids.length}</b> 个</span>
     <button class="sel-btn primary" data-action="sel-done" ${active.length ? '' : 'disabled'}>${CHECK_SVG}<span>一起完成并打包</span></button>
     <button class="sel-btn" data-action="sel-link" ${active.length > 1 ? '' : 'disabled'} title="以后长按其中任意一个都会整组打包">${LINK_SVG}<span>关联为一个项目</span></button>
+    <button class="sel-btn" data-action="sel-prio" aria-haspopup="menu" title="设置优先级（也可按 1 / 2 / 3，0 清除）"><span class="prio" style="--pc:#e03131">急</span><span>优先级</span></button>
     <button class="sel-btn" data-action="sel-move" aria-haspopup="menu"><svg viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></svg><span>移到…</span></button>
     <button class="sel-btn danger" data-action="sel-trash"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg><span>删除</span></button>
     <button class="sel-btn icon" data-action="sel-clear" aria-label="取消选择" title="取消选择（Esc）"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>`;
@@ -2090,6 +2192,8 @@ document.addEventListener('click', async (e) => {
     if (viewTab.dataset.view === ARCHIVE && state.view === ARCHIVE) { state.folder = null; ls.set('folder', null); }
     setView(viewTab.dataset.view); return render();
   }
+  const catEl = e.target.closest('[data-cat]');
+  if (catEl && !btn) { state.archCat = catEl.dataset.cat; ls.set('archCat', state.archCat); return render(); }
   const folderEl = e.target.closest('[data-folder]');
   if (folderEl && !btn) { state.folder = folderEl.dataset.folder; ls.set('folder', state.folder); return render(); }
   const zoneTab = e.target.closest('[data-zone]');
@@ -2107,6 +2211,12 @@ document.addEventListener('click', async (e) => {
     case 'sel-done': return completeCards([...state.selected]);
     case 'sel-link': return linkSelected();
     case 'sel-move': return menuAnchor === btn ? closeMenu() : moveMenu(btn);
+    case 'sel-prio': return menuAnchor === btn ? closeMenu() : openMenu(btn, [
+      { label: '优先级' },
+      ...[1, 2, 3].map((lv) => ({ text: PRIO[lv].label, tag: PRIO[lv], run: () => setPrio([...state.selected], lv) })),
+      { text: '清除优先级', run: () => setPrio([...state.selected], 0) },
+    ]);
+    case 'cat-add': return addCategory();
     case 'sel-trash': return trashMany([...state.selected]);
     case 'sel-clear': return clearSelection();
     case 'card-menu': return menuAnchor === btn ? closeMenu() : cardMenu(btn, findCard(cardEl.dataset.id));
@@ -2161,6 +2271,11 @@ document.addEventListener('keydown', (e) => {
     const card = findCard(cardEl.dataset.id);
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); preview(card.id); }
     if (e.key === 'Delete' && card.columnId !== TRASH) trashCard(card.id);
+    // 1 / 2 / 3 设优先级，0 清除；多选时作用于全部已选
+    if (/^[0-3]$/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const ids = state.selected.has(card.id) && state.selected.size > 1 ? [...state.selected] : [card.id];
+      setPrio(ids, +e.key);
+    }
     if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) { e.preventDefault(); cardMenu($('.more', cardEl), card); }
     // 画布上用方向键微调位置
     if (cardEl.classList.contains('on-canvas') && e.key.startsWith('Arrow')) {
