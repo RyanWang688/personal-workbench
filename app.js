@@ -20,6 +20,7 @@ const state = {
   view: ls.get('view', BOARD), zone: ls.get('zone', 'drafts'), cams: ls.get('cams', {}),
   fresh: new Set(), // 新加入的卡片，渲染时播放入场动画
   folder: ls.get('folder', null), // 「已完成项目」里当前打开的文件夹
+  selected: new Set(), // 多选中的卡片
 };
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const channel = 'BroadcastChannel' in window ? new BroadcastChannel('personal-workbench') : null;
@@ -190,35 +191,119 @@ function baseTitle(c) {
   do { prev = s; s = s.replace(SUFFIX, '').trim(); } while (s !== prev && s);
   return s.replace(new RegExp(`${SEP}+$`), '') || (c.name || '').replace(/\.[^.]+$/, '');
 }
-const relKey = (c) => { const k = baseTitle(c).toLowerCase(); return k.length >= 2 ? k : null; };
 const isActive = (c) => c.columnId !== TRASH && area(c.columnId)?.kind !== 'folder';
+
+// ===== 名称关联算法 =====
+// 每两张卡片算一个 0~1 的关联分：
+//   名称分 = 相同 1.0 ｜ 包含（≥3 字）0.92、（2 字）0.7 ｜ 否则 0.45×字符二元组 Dice + 0.55×最长公共片段占比
+//   情境分 = 同一批拖入 +0.15 ｜ 10 分钟内先后加入 +0.05
+// 「IMG_1234 / 截图 / 微信图片 / 未命名」等通用文件名不参与名称匹配。
+const GENERIC = /^(img|dsc|dcim|pxl|mvimg|vid|video|image|photo|scan|screenshot|screen ?shot|截图|屏幕截图|微信图片|未命名|untitled|新建|文档|document|file)[\s_\-]*\d*$/i;
+const normTitle = (c) => baseTitle(c).toLowerCase().replace(new RegExp(SEP, 'g'), '');
+const bigrams = (s) => { const set = new Set(); if (s.length < 2) { if (s) set.add(s); return set; } for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2)); return set; };
+function dice(a, b) { let n = 0; for (const x of a) if (b.has(x)) n++; return a.size + b.size ? (2 * n) / (a.size + b.size) : 0; }
+function lcsLen(a, b) {
+  let best = 0; const prev = new Array(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = 0;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = prev[j];
+      prev[j] = a[i - 1] === b[j - 1] ? diag + 1 : 0;
+      if (prev[j] > best) best = prev[j];
+      diag = tmp;
+    }
+  }
+  return best;
+}
+function nameScore(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const [s, l] = a.length <= b.length ? [a, b] : [b, a];
+  if (s.length >= 2 && l.includes(s)) return s.length >= 3 ? 0.92 : 0.7;
+  const k = lcsLen(a, b);
+  const d = dice(bigrams(a), bigrams(b));
+  return k >= 2 ? 0.45 * d + 0.55 * (k / s.length) : 0.6 * d;
+}
+function pairScore(A, B) {
+  let name = 0;
+  if (!A.generic && !B.generic) name = nameScore(A.key, B.key);
+  let ctx = 0;
+  if (A.c.batchId && A.c.batchId === B.c.batchId) ctx += 0.15;
+  else if (Math.abs((A.c.createdAt || 0) - (B.c.createdAt || 0)) < 10 * 60e3) ctx += 0.05;
+  return name > 0 ? Math.min(0.99, name + ctx) : 0;
+}
+// 灵敏度：自动关联阈值 / 建议阈值
+const SENS = { strict: { auto: 0.95, hint: 0.62, label: '严格' }, normal: { auto: 0.8, hint: 0.5, label: '标准' }, loose: { auto: 0.66, hint: 0.4, label: '宽松' } };
+const sens = () => SENS[ls.get('assoc', 'normal')] || SENS.normal;
+const dismissed = new Set(ls.get('dismissed', []));
+const pairKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+
 function buildGroups() {
   const live = state.cards.filter(isActive);
   const parent = new Map(live.map((c) => [c.id, c.id]));
   const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
   const union = (a, b) => { if (parent.has(a) && parent.has(b)) parent.set(find(a), find(b)); };
-  const keyed = live.map((c) => [c, relKey(c)]).filter(([, k]) => k);
-  const sepRe = new RegExp(`^${SEP}`);
-  for (let i = 0; i < keyed.length; i++) {
-    for (let j = i + 1; j < keyed.length; j++) {
-      const [a, ka] = keyed[i], [b, kb] = keyed[j];
-      const [short, long] = ka.length <= kb.length ? [ka, kb] : [kb, ka];
-      if (ka === kb || (long.startsWith(short) && sepRe.test(long.slice(short.length)))) union(a.id, b.id);
+  const { auto, hint } = sens();
+  // noAuto：用户手动「从关联中移除」的卡片，不再参与自动匹配
+  const items = live.filter((c) => !c.noAuto).map((c) => { const key = normTitle(c); return { c, key, generic: GENERIC.test(key) || key.length < 2 }; });
+  const hints = [];
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      const s = pairScore(items[i], items[j]);
+      if (s >= auto) union(items[i].c.id, items[j].c.id);
+      else if (s >= hint && !dismissed.has(pairKey(items[i].c.id, items[j].c.id))) hints.push([items[i].c.id, items[j].c.id, s]);
     }
   }
-  for (const c of live) if (c.sourceId) union(c.id, c.sourceId);
+  for (const c of live) if (c.sourceId && !c.noAuto && !findCard(c.sourceId)?.noAuto) union(c.id, c.sourceId);
+  // 手动关联：同一个 projectId 一定是同一项目
+  const firstOfProject = new Map();
+  for (const c of live) {
+    if (!c.projectId) continue;
+    if (firstOfProject.has(c.projectId)) union(c.id, firstOfProject.get(c.projectId));
+    else firstOfProject.set(c.projectId, c.id);
+  }
   const groups = new Map();
   for (const c of live) { const r = find(c.id); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(c.id); }
   state.groups = new Map();
   for (const ids of groups.values()) for (const id of ids) state.groups.set(id, ids);
+
+  // 建议：把「中等分数」连接起来的不同组合并成一条建议
+  const gp = new Map(), gfind = (x) => { while (gp.get(x) !== x) x = gp.get(x); return x; };
+  const best = new Map();
+  for (const [a, b, s] of hints) {
+    const ra = find(a), rb = find(b);
+    if (ra === rb) continue;
+    if (!gp.has(ra)) gp.set(ra, ra);
+    if (!gp.has(rb)) gp.set(rb, rb);
+    const x = gfind(ra), y = gfind(rb);
+    if (x !== y) gp.set(x, y);
+    best.set(ra, Math.max(best.get(ra) || 0, s)); best.set(rb, Math.max(best.get(rb) || 0, s));
+  }
+  const clusters = new Map();
+  for (const r of gp.keys()) { const k = gfind(r); if (!clusters.has(k)) clusters.set(k, []); clusters.get(k).push(r); }
+  state.suggestions = [...clusters.values()].filter((rs) => rs.length > 1).map((rs) => ({
+    ids: rs.flatMap((r) => groups.get(r)),
+    score: Math.max(...rs.map((r) => best.get(r) || 0)),
+  })).sort((a, b) => b.score - a.score);
+  state.suggestOf = new Map();
+  state.suggestions.forEach((s, i) => s.ids.forEach((id) => state.suggestOf.set(id, i)));
 }
+const suggestionFor = (id) => { const i = state.suggestOf?.get(id); return i == null ? null : state.suggestions[i]; };
 const relatedIds = (id) => state.groups?.get(id) || [id];
 const LINK_SVG = `<svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>`;
 function linkBadge(c) {
   const n = relatedIds(c.id).length;
-  return n > 1 ? `<span class="link-badge" title="自动关联了 ${n} 个同项目文件，长按任意一个即可一起打包完成">${LINK_SVG}${n}</span>` : '';
+  let html = n > 1 ? `<span class="link-badge" title="已关联 ${n} 个同项目文件，长按任意一个即可一起打包完成">${LINK_SVG}${n}</span>` : '';
+  const sg = suggestionFor(c.id);
+  if (sg) {
+    const others = sg.ids.length - n;
+    html += `<button class="suggest-badge" data-action="accept-suggest" data-id="${c.id}" title="可能和另外 ${others} 个文件属于同一项目（相似度 ${Math.round(sg.score * 100)}%），点一下关联">+${others} 建议</button>`;
+  }
+  return html;
 }
 const IS_TOUCH = matchMedia('(hover: none) and (pointer: coarse)').matches;
+const CHECK_SVG = `<svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>`;
+const selBtn = (c) => `<button class="sel" data-action="select" aria-pressed="${state.selected.has(c.id)}" aria-label="选择 ${esc(c.name || '便签')}" title="选择（Ctrl / Shift + 点击也可多选）">${CHECK_SVG}</button>`;
 
 const thumbStateOf = (c) => c.kind !== 'file' ? 'none' : (c.thumb || (pv.likelyThumb(c) ? 'pending' : 'none'));
 const PLAY = `<span class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/></svg></span>`;
@@ -226,8 +311,8 @@ function cardHTML(c, onCanvas = false) {
   const attrs = onCanvas
     ? `draggable="false" style="left:${Math.round(c.x || 0)}px;top:${Math.round(c.y || 0)}px;z-index:${Math.max(1, Math.round(c.order) || 1)}"`
     : `draggable="${IS_TOUCH ? 'false' : 'true'}"`;
-  const cls = `card${onCanvas ? ' on-canvas' : ''}${onCanvas && !matches(c) ? ' dim' : ''}`;
-  const extra = onCanvas ? HANDLE : '';
+  const cls = `card${onCanvas ? ' on-canvas' : ''}${onCanvas && !matches(c) ? ' dim' : ''}${state.selected.has(c.id) ? ' selected' : ''}`;
+  const extra = (onCanvas ? HANDLE : '') + (c.columnId !== TRASH ? selBtn(c) : '');
   if (c.kind === 'note') {
     return `<article class="${cls} note" ${attrs} tabindex="0" data-id="${c.id}" aria-label="便签 ${esc(c.name)}">
       <div class="body"><div class="name">${highlight(c.name || '便签')}</div>
@@ -273,6 +358,10 @@ function render() {
   loadThumbs();
   playFlip(before);
   queueThumbs();
+  for (const id of state.selected) if (!findCard(id)) state.selected.delete(id);
+  document.body.classList.toggle('selecting', state.selected.size > 0);
+  renderSelBar();
+  renderAssocChip();
 }
 // 渲染期间若用户正在拖拽 / 菜单打开，稍后再刷新，避免打断操作
 let renderTimer = 0;
@@ -782,6 +871,8 @@ async function addFiles(files, areaId, index = null, pos = null, { quiet = false
   if (index == null) index = cardsIn(areaId, false).length;
   let ok = 0;
   const added = [];
+  const batchId = files.length > 1 ? uid() : undefined; // 同一批拖入的文件，关联算法会加分
+  if (batchId && !extra.batchId) extra = { batchId, ...extra };
   const t = files.length > 1 ? toast(`正在保存 0/${files.length}…`, { sticky: true }) : null;
   const perRow = Math.max(1, Math.ceil(Math.sqrt(files.length)));
   for (const f of files) {
@@ -1142,7 +1233,14 @@ function cardMenu(anchor, card) {
   }
   if (isActive(card)) {
     const n = relatedIds(card.id).length;
-    items.push({ text: n > 1 ? `✓ 完成项目（打包 ${n} 个关联文件）` : '✓ 完成项目并归档', run: () => completeProject(card.id) }, '-');
+    items.push({ text: n > 1 ? `✓ 完成项目（打包 ${n} 个关联文件）` : '✓ 完成项目并归档', run: () => completeProject(card.id) },
+      { text: state.selected.has(card.id) ? '取消选择' : '选择（多选）', run: () => toggleSelect(card.id) });
+    if (n > 1) items.push({ text: '从项目关联中移除', run: async () => {
+      card.noAuto = true; delete card.projectId; delete card.projectName;
+      await saveCard(card); await changed();
+      toast(`「${card.name}」已不再和其他文件关联`);
+    } });
+    items.push('-');
   }
   items.push({ text: card.kind === 'note' ? '编辑' : '预览', run: () => preview(card.id) },
     { text: '下载', run: () => download(card.id) },
@@ -1304,7 +1402,7 @@ document.addEventListener('pointerdown', (e) => {
   pressFired = false;
   if (e.button !== 0) return;
   const el = e.target.closest?.('.card');
-  if (!el || e.target.closest('.more, .export-handle')) return;
+  if (!el || e.target.closest('.more, .export-handle, .sel, .suggest-badge')) return;
   const card = findCard(el.dataset.id);
   if (!card || !isActive(card)) return;
   cancelPress();
@@ -1312,15 +1410,16 @@ document.addEventListener('pointerdown', (e) => {
   press.t1 = setTimeout(() => {
     if (!press) return;
     el.classList.add('pressing');
-    highlightGroup(card.id, 'gather');
-    const n = relatedIds(card.id).length;
+    const targets = pressTargets(card.id);
+    highlightIds(targets, 'gather');
+    const n = targets.length;
     const ring = document.createElement('div');
     ring.className = 'press-ring';
     // 触屏时把进度环放到手指上方，避免被手指挡住；靠右时文字翻到左边
     ring.style.left = `${press.x}px`; ring.style.top = `${press.touch ? Math.max(30, press.y - 64) : press.y}px`;
     if (press.x > innerWidth - 220) ring.classList.add('flip');
     ring.style.setProperty('--dur', `${PRESS_TOTAL - PRESS_DELAY}ms`);
-    ring.innerHTML = `<svg viewBox="0 0 44 44"><circle class="track" cx="22" cy="22" r="18"/><circle class="bar" cx="22" cy="22" r="18"/></svg><span>按住完成项目${n > 1 ? ` · ${n} 个文件` : ''}</span>`;
+    ring.innerHTML = `<svg viewBox="0 0 44 44"><circle class="track" cx="22" cy="22" r="18"/><circle class="bar" cx="22" cy="22" r="18"/></svg><span>${state.selected.has(card.id) && state.selected.size > 1 ? '按住一起完成' : '按住完成项目'}${n > 1 ? ` · ${n} 个文件` : ''}</span>`;
     document.body.appendChild(ring);
     press.ring = ring;
   }, PRESS_DELAY);
@@ -1346,12 +1445,68 @@ document.addEventListener('contextmenu', (e) => { if ((press || pressFired) && e
 document.addEventListener('dragstart', (e) => { if (pressFired) e.preventDefault(); }, true);
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+// 长按的目标：若按在已选中的卡片上 → 全部已选；否则 → 它的关联组
+function pressTargets(id) {
+  if (state.selected.has(id) && state.selected.size > 1) return [...state.selected].filter((x) => isActive(findCard(x) || {}));
+  return relatedIds(id);
+}
+function highlightIds(ids, cls) {
+  $$(`.card.${cls}`).forEach((el) => el.classList.remove(cls));
+  for (const id of ids) $$(`.card[data-id="${CSS.escape(id)}"]`).forEach((el) => el.classList.add(cls));
+}
+// 多个名称的公共部分作为默认项目名
+function commonTitle(cards) {
+  const named = cards.find((c) => c.projectName);
+  if (named) return named.projectName;
+  const titles = cards.map(baseTitle);
+  let p = titles[0] || '';
+  for (const t of titles) while (p && !t.startsWith(p)) p = p.slice(0, -1);
+  // 去掉截在半个词上的尾巴：「数学课件 第」→「数学课件」
+  p = p.replace(new RegExp(`(${SEP}|第|[\\d０-９])+$`), '');
+  if (p.length >= 2) return p;
+  // 选「被其他名称包含最多次」的那个，例如「2027物理招生册」⊂「2027物理招生册 内页」
+  const score = (t) => titles.filter((o) => o.includes(t)).length;
+  const top = [...new Set(titles)].sort((a, b) => score(b) - score(a) || b.length - a.length)[0];
+  if (top && score(top) > 1) return top;
+  // 否则用所有名称共有的最长片段，例如「英语作文范文」+「作文范文合集」→「作文范文」
+  let common = titles[0] || '';
+  for (const t of titles.slice(1)) common = longestCommon(common, t);
+  common = common.replace(new RegExp(`^${SEP}+|${SEP}+$`, 'g'), '');
+  return common.length >= 3 ? common : (top || '项目');
+}
+function longestCommon(a, b) {
+  let best = '', prev = new Array(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = new Array(b.length + 1).fill(0);
+    for (let j = 1; j <= b.length; j++) if (a[i - 1] === b[j - 1]) { cur[j] = prev[j - 1] + 1; if (cur[j] > best.length) best = a.slice(i - cur[j], i); }
+    prev = cur;
+  }
+  return best;
+}
+// 组内名称不统一时的项目名：已命名的项目 → 用项目名；名称都相同 → 用它；否则返回 null（需要询问）
+function groupTitle(cards) {
+  const named = cards.find((c) => c.projectName);
+  if (named) return named.projectName;
+  const names = new Set(cards.map((c) => baseTitle(c)));
+  return names.size === 1 ? [...names][0] : null;
+}
 async function completeProject(id) {
   const card = findCard(id);
   if (!card || !isActive(card)) return;
   buildGroups();
-  const cards = relatedIds(id).map(findCard).filter((c) => c && isActive(c));
-  const title = baseTitle(card);
+  if (state.selected.has(id) && state.selected.size > 1) return completeCards([...state.selected]);
+  return completeCards(relatedIds(id));
+}
+async function completeCards(ids, title) {
+  buildGroups();
+  const cards = ids.map(findCard).filter((c) => c && isActive(c));
+  if (!cards.length) return;
+  if (!title) {
+    title = groupTitle(cards)
+      || await prompt({ title: `把 ${cards.length} 个文件一起完成，打包成一个项目`, value: commonTitle(cards), placeholder: '项目名称', ok: '打包完成' });
+    if (!title) return;
+  }
+  clearSelection();
   let folder = folders().find((f) => f.title === title);
   const isNew = !folder;
   await playPackAnimation(cards, title);
@@ -1419,6 +1574,192 @@ async function playPackAnimation(cards, title) {
     ], { duration: 560, easing: 'cubic-bezier(.5,0,.3,1)', fill: 'forwards' }).finished;
   }
   layer.remove();
+}
+
+// ---------- 多选 ----------
+function syncSelectionUI() {
+  document.body.classList.toggle('selecting', state.selected.size > 0);
+  $$('.card[data-id]').forEach((el) => {
+    const on = state.selected.has(el.dataset.id);
+    el.classList.toggle('selected', on);
+    el.querySelector('.sel')?.setAttribute('aria-pressed', String(on));
+  });
+  renderSelBar();
+}
+function toggleSelect(id) {
+  if (!findCard(id)) return;
+  state.selected.has(id) ? state.selected.delete(id) : state.selected.add(id);
+  syncSelectionUI();
+}
+function clearSelection() {
+  if (!state.selected.size) return;
+  state.selected.clear();
+  syncSelectionUI();
+}
+function renderSelBar() {
+  let bar = $('#selBar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'selBar'; bar.className = 'sel-bar'; bar.setAttribute('role', 'toolbar'); bar.setAttribute('aria-label', '多选操作');
+    document.body.appendChild(bar);
+  }
+  const ids = [...state.selected].filter(findCard);
+  if (!ids.length) { bar.classList.remove('show'); return; }
+  const active = ids.filter((id) => isActive(findCard(id)));
+  bar.innerHTML = `<span class="sel-count">已选 <b>${ids.length}</b> 个</span>
+    <button class="sel-btn primary" data-action="sel-done" ${active.length ? '' : 'disabled'}>${CHECK_SVG}<span>一起完成并打包</span></button>
+    <button class="sel-btn" data-action="sel-link" ${active.length > 1 ? '' : 'disabled'} title="以后长按其中任意一个都会整组打包">${LINK_SVG}<span>关联为一个项目</span></button>
+    <button class="sel-btn" data-action="sel-move" aria-haspopup="menu"><svg viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></svg><span>移到…</span></button>
+    <button class="sel-btn danger" data-action="sel-trash"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg><span>删除</span></button>
+    <button class="sel-btn icon" data-action="sel-clear" aria-label="取消选择" title="取消选择（Esc）"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>`;
+  bar.classList.add('show');
+}
+async function moveMany(ids, areaId) {
+  const cards = ids.map(findCard).filter(Boolean);
+  if (!cards.length) return;
+  if (area(areaId)?.kind === 'folder') { clearSelection(); return archiveCards(cards, areaId); }
+  const canvas = isCanvas(areaId);
+  const start = canvas ? (state.view === areaId ? viewCenter() : { x: 0, y: 0 }) : null;
+  let order = canvas ? topOrder(areaId) : orderAt(areaId, cardsIn(areaId, false).length);
+  cards.forEach((c, i) => {
+    if (c.columnId !== areaId) c.enteredAt = Date.now();
+    if (c.columnId === TRASH) delete c.trashedAt;
+    c.columnId = areaId; c.order = order; order += canvas ? 1 : 1024; c.updatedAt = Date.now();
+    if (canvas) { c.x = start.x + (i % 4) * (CARD_W + 30); c.y = start.y + Math.floor(i / 4) * 140; }
+  });
+  await db.putMany('cards', cards);
+  clearSelection();
+  await changed();
+  toast(`已把 ${cards.length} 个移到「${areaName(areaId)}」`);
+}
+async function trashMany(ids) {
+  const cards = ids.map(findCard).filter((c) => c && c.columnId !== TRASH);
+  if (!cards.length) return;
+  await Promise.all(cards.map((c) => animateOut(c.id)));
+  const now = Date.now();
+  cards.forEach((c) => { c.prevColumnId = c.columnId; c.columnId = TRASH; c.trashedAt = now; c.updatedAt = now; });
+  await db.putMany('cards', cards);
+  clearSelection();
+  await changed();
+  toast(`已把 ${cards.length} 个移到回收站`, { action: '撤销', onAction: async () => {
+    cards.forEach((c) => { c.columnId = area(c.prevColumnId) ? c.prevColumnId : defaultTarget(); delete c.trashedAt; });
+    await db.putMany('cards', cards); await changed();
+  } });
+}
+// 关联核心：把一组卡片（连同各自已关联的文件）绑成一个命名项目，可撤销
+async function linkCards(ids, name, { quiet = false } = {}) {
+  const all = [...new Set(ids.flatMap((id) => relatedIds(id)))].map(findCard).filter((c) => c && isActive(c));
+  if (all.length < 2 || !name) return [];
+  const before = all.map((c) => ({ c, projectId: c.projectId, projectName: c.projectName, noAuto: c.noAuto }));
+  const pid = all.find((c) => c.projectId)?.projectId || uid();
+  all.forEach((c) => { c.projectId = pid; c.projectName = name; c.noAuto = false; c.updatedAt = Date.now(); });
+  await db.putMany('cards', all);
+  await changed();
+  highlightIds(all.map((c) => c.id), 'related');
+  setTimeout(() => highlightIds([], 'related'), 1600);
+  if (!quiet) toast(`已关联为项目「${name}」（${all.length} 个文件），长按任意一个即可整组打包`, {
+    action: '撤销', onAction: async () => {
+      before.forEach((b) => Object.assign(b.c, { projectId: b.projectId, projectName: b.projectName, noAuto: b.noAuto }));
+      await db.putMany('cards', all); await changed();
+    },
+  });
+  return all;
+}
+async function linkSelected() {
+  const ids = [...state.selected].filter((id) => isActive(findCard(id) || {}));
+  if (ids.length < 2) return;
+  const all = [...new Set(ids.flatMap((id) => relatedIds(id)))].map(findCard).filter(Boolean);
+  const name = await prompt({ title: `把 ${all.length} 个文件关联为一个项目`, value: commonTitle(all), placeholder: '项目名称，例如：2027 物理招生册', ok: '关联' });
+  if (!name) return;
+  clearSelection();
+  await linkCards(ids, name);
+}
+// 卡片上的「+N 建议」：一键接受
+async function acceptSuggestion(id) {
+  const sg = suggestionFor(id);
+  if (!sg) return;
+  await linkCards(sg.ids, commonTitle(sg.ids.map(findCard).filter(Boolean)));
+}
+function dismissSuggestion(sg) {
+  for (let i = 0; i < sg.ids.length; i++) for (let j = i + 1; j < sg.ids.length; j++) dismissed.add(pairKey(sg.ids[i], sg.ids[j]));
+  ls.set('dismissed', [...dismissed].slice(-3000));
+}
+async function unlinkGroup(ids) {
+  const cards = ids.map(findCard).filter(Boolean);
+  cards.forEach((c) => { c.noAuto = true; delete c.projectId; delete c.projectName; });
+  await db.putMany('cards', cards);
+  await changed();
+}
+
+// ---------- 「智能关联」面板 ----------
+const SPARK_SVG = `<svg viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/></svg>`;
+function renderAssocChip() {
+  const chip = $('#assocChip');
+  if (!chip) return;
+  const n = state.suggestions?.length || 0;
+  chip.innerHTML = `${SPARK_SVG}智能关联${n ? `<b>${n}</b>` : ''}`;
+  chip.classList.toggle('has', n > 0);
+  chip.title = n ? `发现 ${n} 条可能的项目关联，点击查看` : '自动关联设置与已识别的项目';
+}
+function assocPanelHTML() {
+  buildGroups();
+  const cur = ls.get('assoc', 'normal');
+  const projects = [...new Set([...state.groups.values()])].filter((ids) => ids.length > 1);
+  const chip = (id) => { const c = findCard(id); const t = typeOf(c); return `<label class="fchip"><input type="checkbox" data-id="${id}" checked><span class="dot" style="--c:${c.kind === 'note' ? '#f0b429' : t.c}"></span>${esc(c.name || '便签')}</label>`; };
+  return `<h3>${SPARK_SVG}智能关联</h3>
+    <p class="assoc-desc">按文件名相似度（去掉「预览 / 终稿 / v2 / 日期」等后缀后比较）、是否同一批拖入、加入时间远近，自动判断哪些文件属于同一项目。分数高的自动关联，分数中等的放在下面等你确认。</p>
+    <div class="seg" role="radiogroup" aria-label="关联灵敏度">${Object.entries(SENS).map(([k, v]) => `<button type="button" role="radio" data-sens="${k}" aria-checked="${k === cur}">${v.label}<small>${Math.round(v.auto * 100)}% 自动</small></button>`).join('')}</div>
+    <div class="assoc-sec"><h4>建议关联 <b>${state.suggestions.length}</b></h4>
+    ${state.suggestions.length ? state.suggestions.map((s, i) => `<div class="sugg" data-i="${i}">
+        <div class="sugg-top"><input class="sugg-name" value="${esc(commonTitle(s.ids.map(findCard)))}" aria-label="项目名称"><span class="conf">相似度 ${Math.round(s.score * 100)}%</span></div>
+        <div class="fchips">${s.ids.map(chip).join('')}</div>
+        <div class="sugg-act"><button type="button" class="btn" data-sugg="ignore" data-i="${i}">忽略</button><button type="button" class="btn primary" data-sugg="link" data-i="${i}">关联</button></div>
+      </div>`).join('') : '<div class="assoc-empty">暂时没有待确认的建议</div>'}</div>
+    <div class="assoc-sec"><h4>已识别的项目 <b>${projects.length}</b></h4>
+    ${projects.length ? projects.map((ids) => { const cs = ids.map(findCard); return `<div class="proj"><div><b>${esc(commonTitle(cs))}</b><span>${cs.map((c) => esc(c.name || '便签')).join('、')}</span></div><button type="button" class="btn ghost" data-unlink="${ids.join(',')}">拆开</button></div>`; }).join('') : '<div class="assoc-empty">还没有识别出项目</div>'}</div>
+    <div class="modal-actions">${state.suggestions.length ? '<button type="button" class="btn primary" data-sugg="all">全部关联</button>' : ''}<button type="button" class="btn" data-sugg="close">关闭</button></div>`;
+}
+function openAssocPanel() {
+  const m = $('#modal'), f = $('#modalInner');
+  m.classList.add('wide');
+  const paint = () => { f.innerHTML = assocPanelHTML(); };
+  paint();
+  f.onsubmit = (e) => e.preventDefault();
+  const close = () => { m.classList.remove('wide'); f.onclick = null; if (m.open) m.close(); };
+  m.oncancel = close; m.onclose = () => m.classList.remove('wide');
+  f.onclick = async (e) => {
+    const sensBtn = e.target.closest('[data-sens]');
+    if (sensBtn) { ls.set('assoc', sensBtn.dataset.sens); render(); return paint(); }
+    const un = e.target.closest('[data-unlink]');
+    if (un) { await unlinkGroup(un.dataset.unlink.split(',')); return paint(); }
+    const b = e.target.closest('[data-sugg]');
+    if (!b) return;
+    const act = b.dataset.sugg;
+    if (act === 'close') return close();
+    const pick = (i) => {
+      const el = f.querySelector(`.sugg[data-i="${i}"]`);
+      return { ids: [...el.querySelectorAll('input[type=checkbox]:checked')].map((x) => x.dataset.id), name: el.querySelector('.sugg-name').value.trim() };
+    };
+    if (act === 'ignore') { dismissSuggestion(state.suggestions[+b.dataset.i]); render(); return paint(); }
+    if (act === 'link') { const p = pick(b.dataset.i); if (p.ids.length > 1) await linkCards(p.ids, p.name || '项目'); return paint(); }
+    if (act === 'all') {
+      const all = state.suggestions.map((_, i) => pick(i)).filter((p) => p.ids.length > 1);
+      for (const p of all) await linkCards(p.ids, p.name || '项目', { quiet: true });
+      toast(`已关联 ${all.length} 个项目`);
+      return paint();
+    }
+  };
+  m.showModal();
+}
+function moveMenu(anchor) {
+  const ids = [...state.selected];
+  const items = [];
+  const add = (list, label) => { if (!list.length) return; items.push({ label }); list.forEach((a) => items.push({ text: a.title, run: () => moveMany(ids, a.id) })); };
+  add(columns(), '看板');
+  add(canvases(), '画布');
+  add(zones(), '功能区');
+  add(folders(), '已完成项目');
+  openMenu(anchor, items);
 }
 
 // ---------- 拖拽（HTML5：看板 / 功能区 / 拖入拖出） ----------
@@ -1513,10 +1854,16 @@ document.addEventListener('drop', async (e) => {
     if (!target || target === TRASH) target = defaultTarget();
     return addFiles(files, target, list ? realIndex(target, before) : null, pos);
   }
+  // 拖动的是已选中的卡片 → 所有已选一起移动
+  const group = state.selected.has(dragId) && state.selected.size > 1 ? [...state.selected] : null;
   if (target === PICK) {
     const fid = await pickFolder();
-    return fid && archiveCards([findCard(dragId)].filter(Boolean), fid);
+    if (!fid) return;
+    if (group) { clearSelection(); return archiveCards(group.map(findCard).filter(Boolean), fid); }
+    return archiveCards([findCard(dragId)].filter(Boolean), fid);
   }
+  if (group && target && target !== TRASH) return moveMany(group, target);
+  if (group && target === TRASH) return trashMany(group);
   if (!target || target === findCard(dragId)?.columnId && tab) return;
   await moveCard(dragId, target, tab ? 0 : realIndex(target, before), pos);
 });
@@ -1538,8 +1885,18 @@ document.addEventListener('click', async (e) => {
   const cardEl = e.target.closest('.card');
   const colEl = e.target.closest('.column');
   const col = colEl && area(colEl.dataset.colId);
+  // 多选：Ctrl/⌘/Shift + 点击，或已在多选状态时直接点击 → 勾选 / 取消
+  if (cardEl && !btn && (e.ctrlKey || e.metaKey || e.shiftKey || state.selected.size)) { toggleSelect(cardEl.dataset.id); return; }
   if (!btn) { if (cardEl) preview(cardEl.dataset.id); return; }
   switch (btn.dataset.action) {
+    case 'accept-suggest': return acceptSuggestion(btn.dataset.id);
+    case 'assoc-panel': return openAssocPanel();
+    case 'select': return toggleSelect(cardEl.dataset.id);
+    case 'sel-done': return completeCards([...state.selected]);
+    case 'sel-link': return linkSelected();
+    case 'sel-move': return menuAnchor === btn ? closeMenu() : moveMenu(btn);
+    case 'sel-trash': return trashMany([...state.selected]);
+    case 'sel-clear': return clearSelection();
     case 'card-menu': return menuAnchor === btn ? closeMenu() : cardMenu(btn, findCard(cardEl.dataset.id));
     case 'col-menu': return menuAnchor === btn ? closeMenu() : areaMenu(btn, col);
     case 'zone-menu': return menuAnchor === btn ? closeMenu() : areaMenu(btn, area(state.zone));
@@ -1582,7 +1939,10 @@ document.addEventListener('click', async (e) => {
   }
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') { closeMenu(); document.body.classList.remove('drafts-open'); }
+  if (e.key === 'Escape') {
+    if ($('#menu').hidden && !$('#modal').open && !$('#viewer').open) clearSelection();
+    closeMenu(); document.body.classList.remove('drafts-open');
+  }
   const cardEl = e.target.closest?.('.card');
   if (cardEl && e.target === cardEl) {
     const card = findCard(cardEl.dataset.id);
