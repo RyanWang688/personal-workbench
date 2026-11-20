@@ -1,4 +1,4 @@
-import * as db from './db.js?v=3';
+import * as db from './db.js?v=5';
 import * as pv from './preview.js?v=3';
 
 const TRASH = 'trash';
@@ -432,7 +432,8 @@ async function runThumbs() {
       else c.thumb = 'none';
     } catch (e) {
       console.warn('预览生成失败', c.name, e);
-      if (/组件加载失败/.test(e.message)) { thumbQ.length = 0; queued.clear(); break; } // 离线：下次再试
+      // 离线 / 存储文件夹尚未授权：先停，下次再试，不把卡片标记成「无预览」
+      if (/组件加载失败/.test(e.message) || e.code === 'NEED_PERMISSION') { thumbQ.length = 0; queued.clear(); break; }
       c.thumb = 'none';
     }
     if (!findCard(id)) continue;
@@ -595,6 +596,7 @@ async function archiveColumn(col) {
   await archiveCards(cards, f.id);
 }
 async function zipFolder(f) {
+  if (!(await ensureAccess())) return;
   const cards = cardsIn(f.id, false);
   if (!cards.length) return toast('文件夹是空的');
   const t = toast('正在打包…', { sticky: true });
@@ -992,8 +994,10 @@ async function purgeCard(id, anim = true) {
   state.cards = state.cards.filter((c) => c.id !== id);
 }
 async function download(id) {
+  if (!(await ensureAccess())) return;
   const card = findCard(id);
-  const url = await urlFor(id);
+  let url;
+  try { url = await urlFor(id); } catch (e) { return toast(e.message || '读取失败', { error: true }); }
   if (!url) return toast('找不到文件内容', { error: true });
   const a = document.createElement('a');
   a.href = url;
@@ -1092,6 +1096,7 @@ async function preview(id) {
   const card = findCard(id);
   if (!card) return;
   if (card.kind === 'note') return editNote(card);
+  if (!(await ensureAccess())) return;
   const t = typeOf(card);
   const fam = pv.family(card);
   const convs = pv.conversionsFor(card, card.thumb === 'ok');
@@ -1105,9 +1110,9 @@ async function preview(id) {
       <span class="cv-status" id="cvStatus" aria-live="polite"></span></div>` : ''}`;
   $('#viewer').showModal();
   const bodyEl = $('#viewerBody');
-  const url = await urlFor(id);
-  let html, mount;
+  let html, mount, url;
   try {
+    url = await urlFor(id);
     if (!url) html = `<div class="viewer-none">找不到文件内容</div>`;
     else if (fam === 'image') html = `<img src="${url}" alt="${esc(card.name)}">`;
     else if (fam === 'video') html = `<video src="${url}" controls autoplay></video>`;
@@ -1132,6 +1137,7 @@ async function preview(id) {
   mount?.(bodyEl);
 }
 async function runConvert(btn) {
+  if (!(await ensureAccess())) return;
   const card = findCard(btn.dataset.id);
   if (!card || btn.classList.contains('busy')) return;
   const status = $('#cvStatus');
@@ -1314,8 +1320,20 @@ async function refreshStatus() {
     persisted = await navigator.storage?.persisted?.() || false;
     ({ usage: used = 0, quota = 0 } = (await navigator.storage?.estimate?.()) || {});
   } catch {}
-  chip.textContent = `已用 ${fmtSize(used)}${quota ? ` / ${fmtSize(quota)}` : ''} · ${persisted ? '持久存储' : '普通存储'}`;
-  chip.className = `status-chip ${persisted ? 'ok' : 'warn'}`;
+  let mode = 'idb', perm = 'none', dir = null;
+  try { mode = await db.storageMode(); if (mode === 'folder') { dir = await db.getDir(); perm = await db.dirPermission(); } } catch {}
+  if (mode === 'folder' && perm !== 'granted') {
+    chip.textContent = `存储文件夹「${dir?.name}」需要授权 · 点此授权`;
+    chip.className = 'status-chip warn';
+  } else if (mode === 'folder') {
+    chip.textContent = `文件存在「${dir?.name}」· 容量随硬盘`;
+    chip.className = 'status-chip ok';
+  } else {
+    chip.textContent = `已用 ${fmtSize(used)}${quota ? ` / ${fmtSize(quota)}` : ''} · ${persisted ? '持久存储' : '普通存储'}`;
+    chip.className = `status-chip ${persisted && (!quota || used / quota < 0.8) ? 'ok' : 'warn'}`;
+    // 浏览器空间用到八成时提醒扩容
+    if (quota && used / quota > 0.8 && !refreshStatus.warned) { refreshStatus.warned = true; toast('浏览器存储快满了，可以在「存储与容量」里把文件改存到电脑文件夹来扩容', { action: '去设置', onAction: storageInfo }); }
+  }
   let lastBackup = 0, lastChange = 0;
   try { [lastBackup, lastChange] = await Promise.all([db.getMeta('lastBackup', 0), db.getMeta('lastChange', 0)]); } catch { return; }
   const bc = $('#backupChip');
@@ -1323,19 +1341,120 @@ async function refreshStatus() {
   bc.textContent = lastBackup ? `上次备份 ${ago(lastBackup)}${lastChange > lastBackup ? ' · 有新改动' : ''}` : '尚未备份';
   bc.className = `status-chip ${stale ? 'warn' : lastBackup ? 'ok' : ''}`;
 }
+// 文件存在电脑文件夹时，读取前确认已授权（必须在用户点击里调用，浏览器才会弹出授权）
+async function ensureAccess() {
+  try {
+    if ((await db.storageMode()) !== 'folder') return true;
+    if ((await db.dirPermission()) === 'granted') return true;
+    const p = await db.dirPermission(true);
+    refreshStatus();
+    if (p === 'granted') { queueThumbs(); return true; }
+    toast('没有获得存储文件夹的访问权限，暂时无法打开文件', { error: true });
+    return false;
+  } catch { return true; }
+}
+async function storagePanelHTML() {
+  let persisted = false, used = 0, quota = 0;
+  try { persisted = await navigator.storage?.persisted?.(); ({ usage: used = 0, quota = 0 } = (await navigator.storage?.estimate?.()) || {}); } catch {}
+  const st = await db.storageStats();
+  const mode = await db.storageMode();
+  const dir = await db.getDir();
+  const perm = mode === 'folder' ? await db.dirPermission() : 'none';
+  const pct = quota ? Math.min(100, (used / quota) * 100) : 0;
+  const supported = db.folderSupported();
+  return `<h3>存储与容量</h3>
+    <div class="stor ${mode === 'idb' ? 'on' : ''}">
+      <div class="stor-head"><b>浏览器数据库</b>${mode === 'idb' ? '<span class="tag">当前使用</span>' : ''}</div>
+      <div class="bar"><span style="width:${pct.toFixed(1)}%" class="${pct > 80 ? 'hot' : ''}"></span></div>
+      <div class="stor-meta">已用 ${fmtSize(used)} / 浏览器分配 ${fmtSize(quota)} · ${st.idbCount} 个文件 · ${persisted ? '持久存储已开启' : '普通存储（空间紧张时可能被浏览器清理）'}</div>
+      <p class="stor-note">容量由浏览器按系统盘剩余空间分配，网页无法自行调高。</p>
+      ${persisted ? '' : '<button type="button" class="btn" data-st="persist">申请持久存储</button>'}
+    </div>
+    <div class="stor ${mode === 'folder' ? 'on' : ''}">
+      <div class="stor-head"><b>电脑文件夹（扩容）</b>${mode === 'folder' ? '<span class="tag">当前使用</span>' : ''}</div>
+      ${mode === 'folder' ? `
+        <div class="stor-meta">文件夹「${esc(dir?.name)}」/${db.FOLDER_SUB} · ${st.extCount} 个文件，${fmtSize(st.extBytes)} · ${perm === 'granted' ? '已授权' : '<b class="warn-text">需要授权</b>'}</div>
+        <p class="stor-note">新加入的文件直接写进这个文件夹，容量 = 这块硬盘的剩余空间；在资源管理器里也能看到这些文件。请不要手动改名或删除「${db.FOLDER_SUB}」里的文件。</p>
+        <div class="stor-act">
+          ${perm === 'granted' ? '' : '<button type="button" class="btn primary" data-st="grant">授权访问</button>'}
+          ${st.idbCount ? `<button type="button" class="btn" data-st="migrate">把浏览器里的 ${st.idbCount} 个文件也移过来</button>` : ''}
+          <button type="button" class="btn" data-st="pick">更换文件夹</button>
+          <button type="button" class="btn ghost" data-st="stop">停止使用（搬回浏览器）</button>
+        </div>`
+      : `
+        <p class="stor-note">选一个硬盘空间充足的文件夹（比如 D 盘），之后加入的文件直接存到那里，不再占用浏览器空间，容量就是整块硬盘的剩余空间。也可以把现有文件一起迁移过去。</p>
+        ${supported ? '<button type="button" class="btn primary" data-st="pick">选择文件夹，扩容</button>' : '<p class="stor-note warn-text">当前浏览器不支持，请用电脑版 Chrome 或 Edge 打开。</p>'}`}
+    </div>
+    <p class="stor-note">无论存在哪里，都建议定期点「备份」导出 .wbk 文件，防止误删或换电脑时丢失。</p>
+    <div class="modal-actions"><button type="button" class="btn" data-st="close">关闭</button></div>`;
+}
 async function storageInfo() {
-  const persisted = await navigator.storage?.persisted?.();
-  const r = await dialog(`<h3>数据存在哪里？</h3>
-    <p>所有文件和卡片保存在本浏览器内置的 IndexedDB 数据库中，不会上传到任何服务器。每个文件写入后都会回读校验大小。</p>
-    <p>持久存储：<b>${persisted ? '已开启' : '未开启'}</b>。${persisted ? '浏览器不会因空间紧张自动清理这些数据。' : '浏览器可能在磁盘空间不足时清理数据，建议点「申请持久存储」并定期备份。'}</p>
-    <p>注意：清除浏览器数据、使用无痕模式或换设备时数据不会跟随，请用「备份」导出 .wbk 文件保存到网盘或硬盘。</p>
-    <div class="modal-actions"><button class="btn primary" value="cancel">知道了</button>${persisted ? '' : '<button class="btn" value="ok">申请持久存储</button>'}</div>`, () => true);
-  if (r) requestPersist();
+  const m = $('#modal'), f = $('#modalInner');
+  m.classList.add('wide');
+  const paint = async () => { f.innerHTML = await storagePanelHTML(); };
+  await paint();
+  f.onsubmit = (e) => e.preventDefault();
+  const close = () => { m.classList.remove('wide'); f.onclick = null; if (m.open) m.close(); };
+  m.oncancel = close;
+  f.onclick = async (e) => {
+    const b = e.target.closest('[data-st]');
+    if (!b) return;
+    const act = b.dataset.st;
+    if (act === 'close') return close();
+    if (act === 'persist') { await requestPersist(); return paint(); }
+    if (act === 'grant') { await db.dirPermission(true); refreshStatus(); queueThumbs(); return paint(); }
+    if (act === 'pick') { close(); return pickStorageFolder(); }
+    if (act === 'migrate') { close(); return migrateFolder(); }
+    if (act === 'stop') { close(); return stopFolder(); }
+  };
+  if (!m.open) m.showModal();
+}
+async function pickStorageFolder() {
+  if (!db.folderSupported()) return toast('这个功能需要电脑版 Chrome 或 Edge', { error: true });
+  let h;
+  try { h = await window.showDirectoryPicker({ id: 'workbench-store', mode: 'readwrite', startIn: 'documents' }); } catch { return; }
+  if (h.requestPermission && (await h.requestPermission({ mode: 'readwrite' })) !== 'granted') return toast('需要读写权限才能把文件存到这个文件夹', { error: true });
+  await db.setDir(h);
+  await db.setMeta('storageMode', 'folder');
+  refreshStatus();
+  toast(`以后加入的文件会存到「${h.name}/${db.FOLDER_SUB}」`);
+  const st = await db.storageStats();
+  if (st.idbCount && await confirmBox({ title: `把浏览器里现有的 ${st.idbCount} 个文件（${fmtSize(st.idbBytes)}）也移过去？`, body: '每个文件写入文件夹并核对大小无误后，才会从浏览器里删除，释放浏览器空间。', ok: '开始迁移' })) await migrateFolder();
+}
+async function migrateFolder() {
+  if (!(await ensureAccess())) return;
+  const t = toast('正在迁移…', { sticky: true });
+  try {
+    const { moved, bytes } = await db.migrateToFolder((i, n) => t.set(`正在迁移 ${i}/${n}…`));
+    t.close();
+    toast(`已迁移 ${moved} 个文件（${fmtSize(bytes)}），浏览器空间已释放`);
+  } catch (e) {
+    t.close();
+    toast(`迁移中断：${e.message || e}。已迁移的文件都已核对，没迁的仍安全留在浏览器里`, { error: true });
+  }
+  refreshStatus();
+}
+async function stopFolder() {
+  const st = await db.storageStats();
+  const ok = await confirmBox({ title: '停止使用电脑文件夹？', body: st.extCount ? `文件夹里的 ${st.extCount} 个文件（${fmtSize(st.extBytes)}）会搬回浏览器，需要浏览器有足够空间。` : '之后的新文件会存回浏览器。', ok: '停止使用' });
+  if (!ok || !(await ensureAccess())) return;
+  const t = toast('正在搬回浏览器…', { sticky: true });
+  try {
+    await db.migrateToBrowser((i, n) => t.set(`正在搬回 ${i}/${n}…`));
+    await db.clearDir();
+    t.close();
+    toast('已停止使用文件夹，文件都在浏览器里');
+  } catch (e) {
+    t.close();
+    toast(`搬回中断：${e.message || e}（文件夹仍在使用）`, { error: true });
+  }
+  refreshStatus();
 }
 async function doBackup() {
+  if (!(await ensureAccess())) return;
   const t = toast('正在打包备份…', { sticky: true });
   try {
-    const { blob, count, fileCount } = await db.exportBackup();
+    const { blob, count, fileCount, missing } = await db.exportBackup();
     const d = new Date(), p = (n) => String(n).padStart(2, '0');
     const name = `工作台备份-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.wbk`;
     const url = URL.createObjectURL(blob);
@@ -1344,7 +1463,7 @@ async function doBackup() {
     setTimeout(() => URL.revokeObjectURL(url), 60000);
     await db.setMeta('lastBackup', Date.now());
     t.close();
-    toast(`已导出 ${count} 张卡片（${fileCount} 个文件，${fmtSize(blob.size)}）`);
+    toast(`已导出 ${count} 张卡片（${fileCount} 个文件，${fmtSize(blob.size)}）${missing ? `；有 ${missing} 个文件在存储文件夹里找不到，已跳过` : ''}`, missing ? { error: true } : {});
     refreshStatus();
   } catch (e) {
     t.close();
@@ -1781,7 +1900,7 @@ const isFileDrag = (e) => !state.dragId && [...(e.dataTransfer?.types || [])].in
 
 document.addEventListener('pointerover', (e) => {
   const card = e.target.closest?.('.card');
-  if (card && findCard(card.dataset.id)?.kind === 'file') urlFor(card.dataset.id); // 预先准备，以便拖到桌面
+  if (card && findCard(card.dataset.id)?.kind === 'file') urlFor(card.dataset.id).catch(() => {}); // 预先准备，以便拖到桌面
 });
 document.addEventListener('pointerleave', () => { hoverGroup = null; highlightGroup(null); });
 document.addEventListener('dragstart', (e) => {
@@ -1914,7 +2033,7 @@ document.addEventListener('click', async (e) => {
     case 'add-files': return $('#fileInput').click();
     case 'backup': return doBackup();
     case 'restore': return $('#restoreInput').click();
-    case 'storage-info': return storageInfo();
+    case 'storage-info': await ensureAccess(); return storageInfo();
     case 'download': return download(btn.dataset.id);
     case 'close-viewer': return closeViewer();
     case 'zoom-in': return zoomAt(1.25, null, null, true);

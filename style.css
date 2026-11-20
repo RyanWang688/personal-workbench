@@ -423,6 +423,20 @@ body.file-over .drop-overlay { display: flex; }
 .pack-check svg { width: 22px; height: 22px; stroke-width: 3; }
 .pack-box.closed .pack-check { transform: scale(1); }
 
+/* ---------- 存储与容量 ---------- */
+.stor { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; display: grid; gap: 8px; }
+.stor.on { border-color: color-mix(in srgb, var(--ok) 55%, var(--border)); background: color-mix(in srgb, var(--ok) 5%, var(--surface)); }
+.stor-head { display: flex; align-items: center; gap: 8px; }
+.stor-head .tag { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: var(--ok-soft); color: var(--ok); }
+.bar { height: 8px; border-radius: 4px; background: var(--surface-3); overflow: hidden; }
+.bar span { display: block; height: 100%; border-radius: 4px; background: var(--ok); transition: width .5s cubic-bezier(.2,.8,.2,1); }
+.bar span.hot { background: var(--warn); }
+.stor-meta { font-size: 13px; color: var(--text-2); }
+.modal p.stor-note { font-size: 12px; color: var(--text-3); line-height: 1.7; }
+.warn-text { color: var(--warn) !important; }
+.stor-act { display: flex; flex-wrap: wrap; gap: 6px; }
+.stor .btn { height: 32px; justify-self: start; }
+
 /* ---------- 智能关联 ---------- */
 .suggest-badge { display: inline-flex; align-items: center; height: 17px; margin-left: 6px; padding: 0 7px; border-radius: 9px; vertical-align: 1px;
   border: 1px dashed color-mix(in srgb, var(--warn) 70%, transparent); background: var(--warn-soft); color: var(--warn); font-size: 11px; font-weight: 600; cursor: pointer; transition: transform .15s, background .15s; }

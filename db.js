@@ -45,13 +45,77 @@ export const put = (store, value) => tx([store], 'readwrite', (t) => { t.objectS
 export const putMany = (store, values) => tx([store], 'readwrite', (t) => { const s = t.objectStore(store); values.forEach((v) => s.put(v)); });
 export const del = (store, key) => tx([store], 'readwrite', (t) => { t.objectStore(store).delete(key); });
 
-export async function getBlob(id) {
-  const rec = await tx(['blobs'], 'readonly', (t) => wrap(t.objectStore('blobs').get(id)));
-  return rec ? rec.data : null;
-}
+const getRec = (id) => tx(['blobs'], 'readonly', (t) => wrap(t.objectStore('blobs').get(id)));
 
-/** 原子写入卡片 + 文件内容，并回读校验大小，确保真正落盘。 */
+// ---------- 扩容：把文件存到电脑上的文件夹（File System Access API，Chrome / Edge） ----------
+// blobs 表里，存在文件夹的文件记录为 { id, ext: '<文件名>', type, size }，内容在「所选文件夹/工作台文件/」里。
+export const FOLDER_SUB = '工作台文件';
+export const folderSupported = () => typeof window.showDirectoryPicker === 'function';
+let dirCache;
+export async function getDir() {
+  if (dirCache === undefined) dirCache = await getMeta('dirHandle', null);
+  return dirCache;
+}
+export async function setDir(handle) { dirCache = handle; await setMeta('dirHandle', handle); }
+export async function clearDir() { dirCache = null; await del('meta', 'dirHandle'); await setMeta('storageMode', 'idb'); }
+export const storageMode = async () => ((await getMeta('storageMode', 'idb')) === 'folder' && (await getDir()) ? 'folder' : 'idb');
+/** 文件夹访问权限：'granted' | 'prompt' | 'denied' | 'none'；request=true 时会弹出浏览器授权（需在用户点击中调用） */
+export async function dirPermission(request = false) {
+  const d = await getDir();
+  if (!d) return 'none';
+  if (!d.queryPermission) return 'granted';
+  let p = await d.queryPermission({ mode: 'readwrite' });
+  if (p !== 'granted' && request) p = await d.requestPermission({ mode: 'readwrite' }).catch(() => 'denied');
+  return p;
+}
+const permError = () => Object.assign(new Error('需要授权访问存储文件夹'), { code: 'NEED_PERMISSION' });
+async function filesDir() {
+  const d = await getDir();
+  if (!d) throw new Error('未设置存储文件夹');
+  if ((await dirPermission()) !== 'granted') throw permError();
+  return d.getDirectoryHandle(FOLDER_SUB, { create: true });
+}
+const safeName = (n) => (n || '文件').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').slice(0, 120);
+async function writeExternal(id, name, blob) {
+  const fd = await filesDir();
+  const fname = `${id.slice(0, 8)}__${safeName(name)}`;
+  const fh = await fd.getFileHandle(fname, { create: true });
+  const w = await fh.createWritable();
+  try { await w.write(blob); await w.close(); } catch (e) { await w.abort?.().catch(() => {}); throw e; }
+  const check = await fh.getFile();
+  if (check.size !== blob.size) { await fd.removeEntry(fname).catch(() => {}); throw new Error('写入文件夹后校验失败'); }
+  return fname;
+}
+async function readExternal(fname, type) {
+  const fd = await filesDir();
+  try {
+    const f = await (await fd.getFileHandle(fname)).getFile();
+    return type && f.type !== type ? new File([f], f.name, { type }) : f;
+  } catch (e) {
+    if (e.code === 'NEED_PERMISSION') throw e;
+    throw new Error(`存储文件夹里找不到「${fname.replace(/^[^_]+__/, '')}」，可能被移动或删除了`);
+  }
+}
+async function removeExternal(fname) { try { await (await filesDir()).removeEntry(fname); } catch {} }
+
+export async function getBlob(id) {
+  const rec = await getRec(id);
+  if (!rec) return null;
+  if (rec.ext) return readExternal(rec.ext, rec.type);
+  return rec.data;
+}
+export async function isExternal(id) { return !!(await getRec(id))?.ext; }
+
+/** 写入卡片 + 文件内容并回读校验大小，确保真正落盘。文件夹模式下文件写到电脑文件夹，否则写进浏览器数据库。 */
 export async function addFile(card, blob) {
+  if ((await storageMode()) === 'folder' && (await dirPermission()) === 'granted') {
+    const fname = await writeExternal(card.id, card.name, blob);
+    await tx(['cards', 'blobs'], 'readwrite', (t) => {
+      t.objectStore('blobs').put({ id: card.id, ext: fname, type: blob.type, size: blob.size });
+      t.objectStore('cards').put(card);
+    });
+    return;
+  }
   await tx(['cards', 'blobs'], 'readwrite', (t) => {
     t.objectStore('blobs').put({ id: card.id, data: blob, type: blob.type, size: blob.size });
     t.objectStore('cards').put(card);
@@ -63,11 +127,61 @@ export async function addFile(card, blob) {
   }
 }
 
-export const deleteCard = (id) => tx(['cards', 'blobs'], 'readwrite', (t) => {
-  t.objectStore('cards').delete(id);
-  t.objectStore('blobs').delete(id);
-  t.objectStore('blobs').delete(`thumb:${id}`);
-});
+export async function deleteCard(id) {
+  const rec = await getRec(id).catch(() => null);
+  await tx(['cards', 'blobs'], 'readwrite', (t) => {
+    t.objectStore('cards').delete(id);
+    t.objectStore('blobs').delete(id);
+    t.objectStore('blobs').delete(`thumb:${id}`);
+  });
+  if (rec?.ext) await removeExternal(rec.ext);
+}
+
+/** 统计文件分布：浏览器内 / 文件夹内 */
+export async function storageStats() {
+  const recs = await getAll('blobs');
+  const s = { idbCount: 0, idbBytes: 0, extCount: 0, extBytes: 0 };
+  for (const r of recs) {
+    if (String(r.id).startsWith('thumb:')) continue;
+    if (r.ext) { s.extCount++; s.extBytes += r.size || 0; } else { s.idbCount++; s.idbBytes += r.size || r.data?.size || 0; }
+  }
+  return s;
+}
+/** 把浏览器里的文件逐个迁移到文件夹：写入并核对大小后，才从浏览器删除 */
+export async function migrateToFolder(onProgress) {
+  const cards = new Map((await getAll('cards')).map((c) => [c.id, c]));
+  const keys = (await tx(['blobs'], 'readonly', (t) => wrap(t.objectStore('blobs').getAllKeys()))).filter((k) => !String(k).startsWith('thumb:'));
+  let done = 0, moved = 0, bytes = 0;
+  for (const id of keys) {
+    const rec = await getRec(id);
+    if (rec && !rec.ext && rec.data) {
+      const fname = await writeExternal(id, cards.get(id)?.name || id, rec.data);
+      await put('blobs', { id, ext: fname, type: rec.type || rec.data.type, size: rec.data.size });
+      moved++; bytes += rec.data.size;
+    }
+    onProgress?.(++done, keys.length);
+  }
+  return { moved, bytes };
+}
+/** 反向：把文件夹里的文件搬回浏览器（停止使用文件夹时） */
+export async function migrateToBrowser(onProgress) {
+  const keys = (await tx(['blobs'], 'readonly', (t) => wrap(t.objectStore('blobs').getAllKeys()))).filter((k) => !String(k).startsWith('thumb:'));
+  let done = 0, moved = 0;
+  for (const id of keys) {
+    const rec = await getRec(id);
+    if (rec?.ext) {
+      const f = await readExternal(rec.ext, rec.type);
+      const data = new Blob([await f.arrayBuffer()], { type: rec.type || f.type });
+      await put('blobs', { id, data, type: data.type, size: data.size });
+      const check = await getRec(id);
+      if (!check?.data || check.data.size !== f.size) throw new Error('搬回浏览器后校验失败，已停止，文件夹里的原文件保留');
+      await removeExternal(rec.ext);
+      moved++;
+    }
+    onProgress?.(++done, keys.length);
+  }
+  return { moved };
+}
 // 缩略图与原文件分开存（id 前缀 thumb:），不进备份，可随时重新生成
 export const putThumb = (id, blob) => put('blobs', { id: `thumb:${id}`, data: blob, type: blob.type, size: blob.size });
 export const getThumb = (id) => getBlob(`thumb:${id}`);
@@ -86,10 +200,11 @@ export async function exportBackup() {
   const [columns, cards] = await Promise.all([getAll('columns'), getAll('cards')]);
   const parts = [];
   const files = [];
-  let offset = 0;
+  let offset = 0, missing = 0;
   for (const c of cards) {
     if (c.kind !== 'file') continue;
-    const b = await getBlob(c.id);
+    let b;
+    try { b = await getBlob(c.id); } catch (e) { if (e.code === 'NEED_PERMISSION') throw e; missing++; continue; } // 文件夹里被删的文件：跳过，不让整个备份失败
     if (!b) continue;
     files.push({ id: c.id, offset, size: b.size, type: b.type });
     parts.push(b);
@@ -100,7 +215,7 @@ export async function exportBackup() {
   const head = new Uint8Array(8);
   head.set(new TextEncoder().encode(MAGIC), 0);
   new DataView(head.buffer).setUint32(4, json.byteLength, true);
-  return { blob: new Blob([head, json, ...parts], { type: 'application/octet-stream' }), count: cards.length, fileCount: files.length };
+  return { blob: new Blob([head, json, ...parts], { type: 'application/octet-stream' }), count: cards.length, fileCount: files.length, missing };
 }
 
 export async function readBackup(file) {
