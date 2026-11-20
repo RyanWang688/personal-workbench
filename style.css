@@ -138,6 +138,18 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .folder:hover { transform: translateY(-3px); box-shadow: 0 4px 8px rgba(20,20,30,.06), 0 14px 32px rgba(20,20,30,.12); }
 .folder:hover .more { opacity: 1; }
 .folder.drop-active { border-color: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 30%, transparent); transform: translateY(-3px) scale(1.02); }
+.folder[draggable="true"] { cursor: grab; }
+.folder.folder-dragging { opacity: .4; transform: scale(.97); }
+body.dragging-folder .folder:not(.folder-dragging) { border-style: dashed; }
+.merge-hint { position: absolute; z-index: 4; left: 50%; top: 42%; transform: translate(-50%, -50%) scale(.8); padding: 6px 14px; border-radius: 999px;
+  background: var(--ok); color: #fff; font-size: 13px; font-weight: 700; box-shadow: 0 6px 18px rgba(0,0,0,.3); opacity: 0; pointer-events: none; transition: opacity .15s, transform .2s cubic-bezier(.3,1.5,.5,1); }
+.folder.merge-target { border-style: solid !important; border-color: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 30%, transparent), 0 14px 32px rgba(20,20,30,.18); transform: translateY(-4px) scale(1.03); }
+.folder.merge-target .merge-hint { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+.folder.merge-target .folder-cover { filter: brightness(.8); }
+.folder-tab { transition: transform .3s cubic-bezier(.3,1.5,.5,1); transform-origin: left bottom; }
+.folder.merge-target .folder-tab, .folder.merge-open .folder-tab { transform: rotate(-10deg) translateY(-4px); }
+.folder.merged { animation: merged-glow 1.2s ease-out; }
+@keyframes merged-glow { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent); } 100% { box-shadow: 0 0 0 18px transparent; } }
 .folder-tab { position: absolute; top: -9px; left: 14px; width: 72px; height: 12px; border-radius: 8px 8px 0 0; background: color-mix(in srgb, var(--ok) 55%, var(--surface)); }
 .folder-cover { height: 150px; border-radius: 9px; overflow: hidden; background: color-mix(in srgb, var(--ok) 10%, var(--surface-2)); }
 .cover-grid { display: grid; height: 100%; gap: 3px; }

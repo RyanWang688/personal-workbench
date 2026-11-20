@@ -535,7 +535,8 @@ function renderArchive() {
     </header>
     ${fs.length ? `<div class="folder-grid">${fs.map((f) => {
       const n = cardsIn(f.id, false).length;
-      return `<div class="folder" role="button" tabindex="0" data-folder="${f.id}" data-drop="${f.id}" aria-label="项目文件夹 ${esc(f.title)}，${n} 个文件">
+      return `<div class="folder" role="button" tabindex="0" draggable="${IS_TOUCH ? 'false' : 'true'}" data-folder="${f.id}" data-drop="${f.id}" aria-label="项目文件夹 ${esc(f.title)}，${n} 个文件" title="拖到另一个文件夹上可以合并">
+        <span class="merge-hint" aria-hidden="true">松开合并</span>
         <div class="folder-tab" aria-hidden="true"></div>
         <div class="folder-cover">${folderCover(f)}</div>
         <div class="folder-info"><div class="folder-name">${highlight(f.title)}</div>
@@ -545,6 +546,94 @@ function renderArchive() {
     }).join('')}</div>`
     : `<div class="archive-empty">${FOLDER_SVG}<b>${state.query ? '没有匹配的项目' : '还没有已完成的项目'}</b><span>${state.query ? '' : '回到看板，长按一个做完的文件 —— 它和同项目的文件会被自动打包送到这里。'}</span></div>`}`;
 }
+// ---------- 文件夹合并：拖一个文件夹到另一个上 ----------
+function mergedTitle(a, b) {
+  let p = '';
+  while (p.length < Math.min(a.length, b.length) && a[p.length] === b[p.length]) p += a[p.length];
+  p = p.replace(new RegExp(`${SEP}+$`), '');
+  return p.length >= 2 ? p : a; // 没有足够的公共部分时保留目标文件夹的名字
+}
+async function mergeFolders(srcId, dstId) {
+  const src = area(srcId), dst = area(dstId);
+  if (!src || !dst || src === dst) return;
+  const cards = cardsIn(srcId, false);
+  const prev = { dstTitle: dst.title, cards: cards.map((c) => ({ c, columnId: c.columnId, order: c.order })) };
+  const title = mergedTitle(dst.title, src.title);
+  // 动画：源文件夹飞进目标，目标弹一下
+  const sEl = $(`.folder[data-folder="${CSS.escape(srcId)}"]`), dEl = $(`.folder[data-folder="${CSS.escape(dstId)}"]`);
+  if (sEl && dEl && !reduceMotion.matches) {
+    const a = sEl.getBoundingClientRect(), b = dEl.getBoundingClientRect();
+    const dx = b.left + b.width / 2 - (a.left + a.width / 2), dy = b.top + b.height / 2 - (a.top + a.height / 2);
+    dEl.classList.add('merge-open');
+    sEl.style.zIndex = '5';
+    await sEl.animate([
+      { transform: 'none', opacity: 1 },
+      { transform: `translate(${dx * 0.8}px, ${dy * 0.8 - 46}px) scale(.62) rotate(${dx > 0 ? 8 : -8}deg)`, opacity: 1, offset: 0.6 },
+      { transform: `translate(${dx}px, ${dy + 10}px) scale(.2)`, opacity: 0 },
+    ], { duration: 620, easing: 'cubic-bezier(.45,0,.25,1)', fill: 'forwards' }).finished.catch(() => {});
+    await dEl.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.07)', offset: 0.35 }, { transform: 'scale(.97)', offset: 0.7 }, { transform: 'scale(1)' }],
+      { duration: 420, easing: 'ease-out' }).finished.catch(() => {});
+  }
+  // 数据：卡片并入目标（排在后面），删除源文件夹
+  let order = orderAt(dstId, cardsIn(dstId, false).length);
+  for (const c of cards) { c.columnId = dstId; c.order = order; order += 1024; c.updatedAt = Date.now(); }
+  if (cards.length) await db.putMany('cards', cards);
+  dst.title = title;
+  dst.doneAt = Math.max(dst.doneAt || 0, src.doneAt || 0);
+  await saveArea(dst);
+  await db.del('columns', srcId);
+  state.areas = state.areas.filter((x) => x !== src);
+  if (state.folder === srcId) { state.folder = dstId; ls.set('folder', dstId); }
+  await changed();
+  const nEl = $(`.folder[data-folder="${CSS.escape(dstId)}"]`);
+  if (nEl && !reduceMotion.matches) {
+    nEl.classList.add('merged');
+    setTimeout(() => nEl.classList.remove('merged'), 1400);
+  }
+  toast(`已合并为「${title}」，共 ${cardsIn(dstId, false).length} 个文件`, {
+    action: '撤销', onAction: async () => {
+      await saveArea(src);
+      state.areas.push(src);
+      prev.cards.forEach((p) => Object.assign(p.c, { columnId: p.columnId, order: p.order }));
+      if (prev.cards.length) await db.putMany('cards', prev.cards.map((p) => p.c));
+      dst.title = prev.dstTitle;
+      await saveArea(dst);
+      await changed();
+    },
+  });
+}
+let dragFolder = null;
+document.addEventListener('dragstart', (e) => {
+  const f = e.target.closest?.('.folder[data-folder]');
+  if (!f || e.target.closest('.card')) return;
+  dragFolder = f.dataset.folder;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('application/x-workbench-folder', dragFolder);
+  requestAnimationFrame(() => f.classList.add('folder-dragging'));
+  document.body.classList.add('dragging-folder');
+});
+document.addEventListener('dragover', (e) => {
+  if (!dragFolder) return;
+  const t = e.target.closest?.('.folder[data-folder]');
+  $$('.folder.merge-target').forEach((el) => { if (el !== t) el.classList.remove('merge-target'); });
+  if (!t || t.dataset.folder === dragFolder) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  t.classList.add('merge-target');
+});
+document.addEventListener('drop', (e) => {
+  if (!dragFolder) return;
+  const t = e.target.closest?.('.folder[data-folder]');
+  const src = dragFolder;
+  if (t && t.dataset.folder !== src) { e.preventDefault(); mergeFolders(src, t.dataset.folder); }
+});
+document.addEventListener('dragend', () => {
+  if (!dragFolder) return;
+  dragFolder = null;
+  document.body.classList.remove('dragging-folder');
+  $$('.folder-dragging, .merge-target').forEach((el) => el.classList.remove('folder-dragging', 'merge-target'));
+});
+
 async function createFolder(title) {
   const list = folders();
   const f = { id: uid(), kind: 'folder', title, order: list.length ? list[list.length - 1].order + 1024 : 0, doneAt: Date.now() };
@@ -1278,7 +1367,11 @@ function areaMenu(anchor, a) {
   const items = [{ text: '重命名', run: () => renameArea(a) }];
   if (kind !== 'canvas' && kind !== 'folder') items.push({ text: '添加便签', run: () => newNote(a.id) });
   if (kind === 'column') items.push({ text: '整列归档到已完成项目…', run: () => archiveColumn(a) });
-  if (kind === 'folder') items.push({ text: '打包下载 zip', run: () => zipFolder(a) });
+  if (kind === 'folder') {
+    items.push({ text: '打包下载 zip', run: () => zipFolder(a) });
+    const others = folders().filter((f) => f.id !== a.id);
+    if (others.length) { items.push({ label: '合并到…' }); others.forEach((f) => items.push({ text: f.title, run: () => mergeFolders(a.id, f.id) })); }
+  }
   if (kind === 'zone') items.push({ text: a.ttlDays ? `自动清理：${a.ttlDays} 天` : '设置自动清理…', run: () => setZoneTtl(a) });
   if (i > 0) items.push({ text: prev, run: () => moveArea(a, -1) });
   if (i < list.length - 1) items.push({ text: next, run: () => moveArea(a, 1) });
