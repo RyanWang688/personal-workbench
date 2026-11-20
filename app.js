@@ -1,10 +1,11 @@
-import * as db from './db.js?v=5';
+import * as db from './db.js?v=6';
 import * as pv from './preview.js?v=3';
 
 const TRASH = 'trash';
 const BOARD = 'board';
 const ARCHIVE = 'archive';      // 「已完成项目」页面
 const PICK = 'archive-pick';    // 拖到「已完成项目」标签上 → 选择文件夹
+const WORKS = 'works';          // 「作品」页面
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
@@ -23,6 +24,8 @@ const state = {
   selected: new Set(), // 多选中的卡片
   archCat: ls.get('archCat', 'all'), // 已完成项目的分类筛选
   cats: [], // 已完成项目的分类（含空分类）
+  work: ls.get('work', null), workCat: ls.get('workCat', 'all'), workCats: [], // 作品页：当前作品、分类筛选、分类列表
+  syncing: new Set(), device: ls.get('device', innerWidth < 720 ? 'phone' : 'desktop'), logFilter: 'all', logLimit: 40,
 };
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const channel = 'BroadcastChannel' in window ? new BroadcastChannel('personal-workbench') : null;
@@ -104,6 +107,7 @@ const openFolder = () => (state.view === ARCHIVE && area(state.folder)?.kind ===
 function defaultTarget() {
   if (isCanvas(state.view)) return state.view;
   if (openFolder()) return openFolder();
+  if (state.view === WORKS && area(state.work)?.kind === 'work') return state.work;
   return columns()[0]?.id || fallbackZone();
 }
 
@@ -113,9 +117,11 @@ async function load() {
   state.cards = cards;
   const live = new Set(cards.map((c) => c.id));
   for (const [key, url] of state.urls) if (!live.has(key.replace(/^thumb:/, ''))) { URL.revokeObjectURL(url); state.urls.delete(key); }
-  if (state.view !== BOARD && state.view !== ARCHIVE && !isCanvas(state.view)) state.view = BOARD;
+  if (state.view !== BOARD && state.view !== ARCHIVE && state.view !== WORKS && !isCanvas(state.view)) state.view = BOARD;
   if (state.folder && !area(state.folder)) state.folder = null;
+  if (state.work && area(state.work)?.kind !== 'work') state.work = null;
   state.cats = await db.getMeta('categories', []).catch(() => []);
+  state.workCats = await db.getMeta('workCategories', []).catch(() => []);
   if (state.zone !== TRASH && !area(state.zone)) state.zone = fallbackZone() || TRASH;
 }
 async function changed() {
@@ -194,7 +200,7 @@ function baseTitle(c) {
   do { prev = s; s = s.replace(SUFFIX, '').trim(); } while (s !== prev && s);
   return s.replace(new RegExp(`${SEP}+$`), '') || (c.name || '').replace(/\.[^.]+$/, '');
 }
-const isActive = (c) => c.columnId !== TRASH && area(c.columnId)?.kind !== 'folder';
+const isActive = (c) => c.columnId !== TRASH && !['folder', 'work'].includes(area(c.columnId)?.kind);
 
 // ===== 名称关联算法 =====
 // 每两张卡片算一个 0~1 的关联分：
@@ -362,11 +368,12 @@ function render() {
   const before = snapshot();
   buildGroups();
   renderViews();
-  const onBoard = state.view === BOARD, onArchive = state.view === ARCHIVE;
+  const onBoard = state.view === BOARD, onArchive = state.view === ARCHIVE, onWorks = state.view === WORKS;
   $('#board').hidden = !onBoard;
   $('#archiveView').hidden = !onArchive;
-  $('#canvasView').hidden = onBoard || onArchive;
-  if (onBoard) renderBoard(); else if (onArchive) renderArchive(); else renderCanvas();
+  $('#worksView').hidden = !onWorks;
+  $('#canvasView').hidden = onBoard || onArchive || onWorks;
+  if (onBoard) renderBoard(); else if (onArchive) renderArchive(); else if (onWorks) renderWorks(); else renderCanvas();
   renderZones();
   loadThumbs();
   playFlip(before);
@@ -479,6 +486,8 @@ function renderViews() {
       <svg viewBox="0 0 24 24"><rect x="4" y="4" width="4.5" height="16" rx="1"/><rect x="10" y="4" width="4.5" height="11" rx="1"/><rect x="16" y="4" width="4" height="7" rx="1"/></svg>看板<b>${boardCount}</b></button>
     <button role="tab" class="view-tab archive-tab" data-view="${ARCHIVE}" data-drop="${PICK}" aria-selected="${state.view === ARCHIVE}" title="彻底完成的项目归档在这里；把卡片拖到这里即可归档">
       ${FOLDER_SVG}已完成项目<b>${folders().length}</b></button>
+    <button role="tab" class="view-tab works-tab" data-view="${WORKS}" aria-selected="${state.view === WORKS}" title="个人作品：网站、设计、项目，含更新日志和在线预览">
+      ${WORK_SVG}作品<b>${works().length}</b></button>
     <span class="view-sep" aria-hidden="true"></span>
     ${canvases().map((cv) => `<button role="tab" class="view-tab" data-view="${cv.id}" data-drop="${cv.id}" aria-selected="${state.view === cv.id}">
       <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="2"/><circle cx="9" cy="9" r="1"/><circle cx="15" cy="15" r="1"/><circle cx="15" cy="9" r="1"/><circle cx="9" cy="15" r="1"/></svg>${esc(cv.title)}<b>${count(cv.id)}</b>
@@ -873,6 +882,595 @@ async function zipFolder(f) {
     toast(`打包失败：${e.message || e}`, { error: true });
   }
 }
+
+// ---------- 作品：个人作品 / 网站项目 —— 分类、更新日志（可从 GitHub 同步）、在线预览 ----------
+const works = () => areasOf('work');
+const openWork = () => (state.view === WORKS && area(state.work)?.kind === 'work' ? state.work : null);
+const WORK_SVG = `<svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="12.5" rx="2"/><path d="M3.5 8.5h17M9 20.5h6M12 17v3.5"/></svg>`;
+const ICON_EXT = `<svg viewBox="0 0 24 24"><path d="M14 5h5v5M19 5l-8 8M18 14v4a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h4"/></svg>`;
+const ICON_GH = `<svg viewBox="0 0 24 24"><path d="M9 19c-4 1.3-4-2-6-2.5M15 21v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1-.3-3.4 1.3a11.6 11.6 0 0 0-6 0C6.8 2.8 5.8 3.1 5.8 3.1a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 4.4 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"/></svg>`;
+const ICON_SYNC = `<svg viewBox="0 0 24 24"><path d="M19.5 10A8 8 0 0 0 5.2 7.2L4 8.5M4 4v4.5h4.5M4.5 14a8 8 0 0 0 14.3 2.8l1.2-1.3M20 20v-4.5h-4.5"/></svg>`;
+const ICON_FULL = `<svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>`;
+const ICON_LOCK = `<svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>`;
+const WSTATUS = { live: { t: '已上线', c: '#2f9e44' }, dev: { t: '开发中', c: '#1c7ed6' }, paused: { t: '暂停', c: '#868e96' }, done: { t: '完结', c: '#7950f2' } };
+const wstat = (w) => { const s = WSTATUS[w.status] || WSTATUS.dev; return `<span class="wstat" style="--pc:${s.c}">${s.t}</span>`; };
+const safeUrl = (u) => (/^https?:\/\/[^\s"'<>]+$/i.test(u || '') ? u : '');
+function normUrl(u) {
+  u = (u || '').trim();
+  if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = `https://${u}`;
+  try { const x = new URL(u); return /^https?:$/.test(x.protocol) && x.hostname.includes('.') ? x.href : null; } catch { return null; }
+}
+const hostOf = (u) => { try { return new URL(u).host.replace(/^www\./, ''); } catch { return ''; } };
+// 「用户名/仓库」、仓库链接、或 GitHub Pages 地址都能识别出仓库；识别不了返回 null
+function parseRepo(s) {
+  s = (s || '').trim();
+  if (!s) return '';
+  let m = /github\.com[/:]([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:[/#?]|$)/i.exec(s);
+  if (m) return `${m[1]}/${m[2]}`;
+  m = /^(?:https?:\/\/)?([\w-]+)\.github\.io\/?(?:[?#].*)?$/i.exec(s);
+  if (m) return `${m[1]}/${m[1].toLowerCase()}.github.io`;
+  m = /^(?:https?:\/\/)?([\w-]+)\.github\.io\/([\w.-]+)/i.exec(s);
+  if (m) return `${m[1]}/${m[2]}`;
+  m = /^([\w-]+)\/([\w.-]+)$/.exec(s);
+  return m ? `${m[1]}/${m[2]}` : null;
+}
+const workColor = (w) => FCOLORS[(w.color ?? Math.max(0, works().indexOf(w))) % FCOLORS.length].c;
+const allWorkCats = () => [...new Set([...(state.workCats || []), ...works().map((w) => w.category).filter(Boolean)])];
+const visibleLogs = (w) => (w.logs || []).filter((l) => !l.hidden).sort((a, b) => b.at - a.at);
+const lastActivity = (w) => Math.max(w.createdAt || 0, visibleLogs(w)[0]?.at || 0);
+const agoLong = (ts) => (Date.now() - ts > 30 * 86400e3 ? fmtDate(ts) : ago(ts));
+function dayLabel(ts) {
+  const d = new Date(ts), now = new Date(), y = new Date(now); y.setDate(now.getDate() - 1);
+  if (d.toDateString() === now.toDateString()) return '今天';
+  if (d.toDateString() === y.toDateString()) return '昨天';
+  return d.getFullYear() === now.getFullYear() ? `${d.getMonth() + 1}月${d.getDate()}日` : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+}
+const hm = (ts) => new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+function abbr(t) {
+  const s = (t || '').trim();
+  if (/^[\x00-\x7f]+$/.test(s)) { const ws = s.split(/[\s\-_.]+/).filter(Boolean); return (ws.length > 1 ? ws[0][0] + ws[1][0] : s.slice(0, 2)).toUpperCase(); }
+  return [...s.replace(/\s/g, '')].slice(0, 2).join('');
+}
+async function saveWorkCats() { await db.setMeta('workCategories', state.workCats || []); }
+
+// 封面：手动指定的图片 → 作品里第一张图片 → 网站实时缩略 → 文字封面
+// 被嵌在 iframe 里时（例如作品里预览方寸自己），不再加载网站预览，避免无限套娃，也不重复同步
+let EMBEDDED = true;
+try { EMBEDDED = window.self !== window.top; } catch {}
+const SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads';
+function coverCard(w) {
+  const pinned = findCard(w.coverId);
+  if (pinned && pinned.columnId === w.id && pinned.thumb === 'ok') return pinned;
+  return cardsIn(w.id, false).find((c) => c.thumb === 'ok' && typeOf(c).k === 'image');
+}
+const coverKey = (w) => `${w.cover || 'auto'}|${coverCard(w)?.id || ''}|${safeUrl(w.url)}`;
+function workCover(w) {
+  const mode = w.cover || 'auto', url = safeUrl(w.url), pic = mode !== 'live' && mode !== 'mono' ? coverCard(w) : null;
+  if (pic) {
+    const u = state.urls.get(`thumb:${pic.id}`);
+    return `<img class="thumb-img${u ? ' loaded' : ''}" data-thumb="${pic.id}" ${u ? `src="${u}"` : ''} alt="" draggable="false">`;
+  }
+  if (url && mode !== 'mono' && !EMBEDDED) return `<div class="work-live" data-live><iframe src="${esc(url)}" loading="lazy" tabindex="-1" aria-hidden="true" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" title=""></iframe></div>`;
+  return `<div class="work-mono"><b>${esc(abbr(w.title))}</b>${url ? `<span>${esc(hostOf(url))}</span>` : ''}</div>`;
+}
+function workBody(w) {
+  const last = visibleLogs(w)[0], url = safeUrl(w.url), syncing = state.syncing.has(w.id);
+  return `<div class="work-top">${wstat(w)}${w.category ? `<span class="work-cat">${esc(w.category)}</span>` : ''}${syncing ? `<span class="work-spin" title="正在同步">${ICON_SYNC}</span>` : ''}</div>
+    <h3 class="work-name">${highlight(w.title)}</h3>
+    <p class="work-desc">${w.desc ? highlight(w.desc) : `<span class="dim">${url ? esc(hostOf(url)) : '还没有简介'}</span>`}</p>
+    <div class="work-last">${last ? `<time>${agoLong(last.at)}</time><span>${esc(last.text)}</span>` : '<span class="dim">还没有更新日志</span>'}</div>
+    <div class="work-links">
+      ${url ? `<button class="wl" data-action="work-preview" data-id="${w.id}">预览</button><a class="wl" href="${esc(url)}" target="_blank" rel="noopener" title="${esc(url)}">访问${ICON_EXT}</a>` : ''}
+      ${w.repo ? `<a class="wl icon" href="https://github.com/${esc(w.repo)}" target="_blank" rel="noopener" title="GitHub：${esc(w.repo)}" aria-label="GitHub 仓库">${ICON_GH}</a>` : ''}
+    </div>`;
+}
+function workTile(w) {
+  return `<article class="work" role="button" tabindex="0" data-work="${w.id}" data-drop="${w.id}" draggable="${IS_TOUCH ? 'false' : 'true'}" style="--fc:${workColor(w)}" aria-label="作品 ${esc(w.title)}">
+    <div class="work-cover">${workCover(w)}</div>
+    <div class="work-body">${workBody(w)}</div>
+    <button class="more" data-action="work-menu" data-id="${w.id}" aria-label="作品设置" aria-haspopup="menu">${DOTS}</button>
+  </article>`;
+}
+const workMatch = (w) => {
+  const q = state.query.toLowerCase();
+  return !q || [w.title, w.desc, w.url, w.repo, w.category, ...(w.tags || []), ...(w.logs || []).map((l) => l.text)].some((s) => (s || '').toLowerCase().includes(q)) || cardsIn(w.id).length > 0;
+};
+function renderWorks() {
+  const el = $('#worksView');
+  const wid = openWork();
+  if (wid) return renderWorkDetail(el, area(wid));
+  const all = works().filter(workMatch).sort((a, b) => lastActivity(b) - lastActivity(a));
+  const cats = allWorkCats();
+  const cur = state.workCat === '__none' || cats.includes(state.workCat) ? state.workCat : 'all';
+  const inCat = (name) => all.filter((w) => (name === '__none' ? !w.category || !cats.includes(w.category) : w.category === name));
+  const shown = cur === 'all' ? all : inCat(cur);
+  const live = works().filter((w) => w.status === 'live').length;
+  const lastAt = Math.max(0, ...works().map(lastActivity));
+  const chip = (key, label, n, drop) => `<button class="cat-chip" role="tab" aria-selected="${cur === key}" data-wcat="${esc(key)}" ${drop != null ? `data-wcatdrop="${esc(drop)}"` : ''}>${esc(label)}<b>${n}</b></button>`;
+  const head = `<header class="archive-head works-head">
+      <div class="ah-text"><h2>作品</h2>
+        <div class="meta">${works().length ? `${works().length} 个作品 · ${live} 个已上线${lastAt ? ` · 最近更新 ${agoLong(lastAt)}` : ''}` : '放你做过的网站、设计和项目：分类整理，更新日志自动从 GitHub 同步，点开就能预览。'}</div></div>
+      <button class="btn" data-action="work-import">${ICON_GH}<span>从 GitHub 导入</span></button>
+      ${works().some((w) => w.repo) ? `<button class="btn" data-action="work-sync-all" ${state.syncing.size ? 'disabled' : ''}>${ICON_SYNC}<span>${state.syncing.size ? '同步中…' : '同步全部'}</span></button>` : ''}
+      <button class="btn primary" data-action="work-new"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>新建作品</span></button>
+    </header>`;
+  const bar = works().length ? `<div class="cat-bar" role="tablist" aria-label="作品分类">
+      ${chip('all', '全部', all.length)}${cats.map((c) => chip(c, c, inCat(c).length, c)).join('')}
+      ${cats.length ? chip('__none', '未分类', inCat('__none').length, '') : ''}
+      <button class="cat-add" data-action="wcat-add" title="新建分类，然后把作品拖到分类上">+ 分类</button></div>` : '';
+  let grid;
+  if (!works().length) grid = `<div class="archive-empty works-empty">${WORK_SVG}<b>还没有作品</b><span>点「新建作品」填上网站链接；或「从 GitHub 导入」一次把仓库都加进来 —— 提交记录会自动变成更新日志。</span></div>`;
+  else if (!shown.length) grid = `<div class="archive-empty slim"><b>${state.query ? '没有匹配的作品' : '这个分类还是空的'}</b><span>${state.query ? '' : '把作品拖到上方的分类标签上，或在作品菜单里选择分类。'}</span></div>`;
+  else grid = `<div class="work-grid">${shown.map(workTile).join('')}</div>`;
+  const feedList = all.flatMap((w) => visibleLogs(w).slice(0, 30).map((l) => ({ l, w }))).sort((a, b) => b.l.at - a.l.at).slice(0, 40);
+  let day = '';
+  const feed = works().length ? `<aside class="works-feed" aria-label="更新动态"><h3 class="cat-h"><span>更新动态</span><b>${feedList.length}</b></h3>
+      ${feedList.length ? `<ol class="feed">${feedList.map(({ l, w }) => {
+        const d = dayLabel(l.at), sep = d !== day ? `<li class="feed-day">${d}</li>` : ''; day = d;
+        return `${sep}<li class="feed-item" data-work="${w.id}" style="--fc:${workColor(w)}" role="button" tabindex="0"><span class="fi-sq" aria-hidden="true"></span>
+          <div class="fi-main"><div class="fi-top"><b>${esc(w.title)}</b><time>${hm(l.at)}</time></div>
+          <div class="fi-text">${l.ver ? `<span class="tl-ver">${esc(l.ver)}</span>` : ''}${esc(l.text)}</div></div></li>`;
+      }).join('')}</ol>` : `<p class="feed-empty">作品的更新会按时间汇总在这里。</p>`}</aside>` : '';
+  // 封面里有实时网页（iframe）：结构没变时只更新文字部分，避免每次刷新都重新加载网站
+  const key = `${cur}|${shown.map((w) => `${w.id}:${coverKey(w)}:${workColor(w)}`).join(',')}`;
+  if (el.dataset.wkey === key && !el.dataset.wid && $('.work-grid', el)) {
+    $('.works-head', el).outerHTML = head;
+    const oldBar = $('.cat-bar', el); if (oldBar) oldBar.outerHTML = bar;
+    for (const w of shown) { const b = $(`.work[data-work="${CSS.escape(w.id)}"] .work-body`, el); if (b) b.innerHTML = workBody(w); }
+    const oldFeed = $('.works-feed', el); if (oldFeed) oldFeed.outerHTML = feed;
+  } else {
+    el.dataset.wkey = key; el.dataset.wid = '';
+    el.innerHTML = `${head}<div class="works-layout"><div class="works-main">${bar}${grid}</div>${feed}</div>`;
+  }
+  fitPreview();
+  autoSync();
+}
+
+const DEVICES = { desktop: { w: 1280, label: '电脑' }, tablet: { w: 820, label: '平板' }, phone: { w: 390, label: '手机' } };
+function sitePreviewHTML(w, url, { modal = false } = {}) {
+  const dev = DEVICES[state.device] ? state.device : 'desktop';
+  return `<section class="site-prev${modal ? ' in-modal' : ''}" data-url="${esc(url)}" data-device="${dev}">
+    <div class="sp-bar">
+      <div class="sp-url" title="${esc(url)}">${ICON_LOCK}<span>${esc(url.replace(/^https?:\/\//, '').replace(/\/$/, ''))}</span></div>
+      <div class="seg" role="group" aria-label="预览尺寸">${Object.entries(DEVICES).map(([k, d]) => `<button type="button" data-action="sp-device" data-d="${k}" aria-pressed="${dev === k}">${d.label}</button>`).join('')}</div>
+      <button class="icon-btn" data-action="sp-reload" title="刷新预览" aria-label="刷新预览">${ICON_SYNC}</button>
+      ${modal ? '' : `<button class="icon-btn" data-action="sp-full" title="放大预览（Esc 退出）" aria-label="放大预览">${ICON_FULL}</button>`}
+      <a class="icon-btn" href="${esc(url)}" target="_blank" rel="noopener" title="新窗口打开" aria-label="新窗口打开">${ICON_EXT}</a>
+      ${modal ? `<button class="icon-btn" data-action="close-viewer" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>` : ''}
+    </div>
+    <div class="sp-stage"><div class="sp-frame"><iframe class="sp-iframe" src="${esc(url)}" title="${esc(w.title)} 网站预览" sandbox="${SANDBOX}" allow="fullscreen; clipboard-write" referrerpolicy="no-referrer-when-downgrade"></iframe></div>
+      <div class="sp-loading"><div class="spinner"></div>正在加载 ${esc(hostOf(url))}…</div></div>
+    <p class="sp-note">预览一直空白？有的网站禁止被嵌入，请点右上角「新窗口打开」。</p>
+  </section>`;
+}
+// 按所选设备宽度渲染网页，再整体缩放到容器里（桌面版网页在小窗口里也是完整布局）
+function fitPreview() {
+  $$('.site-prev').forEach((sp) => {
+    if (!sp.getClientRects().length) return;
+    const stage = $('.sp-stage', sp), frame = $('.sp-frame', sp), ifr = $('iframe', sp);
+    const dw = DEVICES[sp.dataset.device]?.w || 1280, pad = sp.dataset.device === 'desktop' ? 0 : 24;
+    const W = stage.clientWidth - pad * 2, H = stage.clientHeight - pad * 2;
+    const s = Math.min(1, W / dw);
+    Object.assign(ifr.style, { width: `${dw}px`, height: `${H / s}px`, transform: `scale(${s})` });
+    Object.assign(frame.style, { width: `${dw * s}px`, height: `${H}px` });
+  });
+  $$('[data-live]').forEach((el) => { if (el.offsetParent) el.style.setProperty('--s', el.clientWidth / 1280); });
+}
+addEventListener('resize', () => { clearTimeout(fitPreview.t); fitPreview.t = setTimeout(fitPreview, 80); });
+document.addEventListener('load', (e) => {
+  if (e.target.matches?.('.sp-iframe')) e.target.closest('.site-prev')?.classList.add('loaded');
+  if (e.target.matches?.('.work-live iframe')) e.target.parentElement.classList.add('loaded');
+}, true);
+function previewSite(w) {
+  const url = safeUrl(w?.url);
+  if (!url) return;
+  if (EMBEDDED) return window.open(url, '_blank', 'noopener');
+  const v = $('#viewer');
+  v.classList.add('site-viewer');
+  $('#viewerInner').innerHTML = sitePreviewHTML(w, url, { modal: true });
+  v.showModal();
+  fitPreview();
+  requestAnimationFrame(fitPreview);
+}
+
+function renderWorkDetail(el, w) {
+  const url = safeUrl(w.url), syncing = state.syncing.has(w.id), logs = visibleLogs(w);
+  const metaParts = [`${logs.length} 条更新`];
+  if (w.repoInfo?.lang) metaParts.push(esc(w.repoInfo.lang));
+  if (w.repo) metaParts.push(w.syncError ? `<span class="warn-text">同步失败：${esc(w.syncError)}</span>` : w.syncedAt ? `${ago(w.syncedAt)}同步` : '尚未同步');
+  metaParts.push(`创建于 ${fmtDate(w.createdAt || Date.now())}`);
+  const head = `<header class="archive-head wd-head" style="--fc:${workColor(w)}">
+      <button class="icon-btn back" data-action="work-back" aria-label="返回作品"><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></button>
+      <div class="ah-text">
+        <div class="crumb"><button class="crumb-link" data-wgoto="">作品</button><span>/</span>${w.category ? `<button class="crumb-link" data-wgoto="" data-wcat="${esc(w.category)}">${esc(w.category)}</button><span>/</span>` : ''}</div>
+        <h2><span class="title-sw" aria-hidden="true"></span>${esc(w.title)}${wstat(w)}</h2>
+        <div class="meta">${metaParts.join(' · ')}</div>
+      </div>
+      ${url ? `<a class="btn" href="${esc(url)}" target="_blank" rel="noopener">${ICON_EXT}<span>打开网站</span></a>` : ''}
+      ${w.repo ? `<button class="btn" data-action="work-sync" ${syncing ? 'disabled' : ''} title="从 GitHub 同步提交记录">${ICON_SYNC}<span>${syncing ? '同步中…' : '同步'}</span></button>` : ''}
+      <button class="btn" data-action="work-edit"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg><span>编辑</span></button>
+      <button class="icon-btn" data-action="work-menu" aria-label="作品设置" aria-haspopup="menu">${DOTS}</button>
+    </header>`;
+  const f = state.logFilter || 'all';
+  const list = logs.filter((l) => f === 'all' || (f === 'git' ? l.src === 'git' : l.src !== 'git'));
+  const limit = state.logLimit || 40;
+  let day = '';
+  const items = list.slice(0, limit).map((l) => {
+    const d = dayLabel(l.at), sep = d !== day ? `<li class="tl-day">${d}</li>` : ''; day = d;
+    const git = l.src === 'git', link = safeUrl(l.link);
+    return `${sep}<li class="tl-item ${git ? 'git' : 'manual'}" data-log="${l.id}">
+      <span class="tl-mark" aria-hidden="true"></span>
+      <div class="tl-body">
+        <div class="tl-text">${l.ver ? `<span class="tl-ver">${esc(l.ver)}</span>` : ''}${highlight(l.text)}</div>
+        ${l.detail ? `<details class="tl-detail"><summary>详情</summary><div>${esc(l.detail)}</div></details>` : ''}
+        <div class="tl-meta"><time>${hm(l.at)}</time>${git ? ` · 代码提交${link ? ` <a href="${esc(link)}" target="_blank" rel="noopener">${esc((l.sha || '').slice(0, 7))}</a>` : ''}${l.author ? ` · ${esc(l.author)}` : ''}` : ' · 手动记录'}</div>
+      </div>
+      <button class="more" data-action="log-menu" data-id="${l.id}" aria-label="这条日志的操作" aria-haspopup="menu">${DOTS}</button>
+    </li>`;
+  }).join('');
+  const nGit = logs.filter((l) => l.src === 'git').length;
+  const seg = (k, label, n) => `<button type="button" data-action="log-filter" data-f="${k}" aria-pressed="${f === k}">${label}<b>${n}</b></button>`;
+  const today = new Date(Date.now() - new Date().getTimezoneOffset() * 60e3).toISOString().slice(0, 10);
+  const info = [
+    url && `<div class="wi-row"><span>网站</span><a href="${esc(url)}" target="_blank" rel="noopener">${esc(url.replace(/^https?:\/\//, '').replace(/\/$/, ''))}</a></div>`,
+    w.repo && `<div class="wi-row"><span>仓库</span><a href="https://github.com/${esc(w.repo)}" target="_blank" rel="noopener">${esc(w.repo)}</a></div>`,
+    w.repoInfo?.stars != null && `<div class="wi-row"><span>星标</span><b>${w.repoInfo.stars}</b></div>`,
+    w.category && `<div class="wi-row"><span>分类</span><b>${esc(w.category)}</b></div>`,
+  ].filter(Boolean).join('');
+  const rest = `<div class="wd-rest" style="--fc:${workColor(w)}">
+      <section class="wd-log">
+        <div class="wd-log-head"><h3 class="cat-h"><span>更新日志</span><b>${logs.length}</b></h3>
+          ${nGit ? `<div class="seg" role="group" aria-label="筛选">${seg('all', '全部', logs.length)}${seg('manual', '手动', logs.length - nGit)}${seg('git', '提交', nGit)}</div>` : ''}</div>
+        <form class="log-compose" id="logForm">
+          <textarea name="t" rows="2" placeholder="记录这次更新了什么…（第一行是标题，Ctrl + Enter 保存）" maxlength="2000"></textarea>
+          <div class="lc-row"><input type="text" name="v" placeholder="版本号（可选）" maxlength="20"><input type="date" name="d" value="${today}" max="${today}" aria-label="日期"><button class="btn primary">记录</button></div>
+        </form>
+        ${list.length ? `<ol class="timeline">${items}</ol>` : `<p class="feed-empty">${w.repo ? '还没有记录。点「同步 GitHub」把提交记录拉进来，或者在上面手动写一条。' : '还没有记录。在上面写下第一条更新；填上 GitHub 仓库后，提交记录会自动同步进来。'}</p>`}
+        ${list.length > limit ? `<button class="btn ghost tl-more" data-action="log-more">显示更多（还有 ${list.length - limit} 条）</button>` : ''}
+      </section>
+      <aside class="wd-side">
+        <section class="wd-info">
+          ${w.desc ? `<p class="wi-desc">${esc(w.desc)}</p>` : `<p class="wi-desc dim">还没有简介，点「编辑」补充。</p>`}
+          ${(w.tags || []).length ? `<div class="wi-tags">${w.tags.map((t) => `<span>${esc(t)}</span>`).join('')}</div>` : ''}
+          ${info}
+        </section>
+        <h3 class="cat-h"><span>文件</span><b>${cardsIn(w.id, false).length}</b></h3>
+        <div class="list folder-list work-files" data-col="${w.id}">${listHTML(w.id, '截图、设计稿、文档拖到这里；第一张图片会当作封面')}</div>
+      </aside>
+    </div>`;
+  const prev = $('.site-prev:not(.in-modal)', el);
+  if (el.dataset.wid === w.id && (prev?.dataset.url || '') === url && $('.wd-head', el)) {
+    // 只替换标题和日志区，网站预览（iframe）保持不动；保留正在写的日志草稿
+    const form = $('#logForm', el), draft = form && { t: form.t.value, v: form.v.value, d: form.d.value, focus: form.contains(document.activeElement) && document.activeElement.name };
+    $('.wd-head', el).outerHTML = head;
+    $('.wd-rest', el).outerHTML = rest;
+    const nf = $('#logForm', el);
+    if (draft && nf) { nf.t.value = draft.t; nf.v.value = draft.v; nf.d.value = draft.d || nf.d.value; if (draft.focus) nf[draft.focus]?.focus(); }
+  } else {
+    el.dataset.wid = w.id; el.dataset.wkey = '';
+    el.innerHTML = head + (url && !EMBEDDED ? sitePreviewHTML(w, url) : '') + rest;
+  }
+  fitPreview();
+  requestAnimationFrame(fitPreview);
+}
+
+// ---------- 作品：新建 / 编辑 ----------
+async function editWork(w) {
+  const isNew = !w;
+  let v = w ? { wt: w.title, wu: w.url || '', wr: w.repo || '', wc: w.category || '', ws: w.status || 'dev', wd: w.desc || '', wg: (w.tags || []).join('，') }
+    : { wt: '', wu: '', wr: '', wc: state.workCat !== 'all' && state.workCat !== '__none' ? state.workCat : '', ws: 'live', wd: '', wg: '' };
+  const m = $('#modal');
+  for (;;) {
+    m.classList.add('wide');
+    const res = await dialog(`<h3>${isNew ? '新建作品' : '编辑作品'}</h3>
+      <label class="field"><span>名称</span><input type="text" name="wt" value="${esc(v.wt)}" placeholder="例如：个人主页、PTE 备考站" maxlength="80" required></label>
+      <label class="field"><span>网站链接</span><input type="text" name="wu" value="${esc(v.wu)}" placeholder="https://… 填了就能直接预览" maxlength="300" inputmode="url"></label>
+      <label class="field"><span>GitHub 仓库 <em>可选，用来同步更新日志；GitHub Pages 网站会自动识别</em></span><input type="text" name="wr" value="${esc(v.wr)}" placeholder="用户名/仓库名，或仓库链接" maxlength="200"></label>
+      <div class="field-row">
+        <label class="field"><span>分类</span><input type="text" name="wc" value="${esc(v.wc)}" placeholder="例如：网站、设计、小工具" maxlength="40" list="wcatList">
+          <datalist id="wcatList">${allWorkCats().map((c) => `<option value="${esc(c)}">`).join('')}</datalist></label>
+        <label class="field"><span>状态</span><select name="ws">${Object.entries(WSTATUS).map(([k, s]) => `<option value="${k}" ${v.ws === k ? 'selected' : ''}>${s.t}</option>`).join('')}</select></label>
+      </div>
+      <label class="field"><span>简介</span><textarea name="wd" rows="3" maxlength="500" placeholder="一两句话说明这个作品">${esc(v.wd)}</textarea></label>
+      <label class="field"><span>标签</span><input type="text" name="wg" value="${esc(v.wg)}" placeholder="用逗号分隔，例如：React，个人项目" maxlength="200"></label>
+      ${actions(isNew ? '创建' : '保存')}`, (f) => Object.fromEntries(['wt', 'wu', 'wr', 'wc', 'ws', 'wd', 'wg'].map((k) => [k, f[k].value.trim()])));
+    m.classList.remove('wide');
+    if (!res) return null;
+    v = res;
+    const url = normUrl(res.wu);
+    if (url === null) { toast('网站链接格式不对，例如 https://example.com', { error: true }); continue; }
+    const repo = res.wr ? parseRepo(res.wr) : (url && parseRepo(url)) || '';
+    if (repo === null) { toast('GitHub 仓库请填「用户名/仓库名」或仓库链接', { error: true }); continue; }
+    if (isNew) w = { id: uid(), kind: 'work', order: 0, createdAt: Date.now(), color: works().length % FCOLORS.length, logs: [] };
+    const repoChanged = repo !== (w.repo || '');
+    if (repoChanged && w.repo) w.logs = (w.logs || []).filter((l) => l.src !== 'git'); // 换了仓库：旧仓库的提交记录不再属于它
+    Object.assign(w, { title: res.wt, url, repo, status: res.ws, desc: res.wd, tags: res.wg.split(/[,，、;；]/).map((s) => s.trim()).filter(Boolean) });
+    if (repoChanged) { delete w.syncedAt; delete w.syncError; delete w.repoInfo; }
+    if (res.wc) { w.category = res.wc; if (!allWorkCats().includes(res.wc)) { state.workCats = [...(state.workCats || []), res.wc]; await saveWorkCats(); } } else delete w.category;
+    await saveArea(w);
+    if (isNew) { state.areas.push(w); state.work = w.id; ls.set('work', w.id); }
+    await changed();
+    toast(isNew ? `已创建作品「${w.title}」${repo ? '，正在同步更新日志…' : ''}` : '已保存');
+    if (repo && repoChanged) syncMany([w], { quiet: !isNew });
+    return w;
+  }
+}
+
+// ---------- GitHub 同步（公开仓库，无需登录；每小时 60 次额度） ----------
+async function gh(path) {
+  let r;
+  try { r = await fetch(`https://api.github.com${path}`, { headers: { Accept: 'application/vnd.github+json' } }); } catch { throw new Error('连不上 GitHub，请检查网络'); }
+  if (r.status === 403 || r.status === 429) {
+    const reset = +r.headers.get('x-ratelimit-reset');
+    const e = new Error(`GitHub 访问次数暂时用完${reset ? `，${new Date(reset * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 后恢复` : '，请稍后再试'}`);
+    e.code = 'RATE'; throw e;
+  }
+  if (r.status === 404) throw new Error('找不到这个仓库或账号（私有仓库无法同步）');
+  if (r.status === 409) return []; // 空仓库
+  if (!r.ok) throw new Error(`GitHub 返回 ${r.status}`);
+  return r.json();
+}
+function mergeCommits(w, commits) {
+  const seen = new Set((w.logs || []).map((l) => l.sha).filter(Boolean));
+  let added = 0;
+  w.logs = w.logs || [];
+  for (const c of commits || []) {
+    if (!c?.sha || seen.has(c.sha)) continue;
+    const [title, ...rest] = (c.commit?.message || '').split('\n');
+    w.logs.push({ id: uid(), src: 'git', sha: c.sha, at: Date.parse(c.commit?.author?.date || c.commit?.committer?.date) || Date.now(),
+      text: title.trim() || '(无说明)', detail: rest.join('\n').trim() || undefined, link: c.html_url, author: c.commit?.author?.name });
+    seen.add(c.sha); added++;
+  }
+  return added;
+}
+async function syncWork(w) {
+  state.syncing.add(w.id);
+  render();
+  try {
+    const [info, commits] = await Promise.all([gh(`/repos/${w.repo}`), gh(`/repos/${w.repo}/commits?per_page=100`)]);
+    const added = mergeCommits(w, commits);
+    w.repoInfo = { stars: info.stargazers_count, lang: info.language, pushedAt: Date.parse(info.pushed_at) || 0 };
+    if (!w.desc && info.description) w.desc = info.description;
+    if (!w.url) { const u = normUrl(info.homepage || '') || (info.has_pages ? pagesUrl(info) : ''); if (u) w.url = u; }
+    w.syncedAt = Date.now(); delete w.syncError;
+    return added;
+  } catch (e) {
+    w.syncError = e.message; w.syncTry = Date.now();
+    throw e;
+  } finally {
+    state.syncing.delete(w.id);
+    if (area(w.id)) await saveArea(w);
+    await changed();
+  }
+}
+async function syncMany(list, { quiet = false } = {}) {
+  list = list.filter((w) => w?.repo && !state.syncing.has(w.id));
+  if (!list.length) return;
+  let added = 0, failed = 0, lastErr = null;
+  for (const w of list) {
+    try { added += await syncWork(w); } catch (e) { failed++; lastErr = e; if (e.code === 'RATE') break; }
+  }
+  if (lastErr && (!quiet || lastErr.code === 'RATE') && failed) toast(list.length === 1 ? `同步失败：${lastErr.message}` : `${failed} 个作品同步失败：${lastErr.message}`, { error: true });
+  else if (added) toast(`同步完成：新增 ${added} 条更新日志`);
+  else if (!quiet) toast('已是最新，没有新的提交');
+}
+// 打开作品页时，超过 1 小时没同步的作品在后台自动同步
+let autoSyncAt = 0;
+function autoSync() {
+  if (EMBEDDED || Date.now() - autoSyncAt < 10 * 60e3 || !navigator.onLine) return;
+  const stale = works().filter((w) => w.repo && Date.now() - Math.max(w.syncedAt || 0, w.syncTry || 0) > 3600e3);
+  if (!stale.length) return;
+  autoSyncAt = Date.now();
+  setTimeout(() => syncMany(stale, { quiet: true }), 600);
+}
+const pagesUrl = (r) => {
+  const o = (r.owner?.login || '').toLowerCase();
+  return r.name.toLowerCase() === `${o}.github.io` ? `https://${r.name.toLowerCase()}/` : `https://${o}.github.io/${r.name}/`;
+};
+async function importFromGitHub() {
+  const user = await prompt({ title: '从 GitHub 导入作品', value: ls.get('ghUser', ''), placeholder: 'GitHub 用户名', ok: '查找公开仓库' });
+  if (!user) return;
+  if (!/^[A-Za-z0-9-]{1,39}$/.test(user)) return toast('GitHub 用户名只包含字母、数字和横线', { error: true });
+  ls.set('ghUser', user);
+  const t = toast('正在读取公开仓库…', { sticky: true });
+  let repos;
+  try { repos = await gh(`/users/${encodeURIComponent(user)}/repos?per_page=100&sort=pushed&type=owner`); } catch (e) { t.close(); return toast(`读取失败：${e.message}`, { error: true }); }
+  t.close();
+  if (!repos.length) return toast('这个账号还没有公开仓库');
+  const have = new Set(works().map((w) => (w.repo || '').toLowerCase()));
+  const siteOf = (r) => normUrl(r.homepage || '') || (r.has_pages ? pagesUrl(r) : '');
+  const m = $('#modal');
+  m.classList.add('wide');
+  const res = await dialog(`<h3>选择要导入的仓库</h3>
+    <p class="stor-note">已默认勾选有网站（GitHub Pages 或主页链接）的仓库。导入后会自动把最近的提交记录同步成更新日志。</p>
+    <div class="pick-list gh-list">${repos.map((r) => {
+      const done = have.has(r.full_name.toLowerCase()), site = siteOf(r);
+      return `<label class="pick${done ? ' done' : ''}"><input type="checkbox" name="r" value="${esc(r.full_name)}" ${done ? 'disabled' : site && !r.fork && !r.archived ? 'checked' : ''}>
+        <span><b>${esc(r.name)}</b>${r.description ? `<em>${esc(r.description)}</em>` : ''}</span>
+        <small>${done ? '已添加' : [site && '有网站', r.fork && '复刻', r.archived && '已归档', agoLong(Date.parse(r.pushed_at))].filter(Boolean).join(' · ')}</small></label>`;
+    }).join('')}</div>
+    <label class="field"><span>放到分类 <em>可选</em></span><input type="text" name="c" value="${esc(allWorkCats()[0] || '网站')}" maxlength="40" list="wcatList2">
+      <datalist id="wcatList2">${allWorkCats().map((c) => `<option value="${esc(c)}">`).join('')}</datalist></label>
+    ${actions('导入')}`, (f) => ({ names: [...f.querySelectorAll('input[name="r"]:checked')].map((i) => i.value), cat: f.c.value.trim() }));
+  m.classList.remove('wide');
+  if (!res || !res.names.length) return;
+  const byName = new Map(repos.map((r) => [r.full_name, r]));
+  const base = works().length;
+  const list = res.names.map((n, i) => {
+    const r = byName.get(n), site = siteOf(r);
+    const w = { id: uid(), kind: 'work', order: 0, title: r.name, url: site, repo: r.full_name, desc: r.description || '', tags: r.topics || [],
+      status: r.archived ? 'done' : site ? 'live' : 'dev', createdAt: Date.parse(r.created_at) || Date.now(), color: (base + i) % FCOLORS.length, logs: [],
+      repoInfo: { stars: r.stargazers_count, lang: r.language, pushedAt: Date.parse(r.pushed_at) || 0 } };
+    if (res.cat) w.category = res.cat;
+    return w;
+  });
+  if (res.cat && !allWorkCats().includes(res.cat)) { state.workCats = [...(state.workCats || []), res.cat]; await saveWorkCats(); }
+  await db.putMany('columns', list);
+  state.areas.push(...list);
+  await changed();
+  toast(`已导入 ${list.length} 个作品，正在同步更新日志…`);
+  // 导入时仓库信息已经有了，只拉提交记录（省一半 API 额度）
+  let added = 0;
+  for (const w of list) {
+    state.syncing.add(w.id); render();
+    try { added += mergeCommits(w, await gh(`/repos/${w.repo}/commits?per_page=100`)); w.syncedAt = Date.now(); delete w.syncError; }
+    catch (e) { w.syncError = e.message; w.syncTry = Date.now(); if (e.code === 'RATE') { toast(e.message, { error: true }); state.syncing.clear(); await db.putMany('columns', list.filter((x) => area(x.id))); break; } }
+    finally { state.syncing.delete(w.id); if (area(w.id)) await saveArea(w); await changed(); }
+  }
+  if (added) toast(`同步完成：${list.length} 个作品共 ${added} 条更新日志`);
+}
+
+// ---------- 作品：日志、分类、菜单 ----------
+async function addLog(w, raw, ver, dateStr) {
+  const [title, ...rest] = raw.split('\n');
+  let at = Date.now();
+  if (dateStr) { const d = new Date(`${dateStr}T00:00`); if (!isNaN(d) && d.toDateString() !== new Date().toDateString()) at = d.getTime() + 12 * 3600e3; }
+  const l = { id: uid(), src: 'manual', at, text: title.trim(), detail: rest.join('\n').trim() || undefined, ver: ver || undefined };
+  w.logs = [...(w.logs || []), l];
+  if (state.logFilter === 'git') state.logFilter = 'all';
+  await saveArea(w);
+  await changed();
+  const el = $(`.tl-item[data-log="${CSS.escape(l.id)}"]`);
+  if (el && !reduceMotion.matches) el.animate([{ opacity: 0, transform: 'translateY(-6px)' }, { opacity: 1, transform: 'none' }], { duration: 320, easing: 'cubic-bezier(.2,.8,.2,1)' });
+}
+function logMenu(anchor, w, id) {
+  const l = (w?.logs || []).find((x) => x.id === id);
+  if (!l) return;
+  const undoable = async (msg, apply, revert) => { apply(); await saveArea(w); await changed(); toast(msg, { action: '撤销', onAction: async () => { revert(); await saveArea(w); await changed(); } }); };
+  const items = [];
+  if (l.src === 'git') {
+    if (safeUrl(l.link)) items.push({ text: '在 GitHub 查看这次提交', run: () => window.open(l.link, '_blank', 'noopener') });
+    items.push({ text: '隐藏这条', run: () => undoable('已隐藏这条提交记录', () => { l.hidden = true; }, () => { delete l.hidden; }) });
+  } else {
+    items.push({ text: '编辑', run: async () => {
+      const r = await dialog(`<h3>编辑更新日志</h3><textarea name="t" maxlength="2000">${esc([l.text, l.detail].filter(Boolean).join('\n'))}</textarea>
+        <label class="field"><span>版本号</span><input type="text" name="v" value="${esc(l.ver || '')}" maxlength="20"></label>${actions('保存')}`, (f) => ({ t: f.t.value.trim(), v: f.v.value.trim() }));
+      if (!r || !r.t) return;
+      const [title, ...rest] = r.t.split('\n');
+      l.text = title.trim(); l.detail = rest.join('\n').trim() || undefined; l.ver = r.v || undefined;
+      await saveArea(w); await changed();
+    } });
+    items.push('-', { text: '删除', danger: true, run: () => { const before = w.logs; undoable('已删除这条日志', () => { w.logs = before.filter((x) => x !== l); }, () => { w.logs = before; }); } });
+  }
+  openMenu(anchor, items);
+}
+async function setWorkCat(w, name) {
+  const prev = w.category;
+  if (name) w.category = name; else delete w.category;
+  await saveArea(w); await changed();
+  toast(name ? `「${w.title}」已归入「${name}」` : `「${w.title}」已移出分类`, { action: '撤销', onAction: async () => { if (prev) w.category = prev; else delete w.category; await saveArea(w); await changed(); } });
+}
+async function addWorkCat(thenAssign) {
+  const name = await prompt({ title: '新建作品分类', placeholder: '例如：网站、设计、小工具、课程作业', ok: '创建' });
+  if (!name) return;
+  state.workCats = [...new Set([...(state.workCats || []), name])];
+  await saveWorkCats();
+  if (thenAssign) return setWorkCat(thenAssign, name);
+  await changed();
+  toast(`已新建分类「${name}」，把作品拖到它上面即可归类`);
+}
+async function renameWorkCat(old) {
+  const name = await prompt({ title: '重命名分类', value: old, ok: '保存' });
+  if (!name || name === old) return;
+  state.workCats = [...new Set((state.workCats || []).map((c) => (c === old ? name : c)))];
+  const ws = works().filter((w) => w.category === old);
+  ws.forEach((w) => { w.category = name; });
+  if (ws.length) await db.putMany('columns', ws);
+  await saveWorkCats();
+  if (state.workCat === old) { state.workCat = name; ls.set('workCat', name); }
+  await changed();
+}
+async function deleteWorkCat(name) {
+  const ws = works().filter((w) => w.category === name);
+  if (!(await confirmBox({ title: `删除分类「${name}」？`, body: ws.length ? `里面的 ${ws.length} 个作品会变成「未分类」，作品本身不会删除。` : '这个分类是空的。', ok: '删除分类', danger: true }))) return;
+  ws.forEach((w) => { delete w.category; });
+  if (ws.length) await db.putMany('columns', ws);
+  state.workCats = (state.workCats || []).filter((c) => c !== name);
+  await saveWorkCats();
+  if (state.workCat === name) { state.workCat = 'all'; ls.set('workCat', 'all'); }
+  await changed();
+}
+function exportChangelog(w) {
+  const logs = visibleLogs(w);
+  if (!logs.length) return toast('还没有更新日志');
+  const iso = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  let md = `# ${w.title} 更新日志\n\n`, day = '';
+  if (safeUrl(w.url)) md += `网站：${w.url}\n\n`;
+  for (const l of logs) {
+    if (iso(l.at) !== day) { day = iso(l.at); md += `\n## ${day}\n\n`; }
+    md += `- ${l.ver ? `**${l.ver}** ` : ''}${l.text}${l.sha ? ` (${l.sha.slice(0, 7)})` : ''}\n`;
+    if (l.detail) md += l.detail.split('\n').map((s) => `  ${s}`).join('\n') + '\n';
+  }
+  const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
+  const a = document.createElement('a');
+  a.href = url; a.download = `${w.title.replace(/[\\/:*?"<>|]/g, '_')}-更新日志.md`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+function workMenu(anchor, w) {
+  if (!w) return;
+  const items = [{ text: '编辑…', run: () => editWork(w) }];
+  if (safeUrl(w.url)) items.push({ text: '预览网站', run: () => previewSite(w) });
+  if (w.repo) items.push({ text: '同步 GitHub 更新日志', run: () => syncMany([w]) });
+  items.push({ text: '导出更新日志（Markdown）', run: () => exportChangelog(w) });
+  items.push({ label: '状态' });
+  Object.entries(WSTATUS).forEach(([k, s]) => items.push({ text: s.t, swatch: s.c, checked: (w.status || 'dev') === k, run: async () => { w.status = k; await saveArea(w); await changed(); } }));
+  items.push({ label: '分类' });
+  allWorkCats().forEach((c) => items.push({ text: c, checked: w.category === c, run: () => setWorkCat(w, c) }));
+  items.push({ text: '新建分类…', run: () => addWorkCat(w) });
+  if (w.category) items.push({ text: '移出分类', run: () => setWorkCat(w, null) });
+  items.push({ label: '封面' });
+  [['auto', '自动'], ['image', '用图片'], ['live', '网站实时画面'], ['mono', '文字']].forEach(([k, t]) => items.push({ text: t, checked: (w.cover || 'auto') === k, run: async () => { if (k === 'auto') delete w.cover; else w.cover = k; await saveArea(w); await changed(); } }));
+  items.push({ label: '颜色' });
+  FCOLORS.forEach((fc, i) => items.push({ text: fc.n, swatch: fc.c, checked: workColor(w) === fc.c, run: async () => { w.color = i; await saveArea(w); await changed(); } }));
+  items.push('-', { text: '删除作品', danger: true, run: () => deleteArea(w) });
+  openMenu(anchor, items);
+}
+let dragWork = null;
+document.addEventListener('dragstart', (e) => {
+  const t = e.target.closest?.('.work[data-work]');
+  if (!t || e.target.closest('.card, a')) return;
+  dragWork = t.dataset.work;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('application/x-workbench-work', dragWork);
+  requestAnimationFrame(() => t.classList.add('folder-dragging'));
+  document.body.classList.add('dragging-work');
+});
+document.addEventListener('dragover', (e) => {
+  if (!dragWork) return;
+  const chipEl = e.target.closest?.('.cat-chip[data-wcatdrop]');
+  $$('.cat-chip.drop-active').forEach((el) => { if (el !== chipEl) el.classList.remove('drop-active'); });
+  if (chipEl) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; chipEl.classList.add('drop-active'); }
+});
+document.addEventListener('drop', (e) => {
+  if (!dragWork) return;
+  const chipEl = e.target.closest?.('.cat-chip[data-wcatdrop]');
+  if (chipEl) { e.preventDefault(); const w = area(dragWork); if (w) setWorkCat(w, chipEl.dataset.wcatdrop || null); }
+});
+document.addEventListener('dragend', () => {
+  if (!dragWork) return;
+  dragWork = null;
+  document.body.classList.remove('dragging-work');
+  $$('.folder-dragging, .cat-chip.drop-active').forEach((el) => el.classList.remove('folder-dragging', 'drop-active'));
+});
+document.addEventListener('contextmenu', (e) => {
+  const chipEl = e.target.closest?.('.cat-chip[data-wcatdrop]');
+  if (!chipEl || !chipEl.dataset.wcatdrop) return;
+  e.preventDefault();
+  const name = chipEl.dataset.wcatdrop;
+  openMenu(chipEl, [{ text: '重命名分类', run: () => renameWorkCat(name) }, '-', { text: '删除分类', danger: true, run: () => deleteWorkCat(name) }]);
+});
+document.addEventListener('submit', (e) => {
+  if (e.target.id !== 'logForm') return;
+  e.preventDefault();
+  const f = e.target, text = f.t.value.trim(), w = area(openWork());
+  if (!text) return f.t.focus();
+  if (!w) return;
+  const ver = f.v.value.trim(), d = f.d.value;
+  f.t.value = ''; f.v.value = '';
+  addLog(w, text, ver, d);
+});
 
 function renderZones() {
   const zs = zones();
@@ -1277,7 +1875,7 @@ async function editNote(card) {
 }
 
 // ---------- 区域（列 / 功能区 / 画布）操作 ----------
-const KIND_LABEL = { column: '列', zone: '功能区', canvas: '画布', folder: '项目文件夹' };
+const KIND_LABEL = { column: '列', zone: '功能区', canvas: '画布', folder: '项目文件夹', work: '作品' };
 async function addArea(kind) {
   const title = await prompt({ title: `新建${KIND_LABEL[kind]}`, placeholder: kind === 'zone' ? '例如：灵感、参考图…' : kind === 'canvas' ? '例如：项目脑图' : kind === 'folder' ? '例如：物理宣传册' : '例如：资料、待审阅…', ok: '创建' });
   if (!title) return;
@@ -1309,7 +1907,7 @@ async function moveArea(a, dir) {
 }
 async function deleteArea(a) {
   const kind = kindOf(a);
-  if (kind !== 'folder' && areasOf(kind).length <= 1) return toast(`至少保留一个${KIND_LABEL[kind]}`, { error: true });
+  if (kind !== 'folder' && kind !== 'work' && areasOf(kind).length <= 1) return toast(`至少保留一个${KIND_LABEL[kind]}`, { error: true });
   const cards = cardsIn(a.id, false);
   let target = kind === 'zone' ? zones().find((z) => z.id !== a.id)?.id : fallbackZone();
   if (target === a.id) target = zones().find((z) => z.id !== a.id)?.id;
@@ -1317,7 +1915,8 @@ async function deleteArea(a) {
   const parts = [];
   if (cards.length) parts.push(`里面的 ${cards.length} 张卡片会移到「${areaName(target)}」`);
   if (kids.length) parts.push(`${kids.length} 个子文件夹会移到${parentOf(a) ? `「${parentOf(a).title}」` : '顶层'}`);
-  const ok = await confirmBox({ title: `删除${KIND_LABEL[kind]}「${a.title}」？`, body: parts.length ? `${parts.join('，')}，都不会丢失。` : `这个${KIND_LABEL[kind]}是空的。`, ok: '删除', danger: true });
+  if (kind === 'work' && visibleLogs(a).length) parts.push(`${visibleLogs(a).length} 条更新日志会一起删除`);
+  const ok = await confirmBox({ title: `删除${KIND_LABEL[kind]}「${a.title}」？`, body: parts.length ? `${parts.join('，')}${kind === 'work' ? (cards.length ? '，文件不会丢失。' : '。') : '，都不会丢失。'}` : `这个${KIND_LABEL[kind]}是空的。`, ok: '删除', danger: true });
   if (!ok) return;
   if (kids.length) { kids.forEach((k) => { if (a.parentId) k.parentId = a.parentId; else delete k.parentId; }); await db.putMany('columns', kids); }
   let order = orderAt(target, cardsIn(target, false).length);
@@ -1327,6 +1926,7 @@ async function deleteArea(a) {
   state.areas = state.areas.filter((x) => x !== a);
   if (state.view === a.id) setView(BOARD);
   if (state.folder === a.id) { state.folder = a.parentId && area(a.parentId) ? a.parentId : null; ls.set('folder', state.folder); }
+  if (state.work === a.id) { state.work = null; ls.set('work', null); }
   if (state.zone === a.id) { state.zone = target; ls.set('zone', target); }
   await changed();
 }
@@ -1417,7 +2017,7 @@ async function runConvert(btn) {
   }
 }
 // 关闭时清空内容，确保视频/音频停止播放（不只依赖 close 事件）
-function closeViewer() { const v = $('#viewer'); if (v.open) v.close(); $('#viewerInner').innerHTML = ''; }
+function closeViewer() { const v = $('#viewer'); if (v.open) v.close(); $('#viewerInner').innerHTML = ''; v.classList.remove('site-viewer'); }
 $('#viewer').addEventListener('cancel', (e) => { e.preventDefault(); closeViewer(); });
 $('#viewer').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeViewer(); });
 
@@ -1520,6 +2120,9 @@ function cardMenu(anchor, card) {
   dest(columns(), '移到看板');
   dest(canvases(), '放到画布');
   dest(zones(), '放入功能区');
+  dest(works(), '放到作品');
+  const host = area(card.columnId);
+  if (host?.kind === 'work' && card.thumb === 'ok') items.push({ text: host.coverId === card.id ? '✓ 作品封面' : '设为作品封面', run: async () => { host.coverId = card.id; if (host.cover === 'live' || host.cover === 'mono') delete host.cover; await saveArea(host); await changed(); toast(`已设为「${host.title}」的封面`); } });
   items.push('-', { label: '归档到已完成项目' });
   folders().filter((f) => f.id !== card.columnId).forEach((f) => items.push({ text: folderPath(f), run: () => archiveCards([card], f.id) }));
   items.push({ text: '新建项目文件夹并归档…', run: async () => {
@@ -2275,7 +2878,18 @@ document.addEventListener('click', async (e) => {
   const viewTab = e.target.closest('[data-view]');
   if (viewTab && !btn) {
     if (viewTab.dataset.view === ARCHIVE && state.view === ARCHIVE) { state.folder = null; ls.set('folder', null); }
+    if (viewTab.dataset.view === WORKS && state.view === WORKS) { state.work = null; ls.set('work', null); }
     setView(viewTab.dataset.view); return render();
+  }
+  const wgo = e.target.closest('[data-wgoto]');
+  if (wgo) { state.work = null; ls.set('work', null); if (wgo.dataset.wcat) { state.workCat = wgo.dataset.wcat; ls.set('workCat', state.workCat); } return render(); }
+  const wcatEl = e.target.closest('[data-wcat]');
+  if (wcatEl && !btn) { state.workCat = wcatEl.dataset.wcat; ls.set('workCat', state.workCat); return render(); }
+  const workEl = e.target.closest('[data-work]');
+  if (workEl && !btn && !e.target.closest('a[href]')) {
+    state.work = workEl.dataset.work; ls.set('work', state.work); state.logFilter = 'all'; state.logLimit = 40;
+    $('#worksView').scrollTop = 0;
+    return render();
   }
   const gotoEl = e.target.closest('[data-goto]');
   if (gotoEl) { state.folder = gotoEl.dataset.goto || null; ls.set('folder', state.folder); return render(); }
@@ -2319,6 +2933,36 @@ document.addEventListener('click', async (e) => {
     case 'folder-back': state.folder = parentOf(area(state.folder))?.id || null; ls.set('folder', state.folder); return render();
     case 'folder-zip': return zipFolder(area(openFolder()));
     case 'folder-menu': return menuAnchor === btn ? closeMenu() : areaMenu(btn, area(btn.dataset.id || openFolder()));
+    case 'work-new': return editWork(null);
+    case 'work-import': return importFromGitHub();
+    case 'work-sync-all': return syncMany(works());
+    case 'work-sync': return syncMany([area(openWork())]);
+    case 'work-edit': return editWork(area(openWork()));
+    case 'work-back': state.work = null; ls.set('work', null); return render();
+    case 'work-menu': return menuAnchor === btn ? closeMenu() : workMenu(btn, area(btn.dataset.id || openWork()));
+    case 'work-preview': return previewSite(area(btn.dataset.id));
+    case 'wcat-add': return addWorkCat();
+    case 'log-filter': state.logFilter = btn.dataset.f; state.logLimit = 40; return render();
+    case 'log-more': state.logLimit += 60; return render();
+    case 'log-menu': return menuAnchor === btn ? closeMenu() : logMenu(btn, area(openWork()), btn.dataset.id);
+    case 'sp-device': {
+      const sp = btn.closest('.site-prev');
+      state.device = btn.dataset.d; ls.set('device', state.device);
+      sp.dataset.device = state.device;
+      $$('[data-action="sp-device"]', sp).forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+      return fitPreview();
+    }
+    case 'sp-reload': {
+      const sp = btn.closest('.site-prev'), f = $('iframe', sp);
+      sp.classList.remove('loaded'); f.src = sp.dataset.url;
+      return;
+    }
+    case 'sp-full': {
+      const sp = btn.closest('.site-prev');
+      document.body.classList.toggle('sp-full-open', sp.classList.toggle('full'));
+      fitPreview();
+      return requestAnimationFrame(fitPreview);
+    }
     case 'add-note-col': return newNote(col.id);
     case 'new-note': return newNote();
     case 'add-files': return $('#fileInput').click();
@@ -2350,6 +2994,8 @@ document.addEventListener('click', async (e) => {
   }
 });
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('.site-prev.full')) { $('.site-prev.full').classList.remove('full'); document.body.classList.remove('sp-full-open'); fitPreview(); return; }
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.target.matches?.('#logForm textarea')) { e.preventDefault(); e.target.form.requestSubmit(); return; }
   if (e.key === 'Escape') {
     if ($('#menu').hidden && !$('#modal').open && !$('#viewer').open) clearSelection();
     closeMenu(); document.body.classList.remove('drafts-open');
@@ -2375,7 +3021,7 @@ document.addEventListener('keydown', (e) => {
       clearTimeout(cardEl._t); cardEl._t = setTimeout(() => saveCard(card), 300);
     }
   }
-  if (e.target.matches?.('[data-folder]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); e.target.click(); }
+  if (e.target.matches?.('[data-folder], [data-work]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); e.target.click(); }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#search').focus(); }
 });
 // ---------- 白天 / 黑夜模式 ----------

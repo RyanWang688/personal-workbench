@@ -210,7 +210,9 @@ export async function exportBackup() {
     parts.push(b);
     offset += b.size;
   }
-  const manifest = { app: 'personal-workbench', version: 1, exportedAt: Date.now(), columns, cards, files };
+  // 分类列表（含空分类）也一起备份
+  const meta = { categories: await getMeta('categories', []), workCategories: await getMeta('workCategories', []) };
+  const manifest = { app: 'personal-workbench', version: 1, exportedAt: Date.now(), columns, cards, files, meta };
   const json = new TextEncoder().encode(JSON.stringify(manifest));
   const head = new Uint8Array(8);
   head.set(new TextEncoder().encode(MAGIC), 0);
@@ -229,6 +231,10 @@ export async function readBackup(file) {
 
 export async function importBackup({ manifest, base, file }, onProgress) {
   await putMany('columns', manifest.columns || []);
+  for (const key of ['categories', 'workCategories']) {
+    const add = manifest.meta?.[key];
+    if (Array.isArray(add) && add.length) await setMeta(key, [...new Set([...(await getMeta(key, [])), ...add])]);
+  }
   const fileMap = new Map((manifest.files || []).map((f) => [f.id, f]));
   let done = 0;
   for (const card of manifest.cards || []) {

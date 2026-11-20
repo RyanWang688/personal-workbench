@@ -13,7 +13,7 @@
     // 尽早应用主题，避免刷新时闪一下
     try { var t = JSON.parse(localStorage.getItem('wb:theme') || '"auto"'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
   </script>
-  <link rel="stylesheet" href="style.css?v=18">
+  <link rel="stylesheet" href="style.css?v=22">
 </head>
 <body>
   <header class="topbar">
@@ -91,6 +91,8 @@
 
     <section class="archive-view" id="archiveView" aria-label="已完成项目" hidden></section>
 
+    <section class="archive-view works-view" id="worksView" aria-label="作品" hidden></section>
+
     <aside class="drafts" id="drafts" aria-label="功能区">
       <div class="drafts-head">
         <div class="zone-tabs" id="zoneTabs" role="tablist"></div>
@@ -117,6 +119,6 @@
   <input type="file" id="fileInput" multiple hidden>
   <input type="file" id="restoreInput" accept=".wbk" hidden>
   <noscript>此工作台需要启用 JavaScript。</noscript>
-  <script type="module" src="app.js?v=17"></script>
+  <script type="module" src="app.js?v=22"></script>
 </body>
 </html>
