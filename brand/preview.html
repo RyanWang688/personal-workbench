@@ -1,0 +1,29 @@
+﻿<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>方寸 logo</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  body { width: 1024px; height: 1024px; display: grid; grid-template-rows: 1fr auto; font-family: system-ui, "Microsoft YaHei", sans-serif; }
+  .main { display: grid; place-items: center; }
+  .main img { width: 380px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; }
+  .cell { padding: 40px; display: flex; align-items: center; justify-content: center; gap: 26px; }
+  .dark { background: #16171a; }
+  .lock { display: flex; align-items: center; gap: 18px; }
+  .lock .m { width: 84px; } .lock .w { height: 62px; }
+  .fav { display: flex; gap: 18px; align-items: end; }
+  .tab { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 10px 10px 0 0; background: #eceae4; font-size: 14px; color: #222; }
+  .dark .tab { background: #2a2b30; color: #ececef; }
+</style></head>
+<body>
+  <div class="main"><img src="mark-light.svg" alt=""></div>
+  <div>
+    <div class="row">
+      <div class="cell"><div class="lock"><img class="m" src="mark-light.svg" alt=""><img class="w" src="wordmark-light.svg" alt=""></div></div>
+      <div class="cell"><div class="fav"><img src="mark-light.svg" width="64"><img src="mark-light.svg" width="32"><img src="mark-light.svg" width="16"><div class="tab"><img src="mark-light.svg" width="16">方寸 · 工作台</div></div></div>
+    </div>
+    <div class="row dark">
+      <div class="cell"><div class="lock"><img class="m" src="mark-dark.svg" alt=""><img class="w" src="wordmark-dark.svg" alt=""></div></div>
+      <div class="cell"><div class="fav"><img src="mark-dark.svg" width="64"><img src="mark-dark.svg" width="32"><img src="mark-dark.svg" width="16"><div class="tab"><img src="mark-dark.svg" width="16">方寸 · 工作台</div></div></div>
+    </div>
+  </div>
+</body></html>

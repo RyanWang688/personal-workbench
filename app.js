@@ -1549,7 +1549,7 @@ async function doBackup() {
   try {
     const { blob, count, fileCount, missing } = await db.exportBackup();
     const d = new Date(), p = (n) => String(n).padStart(2, '0');
-    const name = `工作台备份-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.wbk`;
+    const name = `方寸备份-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.wbk`;
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
@@ -2135,6 +2135,7 @@ document.addEventListener('click', async (e) => {
     case 'convert': return runConvert(btn);
     case 'zoom-fit': return zoomFit();
     case 'tidy': return tidyCanvas();
+    case 'toggle-theme': return toggleTheme(btn);
     case 'toggle-drafts': {
       const open = document.body.classList.toggle('drafts-open');
       $('.drafts-toggle').setAttribute('aria-expanded', String(open));
@@ -2174,6 +2175,49 @@ document.addEventListener('keydown', (e) => {
   if (e.target.matches?.('[data-folder]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); e.target.click(); }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#search').focus(); }
 });
+// ---------- 白天 / 黑夜模式 ----------
+const darkMQ = matchMedia('(prefers-color-scheme: dark)');
+const themePref = () => ls.get('theme', 'auto');
+const isDark = () => themePref() === 'dark' || (themePref() === 'auto' && darkMQ.matches);
+function applyTheme(t) {
+  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+  ls.set('theme', t);
+  const bg = isDark() ? '#16171a' : '#f6f5f2';
+  $$('meta[name="theme-color"]').forEach((m) => { m.content = t === 'auto' ? (m.media.includes('dark') ? '#16171a' : '#f6f5f2') : bg; });
+  const btn = $('#themeBtn');
+  if (btn) btn.setAttribute('aria-label', isDark() ? '切换到白天模式' : '切换到黑夜模式');
+}
+// 从按钮位置以圆形扩散切换（浏览器支持 View Transitions 时）
+function switchTheme(t, origin) {
+  if (!document.startViewTransition || reduceMotion.matches) return applyTheme(t);
+  const r = origin?.getBoundingClientRect();
+  const x = r ? r.left + r.width / 2 : innerWidth - 40, y = r ? r.top + r.height / 2 : 30;
+  const rad = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
+  const vt = document.startViewTransition(() => applyTheme(t));
+  vt.ready.then(() => document.documentElement.animate(
+    { clipPath: [`circle(0px at ${x}px ${y}px)`, `circle(${rad}px at ${x}px ${y}px)`] },
+    { duration: 560, easing: 'cubic-bezier(.4,0,.2,1)', pseudoElement: '::view-transition-new(root)' },
+  )).catch(() => {});
+}
+function toggleTheme(btn) {
+  const next = isDark() ? 'light' : 'dark';
+  switchTheme(next, btn);
+  toast(next === 'dark' ? '已切换到黑夜模式（右键按钮可改为跟随系统）' : '已切换到白天模式（右键按钮可改为跟随系统）');
+}
+$('#themeBtn')?.addEventListener('contextmenu', (e) => {
+  e.preventDefault(); e.stopPropagation();
+  const cur = themePref();
+  openMenu(e.currentTarget, [
+    { label: '外观' },
+    { text: `${cur === 'light' ? '✓ ' : ''}白天模式`, run: () => switchTheme('light', $('#themeBtn')) },
+    { text: `${cur === 'dark' ? '✓ ' : ''}黑夜模式`, run: () => switchTheme('dark', $('#themeBtn')) },
+    { text: `${cur === 'auto' ? '✓ ' : ''}跟随系统`, run: () => switchTheme('auto', $('#themeBtn')) },
+  ]);
+});
+darkMQ.addEventListener?.('change', () => { if (themePref() === 'auto') applyTheme('auto'); });
+applyTheme(themePref());
+
 document.addEventListener('contextmenu', (e) => {
   const cardEl = e.target.closest('.card');
   if (!cardEl) return;

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 224 100" role="img" aria-label="方寸">
+  <style>
+    .s { fill: none; stroke: #1d1e20; stroke-width: 10; stroke-linecap: butt; stroke-linejoin: miter; }
+    .cun { fill: #f2643b; }
+    @media (prefers-color-scheme: dark) { .s { stroke: #ececef; } }
+  </style>
+  <!-- 方：点 / 长横 / 撇 / 横折钩，统一笔画粗细，直线与单段圆弧 -->
+  <path class="s" d="M50 4v15"/>
+  <path class="s" d="M6 27h88"/>
+  <path class="s" d="M40 27v26c0 22-10 34-30 41"/>
+  <path class="s" d="M40 53h40v34c0 5-3 8-8 8h-9"/>
+  <!-- 寸：长横 / 竖钩 / 点 → 点被替换成符号里的小方块 -->
+  <path class="s" d="M124 35h96"/>
+  <path class="s" d="M190 4v84c0 5-3 8-8 8h-12"/>
+  <rect class="cun" x="138" y="52" width="20" height="20" rx="4"/>
+</svg>
