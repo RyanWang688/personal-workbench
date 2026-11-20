@@ -903,9 +903,11 @@ function normUrl(u) {
 }
 const hostOf = (u) => { try { return new URL(u).host.replace(/^www\./, ''); } catch { return ''; } };
 // 「用户名/仓库」、仓库链接、或 GitHub Pages 地址都能识别出仓库；识别不了返回 null
-function parseRepo(s) {
-  s = (s || '').trim();
+function parseRepo(s, owner = '') {
+  s = (s || '').trim().replace(/\/+$/, '');
   if (!s) return '';
+  // 只写了仓库名：用已知的 GitHub 用户名补全
+  if (/^[\w.-]+$/.test(s) && !/\.github\.io$/i.test(s)) return owner ? `${owner}/${s}` : null;
   let m = /github\.com[/:]([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:[/#?]|$)/i.exec(s);
   if (m) return `${m[1]}/${m[2]}`;
   m = /^(?:https?:\/\/)?([\w-]+)\.github\.io\/?(?:[?#].*)?$/i.exec(s);
@@ -914,6 +916,14 @@ function parseRepo(s) {
   if (m) return `${m[1]}/${m[2]}`;
   m = /^([\w-]+)\/([\w.-]+)$/.exec(s);
   return m ? `${m[1]}/${m[2]}` : null;
+}
+// 猜 GitHub 用户名：网站是 xxx.github.io → xxx；否则用已有作品里最常见的仓库主人，再否则用上次导入时填的用户名
+function guessOwner(url) {
+  const m = /^(?:https?:\/\/)?([\w-]+)\.github\.io/i.exec(url || '');
+  if (m) return m[1];
+  const n = {};
+  for (const w of works()) { const o = (w.repo || '').split('/')[0]; if (o) n[o] = (n[o] || 0) + 1; }
+  return Object.entries(n).sort((a, b) => b[1] - a[1])[0]?.[0] || ls.get('ghUser', '');
 }
 const workColor = (w) => FCOLORS[(w.color ?? Math.max(0, works().indexOf(w))) % FCOLORS.length].c;
 const allWorkCats = () => [...new Set([...(state.workCats || []), ...works().map((w) => w.category).filter(Boolean)])];
@@ -1164,9 +1174,9 @@ async function editWork(w) {
   for (;;) {
     m.classList.add('wide');
     const res = await dialog(`<h3>${isNew ? '新建作品' : '编辑作品'}</h3>
-      <label class="field"><span>名称</span><input type="text" name="wt" value="${esc(v.wt)}" placeholder="例如：个人主页、PTE 备考站" maxlength="80" required></label>
+      <label class="field"><span>名称</span><input type="text" name="wt" value="${esc(v.wt)}" placeholder="例如：个人主页、PTE 备考站（只填仓库时可留空）" maxlength="80"></label>
       <label class="field"><span>网站链接</span><input type="text" name="wu" value="${esc(v.wu)}" placeholder="https://… 填了就能直接预览" maxlength="300" inputmode="url"></label>
-      <label class="field"><span>GitHub 仓库 <em>可选，用来同步更新日志；GitHub Pages 网站会自动识别</em></span><input type="text" name="wr" value="${esc(v.wr)}" placeholder="用户名/仓库名，或仓库链接" maxlength="200"></label>
+      <label class="field"><span>GitHub 仓库 <em>可选，用来同步更新日志；GitHub Pages 网站会自动识别</em></span><input type="text" name="wr" value="${esc(v.wr)}" placeholder="仓库名（如 pte-coach）、用户名/仓库名，或仓库链接" maxlength="200"></label>
       <div class="field-row">
         <label class="field"><span>分类</span><input type="text" name="wc" value="${esc(v.wc)}" placeholder="例如：网站、设计、小工具" maxlength="40" list="wcatList">
           <datalist id="wcatList">${allWorkCats().map((c) => `<option value="${esc(c)}">`).join('')}</datalist></label>
@@ -1180,8 +1190,19 @@ async function editWork(w) {
     v = res;
     const url = normUrl(res.wu);
     if (url === null) { toast('网站链接格式不对，例如 https://example.com', { error: true }); continue; }
-    const repo = res.wr ? parseRepo(res.wr) : (url && parseRepo(url)) || '';
-    if (repo === null) { toast('GitHub 仓库请填「用户名/仓库名」或仓库链接', { error: true }); continue; }
+    let owner = guessOwner(url);
+    if (res.wr && /^[\w.-]+$/.test(res.wr) && !owner) {
+      owner = await prompt({ title: `「${res.wr}」是哪个 GitHub 账号的？`, placeholder: 'GitHub 用户名', ok: '确定' });
+      if (!owner) continue;
+      if (!/^[A-Za-z0-9-]{1,39}$/.test(owner)) { toast('GitHub 用户名只包含字母、数字和横线', { error: true }); continue; }
+      ls.set('ghUser', owner);
+    }
+    const repo = res.wr ? parseRepo(res.wr, owner) : (url && parseRepo(url)) || '';
+    if (repo === null) { toast('GitHub 仓库请填仓库名、「用户名/仓库名」或仓库链接', { error: true }); continue; }
+    if (!res.wt) {
+      if (!repo) { toast('请填写名称', { error: true }); continue; }
+      res.wt = repo.split('/')[1];
+    }
     if (isNew) w = { id: uid(), kind: 'work', order: 0, createdAt: Date.now(), color: works().length % FCOLORS.length, logs: [] };
     const repoChanged = repo !== (w.repo || '');
     if (repoChanged && w.repo) w.logs = (w.logs || []).filter((l) => l.src !== 'git'); // 换了仓库：旧仓库的提交记录不再属于它
@@ -1296,21 +1317,25 @@ async function importFromGitHub() {
   m.classList.remove('wide');
   if (!res || !res.names.length) return;
   const byName = new Map(repos.map((r) => [r.full_name, r]));
+  await createWorksFromRepos(res.names.map((n) => byName.get(n)), res.cat);
+}
+// 用 GitHub 仓库信息批量建作品，然后只拉提交记录（仓库信息已经有了，省一半 API 额度）
+async function createWorksFromRepos(repos, cat) {
   const base = works().length;
-  const list = res.names.map((n, i) => {
-    const r = byName.get(n), site = siteOf(r);
+  const list = repos.map((r, i) => {
+    const site = normUrl(r.homepage || '') || (r.has_pages ? pagesUrl(r) : '');
     const w = { id: uid(), kind: 'work', order: 0, title: r.name, url: site, repo: r.full_name, desc: r.description || '', tags: r.topics || [],
       status: r.archived ? 'done' : site ? 'live' : 'dev', createdAt: Date.parse(r.created_at) || Date.now(), color: (base + i) % FCOLORS.length, logs: [],
+      syncTry: Date.now(), // 下面马上同步，别让自动同步再拉一遍
       repoInfo: { stars: r.stargazers_count, lang: r.language, pushedAt: Date.parse(r.pushed_at) || 0 } };
-    if (res.cat) w.category = res.cat;
+    if (cat) w.category = cat;
     return w;
   });
-  if (res.cat && !allWorkCats().includes(res.cat)) { state.workCats = [...(state.workCats || []), res.cat]; await saveWorkCats(); }
+  if (cat && !allWorkCats().includes(cat)) { state.workCats = [...(state.workCats || []), cat]; await saveWorkCats(); }
   await db.putMany('columns', list);
   state.areas.push(...list);
   await changed();
   toast(`已导入 ${list.length} 个作品，正在同步更新日志…`);
-  // 导入时仓库信息已经有了，只拉提交记录（省一半 API 额度）
   let added = 0;
   for (const w of list) {
     state.syncing.add(w.id); render();
@@ -1319,6 +1344,39 @@ async function importFromGitHub() {
     finally { state.syncing.delete(w.id); if (area(w.id)) await saveArea(w); await changed(); }
   }
   if (added) toast(`同步完成：${list.length} 个作品共 ${added} 条更新日志`);
+}
+
+// 链接 ?add=用户名/仓库1,仓库2,… 一次添加多个仓库为作品（先确认，已添加的跳过）
+async function addReposFromLink() {
+  const p = new URLSearchParams(location.search);
+  const raw = p.get('add');
+  if (raw === null) return;
+  p.delete('add');
+  history.replaceState(null, '', location.pathname + (p.toString() ? `?${p}` : '') + location.hash);
+  if (EMBEDDED) return;
+  let owner = '';
+  const names = [];
+  for (const part of raw.split(/[,\s]+/).filter(Boolean)) {
+    const r = parseRepo(part, owner);
+    if (r) { owner = r.split('/')[0]; names.push(r); }
+  }
+  const have = new Set(works().map((w) => (w.repo || '').toLowerCase()));
+  const todo = [...new Set(names)].filter((n) => !have.has(n.toLowerCase())).slice(0, 30);
+  setView(WORKS); state.work = null; ls.set('work', null); render();
+  if (!todo.length) return names.length && toast('这些仓库都已经在作品里了');
+  const ok = await dialog(`<h3>添加 ${todo.length} 个作品？</h3>
+    <p class="stor-note">将从 GitHub 读取这些公开仓库，自动填好网站链接、简介，并同步提交记录为更新日志。</p>
+    <ul class="add-list">${todo.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>${actions('添加')}`, () => true);
+  if (!ok) return;
+  const t = toast('正在读取仓库信息…', { sticky: true });
+  const repos = [], missing = [];
+  for (const n of todo) {
+    try { repos.push(await gh(`/repos/${n}`)); }
+    catch (e) { if (e.code === 'RATE') { t.close(); return toast(e.message, { error: true }); } missing.push(n.split('/')[1]); }
+  }
+  t.close();
+  if (missing.length) toast(`找不到：${missing.join('、')}（可能是私有仓库或名字有误）`, { error: true });
+  if (repos.length) await createWorksFromRepos(repos, allWorkCats()[0] || '网站');
 }
 
 // ---------- 作品：日志、分类、菜单 ----------
@@ -3108,6 +3166,7 @@ channel && (channel.onmessage = async () => { await load(); render(); refreshSta
     render();
     refreshStatus();
     if (state.cards.length) requestPersist();
+    addReposFromLink();
     await sweepExpired();
     setInterval(sweepExpired, 3600e3);
   } catch (e) {
