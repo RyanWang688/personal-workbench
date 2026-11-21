@@ -1,5 +1,5 @@
 import * as db from './db.js?v=6';
-import * as pv from './preview.js?v=3';
+import * as pv from './preview.js?v=4';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -1666,6 +1666,7 @@ let pan = null, pinch = null, cardDrag = null, suppressClick = false;
 vp.addEventListener('pointerdown', (e) => {
   if (e.button !== 0 && e.pointerType === 'mouse') return;
   const cardEl = e.target.closest('.card');
+  if (cardEl && (e.ctrlKey || e.metaKey)) return; // 交给转换圆环 / 多选
   if (cardEl && !e.target.closest('.more, .export-handle')) {
     const card = findCard(cardEl.dataset.id);
     cardDrag = { el: cardEl, card, sx: e.clientX, sy: e.clientY, x: card.x || 0, y: card.y || 0, moved: false, id: e.pointerId };
@@ -2048,6 +2049,18 @@ async function preview(id) {
   bodyEl.classList.add('ready');
   mount?.(bodyEl);
 }
+// 转换一个文件，结果放在原文件旁边（画布上放右侧），返回新卡片
+async function convertOne(card, convId, say = () => {}) {
+  const files = await pv.convert(card, await db.getBlob(card.id), convId, say);
+  return placeBeside(card, files);
+}
+async function placeBeside(card, files) {
+  const areaId = card.columnId === TRASH ? defaultTarget() : card.columnId;
+  const canvas = isCanvas(areaId);
+  const idx = canvas ? null : cardsIn(areaId, false).findIndex((c) => c.id === card.id) + 1;
+  const pos = canvas ? { x: (card.x || 0) + CARD_W + 60, y: card.y || 0 } : null;
+  return addFiles(files, areaId, idx, pos, { quiet: true, extra: { sourceId: card.sourceId || card.id } });
+}
 async function runConvert(btn) {
   if (!(await ensureAccess())) return;
   const card = findCard(btn.dataset.id);
@@ -2057,13 +2070,8 @@ async function runConvert(btn) {
   btn.classList.add('busy');
   say('正在转换…');
   try {
-    const files = await pv.convert(card, await db.getBlob(card.id), btn.dataset.conv, say);
-    const areaId = card.columnId === TRASH ? defaultTarget() : card.columnId;
-    const canvas = isCanvas(areaId);
-    const idx = canvas ? null : cardsIn(areaId, false).findIndex((c) => c.id === card.id) + 1;
-    const pos = canvas ? { x: (card.x || 0) + CARD_W + 60, y: card.y || 0 } : null;
-    const added = await addFiles(files, areaId, idx, pos, { quiet: true, extra: { sourceId: card.sourceId || card.id } });
-    say(`✓ 已生成 ${added.length} 个文件，放在「${areaName(areaId)}」原文件旁边`);
+    const added = await convertOne(card, btn.dataset.conv, say);
+    say(`✓ 已生成 ${added.length} 个文件，放在「${areaName(added[0]?.columnId)}」原文件旁边`);
     toast(`转换完成：${added.map((c) => c.name).slice(0, 2).join('、')}${added.length > 2 ? ` 等 ${added.length} 个` : ''}`,
       { action: '下载', onAction: () => added.forEach((c, i) => setTimeout(() => download(c.id), i * 300)) });
   } catch (e) {
@@ -2164,6 +2172,10 @@ function cardMenu(anchor, card) {
   for (const lv of [1, 2, 3]) items.push({ text: PRIO[lv].label, tag: PRIO[lv], checked: card.prio === lv, run: () => setPrio([card.id], lv) });
   if (card.prio) items.push({ text: '清除优先级', run: () => setPrio([card.id], 0) });
   items.push('-');
+  items.push({ text: '转换圆环…（Ctrl + 拖动）', run: () => {
+    const b = ($(`.card[data-id="${CSS.escape(card.id)}"]`) || anchor).getBoundingClientRect();
+    openRing(card, b.left + b.width / 2, b.top + b.height / 2, { sticky: true });
+  } });
   items.push({ text: card.kind === 'note' ? '编辑' : '预览', run: () => preview(card.id) },
     { text: '下载', run: () => download(card.id) },
     { text: '重命名', run: async () => {
@@ -2459,7 +2471,7 @@ function cancelPress() {
 }
 document.addEventListener('pointerdown', (e) => {
   pressFired = false;
-  if (e.button !== 0) return;
+  if (e.button !== 0 || e.ctrlKey || e.metaKey) return; // Ctrl/⌘ + 拖动是转换圆环
   const el = e.target.closest?.('.card');
   if (!el || e.target.closest('.more, .export-handle, .sel, .suggest-badge')) return;
   const card = findCard(el.dataset.id);
@@ -2502,6 +2514,332 @@ document.addEventListener('pointerup', () => { if (pressFired) setTimeout(() => 
 document.addEventListener('click', (e) => { if (pressFired) { e.stopPropagation(); e.preventDefault(); pressFired = false; } }, true);
 document.addEventListener('contextmenu', (e) => { if ((press || pressFired) && e.target.closest?.('.card')) { e.preventDefault(); e.stopPropagation(); } }, true);
 document.addEventListener('dragstart', (e) => { if (pressFired) e.preventDefault(); }, true);
+
+// ---------- 转换圆环：按住 Ctrl / ⌘ 拖动卡片，松手在哪一格就执行哪一格 ----------
+// 正面 = 格式转换，背面 = 常用操作；Tab / 滚轮翻面，Esc 取消。卡片菜单「转换圆环…」可点选使用并调整大小。
+const RING_SHORT = {
+  'img-png': ['PNG'], 'img-jpg': ['JPG'], 'img-webp': ['WEBP'], 'img-pdf': ['PDF'], 'img-small': ['压缩', 'JPG · 2048px'],
+  'pdf-png': ['PNG', '每页一张'], 'pdf-txt': ['TXT', '提取文字'], 'docx-html': ['HTML', '网页'], 'docx-txt': ['TXT', '纯文本'],
+  'sheet-xlsx': ['XLSX', 'Excel'], 'sheet-csv': ['CSV'], 'sheet-json': ['JSON'], 'md-html': ['HTML', '网页'],
+  'audio-wav': ['WAV'], 'video-png': ['封面', 'PNG'], 'video-wav': ['音频', 'WAV'], 'thumb-png': ['预览图', 'PNG'],
+};
+const FAM_LABEL = { image: '图片', video: '视频', audio: '音频', pdf: 'PDF', affinity: 'Affinity', docx: 'Word', sheet: '表格', md: 'Markdown', zipdoc: '文档', text: '文本', other: '文件' };
+const RICON = {
+  eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  down: '<path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/>',
+  pen: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13 7 4 4"/>',
+  copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
+  check: '<path d="M4 7h16v13H4z"/><path d="m8.5 13.5 2.5 2.5 4.5-5"/><path d="M4 7l2-3h12l2 3"/>',
+  flag: '<path d="M5 21V4h11l-2 4 2 4H5"/>',
+  zone: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M14 4v16"/>',
+  trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',
+  merge: '<path d="M7 3h7l4 4v14H7z"/><path d="M4 6v15h11"/>',
+  conv: '<path d="M4 7h13l-3-3M20 17H7l3 3"/>',
+};
+let ring = null, ringPending = null, ringFired = false;
+const ringEligible = (c) => c && (c.kind === 'file' || c.kind === 'note') && c.columnId !== TRASH;
+const ringScale = () => Math.min(1.4, Math.max(0.7, +ls.get('ringScale', 1) || 1));
+
+function ringTargets(card) {
+  if (state.selected.has(card.id) && state.selected.size > 1) {
+    const list = [...state.selected].map(findCard).filter(ringEligible);
+    return [card, ...list.filter((c) => c.id !== card.id)];
+  }
+  return [card];
+}
+function ringFaces(card, list) {
+  const front = [];
+  if (card.kind === 'note') front.push({ id: 'note-txt', label: 'TXT', sub: '纯文本' }, { id: 'note-md', label: 'MD', sub: 'Markdown' });
+  else {
+    for (const c of pv.conversionsFor(card, card.thumb === 'ok')) {
+      const [label, sub] = RING_SHORT[c.id] || [c.label];
+      const n = list.filter((x) => x.kind === 'file' && pv.conversionsFor(x, x.thumb === 'ok').some((y) => y.id === c.id)).length;
+      front.push({ id: c.id, label, sub: n > 1 ? `${n} 个文件${sub ? ` · ${sub}` : ''}` : sub });
+    }
+    const imgs = list.filter((x) => x.kind === 'file' && pv.family(x) === 'image' && extOf(x.name) !== 'svg');
+    if (imgs.length > 1 && imgs.includes(card)) front.push({ id: 'merge-pdf', label: '合并 PDF', sub: `${imgs.length} 张合成一份`, icon: 'merge' });
+  }
+  const many = list.length > 1, files = list.filter((c) => c.kind === 'file');
+  const zone = zones().find((z) => z.id !== card.columnId);
+  const urgent = list.every((c) => c.prio === 1);
+  const back = [
+    !many && { id: 'a-preview', label: card.kind === 'note' ? '编辑' : '预览', icon: 'eye' },
+    { id: 'a-download', label: '下载', sub: many ? `${list.length} 个` : '', icon: 'down' },
+    !many && { id: 'a-rename', label: '重命名', icon: 'pen' },
+    files.length && { id: 'a-copy', label: '复制一份', sub: files.length > 1 ? `${files.length} 个` : '', icon: 'copy' },
+    isActive(card) && { id: 'a-done', label: '完成项目', sub: '打包归档', icon: 'check' },
+    { id: 'a-prio', label: urgent ? '取消「急」' : '标为「急」', icon: 'flag' },
+    zone && { id: 'a-zone', label: `放入${zone.title}`, sub: '功能区', icon: 'zone' },
+    { id: 'a-trash', label: '删除', sub: many ? `${list.length} 个` : '', icon: 'trash', danger: true },
+  ].filter(Boolean);
+  return { front, back };
+}
+
+function openRing(card, x, y, { sticky = false } = {}) {
+  closeRing();
+  const list = ringTargets(card);
+  const faces = ringFaces(card, list);
+  const el = document.createElement('div');
+  el.className = `cring${sticky ? ' sticky' : ''}`;
+  el.setAttribute('role', 'menu');
+  el.setAttribute('aria-label', '转换圆环');
+  el.innerHTML = `<div class="cr-faces" role="tablist"></div><div class="cr-disc"></div>
+    <div class="cr-hint">${sticky ? '点一格执行 · Tab / 滚轮翻面 · Esc 关闭' : '松手执行 · 滚轮 / Tab 翻面 · 中心或 Esc 取消'}</div>
+    ${sticky ? `<label class="cr-size"><span>圆环大小</span><input type="range" min="70" max="140" step="5" value="${Math.round(ringScale() * 100)}"><output>${Math.round(ringScale() * 100)}%</output></label>` : ''}`;
+  document.body.appendChild(el);
+  ring = { el, card, list, faces, face: faces.front.length ? 'front' : 'back', hover: -1, sticky, t: typeOf(card), x, y };
+  layoutRing();
+  if (!sticky) {
+    const g = document.createElement('div');
+    g.className = 'cring-ghost';
+    g.style.setProperty('--c', t.c);
+    g.textContent = list.length > 1 ? `${list.length} 个` : (extOf(card.name).slice(0, 4).toUpperCase() || t.label);
+    document.body.appendChild(g);
+    ring.ghost = g;
+    moveGhost(x, y);
+  }
+  document.body.classList.add('ring-open');
+  renderRing();
+  el.animate([{ opacity: 0, transform: 'translate(-50%,-50%) scale(.82)' }, { opacity: 1, transform: 'translate(-50%,-50%) scale(1)' }],
+    { duration: reduceMotion.matches ? 0 : 180, easing: 'cubic-bezier(.2,.9,.3,1.2)' });
+}
+function layoutRing() {
+  const s = ringScale(), R = Math.round(150 * s), r = Math.round(58 * s), pad = 70; // 上方放正 / 背面切换，下方放提示
+  ring.R = R; ring.r = r;
+  ring.cx = Math.min(innerWidth - R - 12, Math.max(R + 12, ring.x));
+  ring.cy = Math.min(innerHeight - R - pad - (ring.sticky ? 40 : 0), Math.max(R + pad, ring.y));
+  ring.el.style.cssText = `left:${ring.cx}px;top:${ring.cy}px;--R:${R}px;--r:${r}px`;
+}
+function ringItems() { return ring.faces[ring.face]; }
+function sectorPath(a0, a1, R, r) {
+  const p = (a, rad) => `${(Math.cos(a) * rad).toFixed(2)} ${(Math.sin(a) * rad).toFixed(2)}`;
+  const large = a1 - a0 > Math.PI ? 1 : 0;
+  return `M${p(a0, R)}A${R} ${R} 0 ${large} 1 ${p(a1, R)}L${p(a1, r)}A${r} ${r} 0 ${large} 0 ${p(a0, r)}Z`;
+}
+function renderRing() {
+  const { el, R, r, faces, face, list, card, t } = ring;
+  const items = ringItems(), n = items.length, span = (Math.PI * 2) / Math.max(n, 1);
+  const segs = items.map((it, i) => {
+    const a0 = -Math.PI / 2 - span / 2 + i * span, a1 = a0 + span, mid = (a0 + a1) / 2, lr = (R + r) / 2 + 4;
+    const d = n === 1 ? `M0 ${-R}A${R} ${R} 0 1 1 0 ${R}A${R} ${R} 0 1 1 0 ${-R}ZM0 ${-r}A${r} ${r} 0 1 0 0 ${r}A${r} ${r} 0 1 0 0 ${-r}Z` : sectorPath(a0, a1, R, r);
+    return { it, i, d, lx: Math.cos(mid) * lr, ly: Math.sin(mid) * lr };
+  });
+  const count = (k) => faces[k].length;
+  el.querySelector('.cr-faces').innerHTML = `
+      <button type="button" data-face="front" class="${face === 'front' ? 'on' : ''}" ${count('front') ? '' : 'disabled'}>转换 <b>${count('front')}</b></button>
+      <button type="button" data-face="back" class="${face === 'back' ? 'on' : ''}">操作 <b>${count('back')}</b></button>`;
+  el.querySelector('.cr-disc').innerHTML = `
+      <svg viewBox="${-R} ${-R} ${2 * R} ${2 * R}" aria-hidden="true">
+        <circle class="cr-bg" r="${R + 2}"/>
+        ${segs.map((g) => `<path class="cr-seg${g.it.danger ? ' danger' : ''}" data-i="${g.i}" d="${g.d}"/>`).join('')}
+      </svg>
+      ${segs.map((g) => `<div class="cr-label${g.it.danger ? ' danger' : ''}" data-i="${g.i}" role="menuitem" style="left:calc(50% + ${g.lx.toFixed(1)}px);top:calc(50% + ${g.ly.toFixed(1)}px)">
+        ${g.it.icon ? `<svg viewBox="0 0 24 24">${RICON[g.it.icon]}</svg>` : ''}<b>${esc(g.it.label)}</b>${g.it.sub ? `<small>${esc(g.it.sub)}</small>` : ''}</div>`).join('')}
+      <div class="cr-center" style="--c:${t.c}">
+        <b>${list.length > 1 ? `${list.length} 个文件` : esc(card.kind === 'note' ? '便签' : FAM_LABEL[pv.family(card)] || t.label)}</b>
+        <small class="cr-name">${esc(list.length > 1 ? `从「${card.name}」开始` : card.name)}</small>
+        <small class="cr-act">${face === 'front' ? '转换为' : '操作'}</small>
+      </div>`;
+  setRingHover(ring.hover >= n ? -1 : ring.hover);
+}
+function setRingHover(i) {
+  if (!ring) return;
+  ring.hover = i;
+  ring.el.querySelectorAll('[data-i]').forEach((x) => x.classList.toggle('hot', +x.dataset.i === i));
+  const it = ringItems()[i];
+  const act = ring.el.querySelector('.cr-act');
+  if (act) act.textContent = it ? `${ring.face === 'front' ? '转换为 ' : ''}${it.label}` : ring.face === 'front' ? '转换为' : '操作';
+}
+function ringIndexAt(x, y) {
+  const dx = x - ring.cx, dy = y - ring.cy, d = Math.hypot(dx, dy), n = ringItems().length;
+  if (!n || d < ring.r * 0.92) return -1;
+  if (ring.sticky && d > ring.R + 6) return -1;
+  const span = (Math.PI * 2) / n;
+  let a = Math.atan2(dy, dx) + Math.PI / 2 + span / 2;
+  a = ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+  return Math.min(n - 1, Math.floor(a / span));
+}
+function moveGhost(x, y) { if (ring?.ghost) ring.ghost.style.transform = `translate(${x + 14}px, ${y + 14}px)`; }
+async function flipRing(to) {
+  if (!ring || ring.flipping) return;
+  const next = to || (ring.face === 'front' ? 'back' : 'front');
+  if (next === ring.face || !ring.faces[next].length) return;
+  ring.flipping = true;
+  const disc = ring.el.querySelector('.cr-disc'), dur = reduceMotion.matches ? 0 : 110;
+  // 动画在后台标签页可能不跑，加超时兜底，免得卡住
+  const play = (frames, easing) => Promise.race([disc.animate(frames, { duration: dur, easing }).finished.catch(() => {}), wait(dur + 60)]);
+  await play([{ transform: 'rotateY(0)' }, { transform: 'rotateY(90deg)' }], 'ease-in');
+  if (!ring) return;
+  ring.face = next; ring.hover = -1;
+  renderRing();
+  if (ring.lastX != null) setRingHover(ringIndexAt(ring.lastX, ring.lastY));
+  await play([{ transform: 'rotateY(-90deg)' }, { transform: 'rotateY(0)' }], 'ease-out');
+  if (ring) ring.flipping = false;
+}
+function closeRing(chosen) {
+  if (!ring) return;
+  const { el, ghost } = ring;
+  ring = null;
+  document.body.classList.remove('ring-open');
+  ghost?.remove();
+  if (reduceMotion.matches) return el.remove();
+  el.style.pointerEvents = 'none';
+  el.classList.add('closing');
+  const dur = chosen ? 220 : 140;
+  el.animate([{ opacity: 1, transform: 'translate(-50%,-50%) scale(1)' }, { opacity: 0, transform: `translate(-50%,-50%) scale(${chosen ? 1.06 : 0.9})` }],
+    { duration: dur, easing: 'ease-out', fill: 'forwards' });
+  setTimeout(() => el.remove(), dur + 40);
+}
+async function ringChoose(i) {
+  const it = ringItems()[i];
+  if (!it) return closeRing();
+  const { card, list } = ring;
+  closeRing(true);
+  try { await ringRun(it, card, list); } catch (e) { console.warn(e); toast(`操作失败：${e.message || e}`, { error: true }); }
+}
+async function ringRun(it, card, list) {
+  const files = list.filter((c) => c.kind === 'file');
+  const ids = list.map((c) => c.id);
+  switch (it.id) {
+    case 'a-preview': return preview(card.id);
+    case 'a-download': return list.forEach((c, i) => setTimeout(() => download(c.id), i * 300));
+    case 'a-rename': {
+      const n = await prompt({ title: '重命名', value: card.name, ok: '保存' });
+      if (n && n !== card.name) { card.name = n; await saveCard(card); await changed(); }
+      return;
+    }
+    case 'a-copy': {
+      if (!(await ensureAccess())) return;
+      let n = 0;
+      for (const c of files) {
+        const b = await db.getBlob(c.id);
+        if (!b) continue;
+        const m = /^(.*?)(\.[^.]+)?$/.exec(c.name);
+        n += (await placeBeside(c, [new File([b], `${m[1]} 副本${m[2] || ''}`, { type: c.type || b.type })])).length;
+      }
+      return toast(n ? `已复制 ${n} 个文件，放在原文件旁边` : '没有找到文件内容', { error: !n });
+    }
+    case 'a-done': return completeProject(card.id);
+    case 'a-prio': return setPrio(ids, list.every((c) => c.prio === 1) ? 0 : 1);
+    case 'a-zone': {
+      const z = zones().find((x) => x.id !== card.columnId);
+      for (const id of ids) await moveCard(id, z.id, 0);
+      return toast(`已放入「${z.title}」`);
+    }
+    case 'a-trash': {
+      for (const id of ids) await trashCard(id);
+      state.selected.clear(); syncSelectionUI();
+      return;
+    }
+    case 'note-txt': case 'note-md': {
+      const md = it.id === 'note-md';
+      const text = card.kind === 'note' && card.name && card.text && !card.text.startsWith(card.name) ? `${md ? '# ' : ''}${card.name}\n\n${card.text}` : (card.text || card.name || '');
+      const added = await placeBeside(card, [new File([text], `${(card.name || '便签').replace(/[\\/:*?"<>|]/g, ' ').slice(0, 60)}.${md ? 'md' : 'txt'}`, { type: md ? 'text/markdown' : 'text/plain;charset=utf-8' })]);
+      return toast(`已生成「${added[0]?.name}」`);
+    }
+    case 'merge-pdf': {
+      if (!(await ensureAccess())) return;
+      const imgs = files.filter((c) => pv.family(c) === 'image' && extOf(c.name) !== 'svg');
+      const t = toast('正在合并 PDF…', { sticky: true });
+      try {
+        const items = [];
+        for (const c of imgs) items.push({ blob: await db.getBlob(c.id) });
+        const f = await pv.mergeImagesPdf(items, `${card.name.replace(/\.[^.]+$/, '')} 等${imgs.length}张`, (s) => t.set(s));
+        const added = await placeBeside(card, [f]);
+        t.close();
+        return toast(`已合并为「${added[0]?.name}」`, { action: '下载', onAction: () => download(added[0].id) });
+      } catch (e) { t.close(); throw e; }
+    }
+  }
+  // 格式转换：对所有支持这项转换的已选文件执行
+  if (!(await ensureAccess())) return;
+  const todo = files.filter((c) => pv.conversionsFor(c, c.thumb === 'ok').some((x) => x.id === it.id));
+  const t = toast(`正在转换为 ${it.label}…`, { sticky: true });
+  const added = []; let fail = 0, err = null;
+  for (let k = 0; k < todo.length; k++) {
+    const c = todo[k];
+    try { added.push(...await convertOne(c, it.id, (s) => t.set(todo.length > 1 ? `${k + 1}/${todo.length} · ${s}` : s))); }
+    catch (e) { fail++; err = e; console.warn(e); }
+    if (todo.length > 1) t.set(`正在转换 ${k + 1}/${todo.length}…`);
+  }
+  t.close();
+  if (fail && !added.length) return toast(`转换失败：${err.message || err}`, { error: true });
+  toast(`转换完成：${added.map((c) => c.name).slice(0, 2).join('、')}${added.length > 2 ? ` 等 ${added.length} 个` : ''}${fail ? `（${fail} 个失败）` : ''}`,
+    { action: '下载', onAction: () => added.forEach((c, i) => setTimeout(() => download(c.id), i * 300)) });
+}
+
+document.addEventListener('pointerdown', (e) => {
+  ringFired = false;
+  if (ring) {
+    if (!ring.sticky) return;
+    // 点选模式：点在圆环上执行，点在别处关闭
+    if (e.target.closest('.cr-faces, .cr-size')) return;
+    const i = ringIndexAt(e.clientX, e.clientY);
+    e.preventDefault(); e.stopPropagation(); ringFired = true;
+    if (i >= 0) ringChoose(i);
+    else if (Math.hypot(e.clientX - ring.cx, e.clientY - ring.cy) > ring.R + 6 || !e.target.closest('.cring')) closeRing();
+    return;
+  }
+  if (e.button !== 0 || !(e.ctrlKey || e.metaKey)) return;
+  const el = e.target.closest?.('.card');
+  if (!el || e.target.closest('.more, .export-handle, .sel, .suggest-badge')) return;
+  const card = findCard(el.dataset.id);
+  if (!ringEligible(card)) return;
+  // 暂时关掉这张卡片的原生拖拽（拖到桌面导出），否则浏览器会抢走后续的指针事件
+  if (el.draggable) { el.draggable = false; el.dataset.ringDrag = '1'; }
+  ringPending = { card, el, x: e.clientX, y: e.clientY, id: e.pointerId };
+}, true);
+function restoreDrag() { $$('[data-ring-drag]').forEach((x) => { x.draggable = true; delete x.dataset.ringDrag; }); }
+document.addEventListener('pointermove', (e) => {
+  if (ringPending && e.pointerId === ringPending.id && Math.hypot(e.clientX - ringPending.x, e.clientY - ringPending.y) > 8) {
+    const p = ringPending; ringPending = null;
+    openRing(p.card, p.x, p.y);
+  }
+  if (!ring) return;
+  ring.lastX = e.clientX; ring.lastY = e.clientY;
+  moveGhost(e.clientX, e.clientY);
+  const i = ringIndexAt(e.clientX, e.clientY);
+  if (i !== ring.hover) setRingHover(i);
+}, true);
+document.addEventListener('pointerup', (e) => {
+  ringPending = null; restoreDrag();
+  if (!ring || ring.sticky) return;
+  ringFired = true; // 吞掉这次松手产生的 click（否则会切换多选）
+  setTimeout(() => { ringFired = false; }, 0);
+  const i = ringIndexAt(e.clientX, e.clientY);
+  i >= 0 ? ringChoose(i) : closeRing();
+}, true);
+document.addEventListener('pointercancel', () => { ringPending = null; restoreDrag(); if (ring && !ring.sticky) closeRing(); }, true);
+document.addEventListener('click', (e) => { if (ringFired) { e.stopPropagation(); e.preventDefault(); ringFired = false; } }, true);
+document.addEventListener('dragstart', (e) => { if (ringPending || ring) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+document.addEventListener('contextmenu', (e) => { if (ringPending || ring) { e.preventDefault(); e.stopPropagation(); } }, true);
+window.addEventListener('wheel', (e) => {
+  if (!ring) return;
+  e.preventDefault(); e.stopPropagation();
+  if (Math.abs(e.deltaY) + Math.abs(e.deltaX) < 4 || Date.now() - (ring.wheelAt || 0) < 280) return;
+  ring.wheelAt = Date.now();
+  flipRing();
+}, { passive: false, capture: true });
+document.addEventListener('keydown', (e) => {
+  if (!ring) return;
+  const n = ringItems().length;
+  if (e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); flipRing(); }
+  else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeRing(); }
+  else if (ring.sticky && (e.key === 'ArrowRight' || e.key === 'ArrowDown')) { e.preventDefault(); setRingHover((ring.hover + 1) % n); }
+  else if (ring.sticky && (e.key === 'ArrowLeft' || e.key === 'ArrowUp')) { e.preventDefault(); setRingHover((ring.hover - 1 + n) % n); }
+  else if (ring.sticky && e.key === 'Enter' && ring.hover >= 0) { e.preventDefault(); ringChoose(ring.hover); }
+}, true);
+document.addEventListener('click', (e) => {
+  const f = e.target.closest?.('.cring [data-face]');
+  if (f && ring) { e.preventDefault(); flipRing(f.dataset.face); }
+});
+document.addEventListener('input', (e) => {
+  if (!ring || !e.target.matches('.cr-size input')) return;
+  ls.set('ringScale', +e.target.value / 100);
+  e.target.nextElementSibling.textContent = `${e.target.value}%`;
+  layoutRing(); renderRing();
+});
+window.addEventListener('blur', () => { ringPending = null; restoreDrag(); if (ring && !ring.sticky) closeRing(); });
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 // 长按的目标：若按在已选中的卡片上 → 全部已选；否则 → 它的关联组

@@ -304,6 +304,7 @@ export function conversionsFor(card, hasThumb) {
     if (!/^jpe?g$/.test(e)) list.push({ id: 'img-jpg', label: 'JPG' });
     if (e !== 'webp') list.push({ id: 'img-webp', label: 'WebP' });
     list.push({ id: 'img-pdf', label: 'PDF' });
+    if (e !== 'svg' && e !== 'gif') list.push({ id: 'img-small', label: '压缩 JPG' });
   }
   if (fam === 'pdf') list.push({ id: 'pdf-png', label: '每页 PNG' }, { id: 'pdf-txt', label: '提取文字 TXT' });
   if (fam === 'docx') list.push({ id: 'docx-html', label: 'HTML 网页' }, { id: 'docx-txt', label: '纯文本 TXT' });
@@ -339,6 +340,22 @@ async function decodeAudioFull(blob) {
 const htmlDoc = (title, body) => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title>
 <style>body{max-width:760px;margin:40px auto;padding:0 20px;font:16px/1.75 system-ui,"PingFang SC","Microsoft YaHei",sans-serif;color:#222}img{max-width:100%}table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:4px 8px}pre{background:#f5f5f5;padding:12px;overflow:auto}</style></head><body>${body}</body></html>`;
 
+/** 多张图片按顺序合并成一个 PDF（每张图一页，页面尺寸跟随图片） */
+export async function mergeImagesPdf(items, name, onProgress = () => {}) {
+  const { jsPDF } = await lib('jspdf');
+  let pdf = null;
+  for (let i = 0; i < items.length; i++) {
+    onProgress(`正在合并第 ${i + 1}/${items.length} 张…`);
+    const im = await decodeImage(items[i].blob);
+    const c = scaled(im, im.width, im.height, 3000, 3000, '#fff');
+    const o = c.width > c.height ? 'l' : 'p';
+    if (!pdf) pdf = new jsPDF({ orientation: o, unit: 'px', format: [c.width, c.height], hotfixes: ['px_scaling'] });
+    else pdf.addPage([c.width, c.height], o);
+    pdf.addImage(c.toDataURL('image/jpeg', 0.9), 'JPEG', 0, 0, c.width, c.height);
+  }
+  return new File([pdf.output('blob')], `${name}.pdf`, { type: 'application/pdf' });
+}
+
 /** 执行转换，返回 File[]；onProgress(文字) 可选 */
 export async function convert(card, blob, id, onProgress = () => {}) {
   const base = baseName(card.name);
@@ -351,6 +368,14 @@ export async function convert(card, blob, id, onProgress = () => {}) {
       const c = scaled(im, im.width, im.height, 8000, 8000, jpg ? '#fff' : null);
       const [type, ext] = jpg ? ['image/jpeg', 'jpg'] : id === 'img-png' ? ['image/png', 'png'] : ['image/webp', 'webp'];
       return [file(await toBlob(c, type, 0.92), `${base}.${ext}`, type)];
+    }
+    case 'img-small': {
+      // 长边不超过 2048px，JPG 80% 质量；结果没变小就保留原图大小提示
+      const im = await decodeImage(blob);
+      const c = scaled(im, im.width, im.height, 2048, 2048, '#fff');
+      const out = await toBlob(c, 'image/jpeg', 0.8);
+      if (out.size >= blob.size && /^jpe?g$/.test(extOf(card.name))) throw new Error('这张图已经足够小了');
+      return [file(out, `${base}-压缩.jpg`, 'image/jpeg')];
     }
     case 'img-pdf': {
       const im = await decodeImage(blob);
