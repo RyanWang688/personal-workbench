@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { convert, conversionsFor } from '../preview.js';
+import { convert, conversionsFor, pdfSplitRanges } from '../preview.js';
 
 test('PDF files offer the new actions even without a thumbnail', () => {
   const options = conversionsFor({ name: 'document.pdf' }, false).map(({ id }) => id);
   for (const id of ['pdf-jpg', 'pdf-md', 'pdf-compress', 'pdf-split']) assert.ok(options.includes(id));
+});
+
+test('PDF split groups preserve the requested order and default to single pages', () => {
+  assert.deepEqual(pdfSplitRanges('7–８、１-３，5', 8), [[7, 8], [1, 3], [5, 5]]);
+  assert.deepEqual(pdfSplitRanges('', 3), [[1, 1], [2, 2], [3, 3]]);
+  assert.deepEqual(pdfSplitRanges('1-2, 1-2, 2', 3), [[1, 2], [2, 2]]);
+  for (const invalid of ['0', '4', '3-1', '1-', 'two']) assert.throws(() => pdfSplitRanges(invalid, 3));
 });
 
 test('PDF to Markdown keeps page order and reports pages without extractable text', async () => {

@@ -1,5 +1,5 @@
 import * as db from './db.js?v=6';
-import * as pv from './preview.js?v=5';
+import * as pv from './preview.js?v=6';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -2866,7 +2866,11 @@ async function preview(id) {
 }
 // 转换一个文件，结果放在原文件旁边（画布上放右侧），返回新卡片
 async function convertOne(card, convId, say = () => {}) {
-  const files = await pv.convert(card, await db.getBlob(card.id), convId, say);
+  const blob = await db.getBlob(card.id);
+  if (!blob) throw new Error(`找不到「${card.name}」的文件内容`);
+  const rangeSpec = convId === 'pdf-split' ? await choosePdfSplit(card, blob) : '';
+  if (rangeSpec === null) return null;
+  const files = await pv.convert(card, blob, convId, say, { rangeSpec });
   const added = await placeBeside(card, files);
   if (!added.length) throw new Error('转换结果保存失败');
   return added;
@@ -2894,6 +2898,7 @@ async function runConvert(btn) {
   try {
     if (btn.dataset.conv === 'pdf-compress' && !(await confirmPdfCompression())) { say(''); return; }
     const added = await convertOne(card, btn.dataset.conv, say);
+    if (!added) { say(''); return; }
     say(`✓ 已生成 ${added.length} 个文件，放在「${areaName(added[0]?.columnId)}」原文件旁边`);
     toast(`转换完成：${added.map((c) => c.name).slice(0, 2).join('、')}${added.length > 2 ? ` 等 ${added.length} 个` : ''}`,
       { action: '下载', onAction: () => added.forEach((c, i) => setTimeout(() => download(c.id), i * 300)) });
@@ -2932,7 +2937,7 @@ function dialog(html, onSubmit) {
     m.oncancel = () => finish(null);
     m.onclose = () => finish(null);
     m.showModal();
-    const first = f.querySelector('input, textarea');
+    const first = f.querySelector('[autofocus], input, textarea');
     if (first) { first.focus(); first.select?.(); }
   });
 }
@@ -2943,6 +2948,127 @@ const prompt = ({ title, value = '', placeholder = '', ok = '确定', optional =
     (f) => f.v.value.trim());
 const confirmBox = ({ title, body = '', ok = '确定', danger }) =>
   dialog(`<h3>${esc(title)}</h3>${body ? `<p>${esc(body)}</p>` : ''}${actions(ok, danger)}`, () => true);
+
+async function choosePdfSplit(card, blob) {
+  const modal = $('#modal');
+  modal.classList.add('pdf-split-modal');
+  modal.setAttribute('aria-labelledby', 'pdfSplitTitle');
+  let pdf, page = 1, rangeStart = null, active = true, renderId = 0;
+  const result = dialog(`<h3 id="pdfSplitTitle" tabindex="-1" autofocus>拆分 PDF</h3>
+    <p class="pdf-split-name">${esc(card.name)}</p>
+    <div class="pdf-split-layout">
+      <section class="pdf-split-preview" aria-label="PDF 预览">
+        <div class="pdf-split-paper" id="pdfSplitPaper" aria-live="polite"><p>正在打开 PDF…</p></div>
+        <nav class="pdf-split-nav" aria-label="预览翻页">
+          <button type="button" class="btn" id="pdfSplitPrev" disabled>上一页</button>
+          <label>第 <input type="number" id="pdfSplitPage" aria-label="预览页码" min="1" step="1" value="1" disabled> 页</label>
+          <span id="pdfSplitTotal"></span>
+          <button type="button" class="btn" id="pdfSplitNext" disabled>下一页</button>
+        </nav>
+      </section>
+      <section class="pdf-split-options" aria-label="拆分页码">
+        <label class="field"><span>拆分页码</span>
+          <input type="text" id="pdfSplitRanges" aria-describedby="pdfSplitHelp pdfSplitSummary" placeholder="例如 1-3, 5, 7-9" disabled>
+        </label>
+        <p id="pdfSplitHelp">逗号隔开多组，每组生成一份 PDF。留空则逐页拆分。</p>
+        <div class="pdf-split-picks">
+          <button type="button" class="btn" id="pdfSplitPick" disabled>加入当前页</button>
+          <button type="button" class="btn" id="pdfSplitRange" disabled>标记范围起点</button>
+        </div>
+        <p id="pdfSplitSummary" role="status"></p>
+      </section>
+    </div>${actions('开始拆分')}`, () => ranges.value.trim());
+  const paper = $('#pdfSplitPaper'), pageInput = $('#pdfSplitPage'), ranges = $('#pdfSplitRanges');
+  const prev = $('#pdfSplitPrev'), next = $('#pdfSplitNext'), pick = $('#pdfSplitPick'), range = $('#pdfSplitRange');
+  const submit = $('#modalInner button[value="ok"]'), summary = $('#pdfSplitSummary');
+  submit.disabled = true;
+
+  function syncRanges() {
+    try {
+      const groups = pv.pdfSplitRanges(ranges.value, pdf.numPages);
+      summary.textContent = `将生成 ${groups.length} 份 PDF`;
+      ranges.removeAttribute('aria-invalid');
+      submit.disabled = false;
+    } catch (e) {
+      summary.textContent = e.message;
+      ranges.setAttribute('aria-invalid', 'true');
+      submit.disabled = true;
+    }
+  }
+  async function showPage() {
+    const id = ++renderId, n = page;
+    prev.disabled = n <= 1;
+    next.disabled = n >= pdf.numPages;
+    pageInput.value = n;
+    paper.textContent = `正在加载第 ${n} 页…`;
+    try {
+      const canvas = await pv.renderPdfPage(pdf, n, 1100, 1400);
+      if (!active || id !== renderId) return;
+      canvas.setAttribute('role', 'img');
+      canvas.setAttribute('aria-label', `PDF 第 ${n} 页`);
+      paper.replaceChildren(canvas);
+    } catch {
+      if (active && id === renderId) paper.textContent = `第 ${n} 页无法预览，可继续按页码选择。`;
+    }
+  }
+  function jump() {
+    const value = pageInput.valueAsNumber;
+    if (Number.isInteger(value) && value >= 1 && value <= pdf.numPages && value !== page) {
+      page = value;
+      showPage();
+    } else pageInput.value = page;
+  }
+  function appendPages(start, end = start) {
+    const entry = start === end ? String(start) : `${Math.min(start, end)}-${Math.max(start, end)}`;
+    const current = ranges.value.trim().replace(/[,，、;；]+$/, '').trim();
+    ranges.value = current ? `${current}, ${entry}` : entry;
+    syncRanges();
+  }
+  prev.onclick = () => { page--; showPage(); };
+  next.onclick = () => { page++; showPage(); };
+  pageInput.onchange = jump;
+  pageInput.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); jump(); } };
+  pick.onclick = () => appendPages(page);
+  range.onclick = () => {
+    if (rangeStart === null) {
+      rangeStart = page;
+      range.textContent = `从第 ${page} 页到当前页`;
+    } else {
+      appendPages(rangeStart, page);
+      rangeStart = null;
+      range.textContent = '标记范围起点';
+    }
+  };
+  ranges.oninput = syncRanges;
+
+  async function loadPdf() {
+    try {
+      const doc = await pv.pdfDoc(blob);
+      if (!active) { await doc.destroy(); return; }
+      pdf = doc;
+      $('#pdfSplitTotal').textContent = `共 ${pdf.numPages} 页`;
+      if (pdf.numPages < 2) {
+        paper.textContent = '这份 PDF 只有一页，无需拆分。';
+        return;
+      }
+      pageInput.max = pdf.numPages;
+      pageInput.disabled = ranges.disabled = pick.disabled = range.disabled = false;
+      syncRanges();
+      showPage();
+    } catch {
+      if (active) paper.textContent = '无法打开 PDF。请检查文件是否已损坏或受密码保护。';
+    }
+  }
+  loadPdf();
+  try { return await result; }
+  finally {
+    active = false;
+    modal.classList.remove('pdf-split-modal');
+    modal.removeAttribute('aria-labelledby');
+    if (pdf) await pdf.destroy().catch(console.warn);
+  }
+}
+
 const noteEditor = (card) =>
   dialog(`<h3>${card.id ? '编辑便签' : '新建便签'}</h3><input type="text" name="n" value="${esc(card.name)}" placeholder="标题" maxlength="120">
     <textarea name="t" placeholder="写点什么…">${esc(card.text)}</textarea>${actions('保存')}`,
@@ -3343,7 +3469,7 @@ document.addEventListener('dragstart', (e) => { if (pressFired) e.preventDefault
 const RING_SHORT = {
   'img-png': ['PNG'], 'img-jpg': ['JPG'], 'img-webp': ['WEBP'], 'img-pdf': ['PDF'], 'img-small': ['压缩', 'JPG · 2048px'],
   'pdf-png': ['PNG', '每页一张'], 'pdf-jpg': ['JPG', '每页一张'], 'pdf-txt': ['TXT', '提取文字'],
-  'pdf-md': ['MD', '提取文字'], 'pdf-compress': ['压缩 PDF'], 'pdf-split': ['拆分 PDF', '每页一份'],
+  'pdf-md': ['MD', '提取文字'], 'pdf-compress': ['压缩 PDF'], 'pdf-split': ['拆分 PDF', '自选页码'],
   'docx-html': ['HTML', '网页'], 'docx-txt': ['TXT', '纯文本'], 'docx-md': ['MD', 'Markdown'], 'text-md': ['MD', 'Markdown'],
   'sheet-xlsx': ['XLSX', 'Excel'], 'sheet-csv': ['CSV'], 'sheet-json': ['JSON'], 'md-html': ['HTML', '网页'],
   'audio-wav': ['WAV'], 'video-png': ['封面', 'PNG'], 'video-jpg': ['封面', 'JPG'], 'video-wav': ['音频', 'WAV'],
@@ -3602,11 +3728,15 @@ async function ringRun(it, card, list) {
   const added = []; let fail = 0, err = null;
   for (let k = 0; k < todo.length; k++) {
     const c = todo[k];
-    try { added.push(...await convertOne(c, it.id, (s) => t.set(todo.length > 1 ? `${k + 1}/${todo.length} · ${s}` : s))); }
-    catch (e) { fail++; err = e; console.warn(e); }
+    try {
+      const results = await convertOne(c, it.id, (s) => t.set(todo.length > 1 ? `${k + 1}/${todo.length} · ${s}` : s));
+      if (results === null) break;
+      added.push(...results);
+    } catch (e) { fail++; err = e; console.warn(e); }
     if (todo.length > 1) t.set(`正在转换 ${k + 1}/${todo.length}…`);
   }
   t.close();
+  if (!added.length && !fail) return;
   if (fail && !added.length) return toast(`转换失败：${err.message || err}`, { error: true });
   toast(`转换完成：${added.map((c) => c.name).slice(0, 2).join('、')}${added.length > 2 ? ` 等 ${added.length} 个` : ''}${fail ? `（${fail} 个失败）` : ''}`,
     { action: '下载', onAction: () => added.forEach((c, i) => setTimeout(() => download(c.id), i * 300)) });
@@ -3864,12 +3994,12 @@ function renderSelBar() {
   if (!ids.length) { bar.classList.remove('show'); return; }
   const active = ids.filter((id) => isActive(findCard(id)));
   bar.innerHTML = `<span class="sel-count">已选 <b>${ids.length}</b> 个</span>
+    <button class="sel-btn" data-action="sel-clear" title="取消勾选（Esc）">取消勾选</button>
     <button class="sel-btn primary" data-action="sel-done" ${active.length ? '' : 'disabled'}>${CHECK_SVG}<span>一起完成并打包</span></button>
     <button class="sel-btn" data-action="sel-link" ${active.length > 1 ? '' : 'disabled'} title="以后长按其中任意一个都会整组打包">${LINK_SVG}<span>关联为一个项目</span></button>
     <button class="sel-btn" data-action="sel-prio" aria-haspopup="menu" title="设置优先级（也可按 1 / 2 / 3，0 清除）"><span class="prio" style="--pc:#e03131">急</span><span>优先级</span></button>
     <button class="sel-btn" data-action="sel-move" aria-haspopup="menu"><svg viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></svg><span>移到…</span></button>
-    <button class="sel-btn danger" data-action="sel-trash"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg><span>删除</span></button>
-    <button class="sel-btn icon" data-action="sel-clear" aria-label="取消选择" title="取消选择（Esc）"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>`;
+    <button class="sel-btn danger" data-action="sel-trash"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg><span>删除</span></button>`;
   bar.classList.add('show');
 }
 async function moveMany(ids, areaId) {

@@ -106,14 +106,14 @@ async function zipThumb(blob) {
   if (!pick) return null;
   return new Blob([await z.file(pick).async('arraybuffer')], { type: /png$/i.test(pick) ? 'image/png' : 'image/jpeg' });
 }
-async function pdfDoc(blob) {
+export async function pdfDoc(blob) {
   const pdfjs = await lib('pdf');
   return pdfjs.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), isEvalSupported: false }).promise;
 }
-async function renderPdfPage(doc, n, width) {
+export async function renderPdfPage(doc, n, width, maxHeight = Infinity) {
   const page = await doc.getPage(n);
   const v1 = page.getViewport({ scale: 1 });
-  const vp = page.getViewport({ scale: width / v1.width });
+  const vp = page.getViewport({ scale: Math.min(width / v1.width, maxHeight / v1.height) });
   const c = canvas(vp.width, vp.height), x = c.getContext('2d');
   x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
   await page.render({ canvasContext: x, viewport: vp }).promise;
@@ -381,18 +381,34 @@ export async function mergePdfs(blobs, name, onProgress = () => {}) {
   return pdfFile(out, name);
 }
 
-async function splitPdf(blob, name, onProgress) {
+export function pdfSplitRanges(spec, pageCount) {
+  if (!spec.trim()) return Array.from({ length: pageCount }, (_, i) => [i + 1, i + 1]);
+  const ranges = new Map();
+  for (const part of spec.normalize('NFKC').trim().split(/[,、;]+/)) {
+    const match = /^(\d+)(?:\s*[-–—~至]\s*(\d+))?$/.exec(part.trim());
+    if (!match) throw new Error('请输入页码或范围，例如 1-3, 5, 7-9');
+    const start = Number(match[1]), end = Number(match[2] ?? match[1]);
+    if (start < 1 || end > pageCount || start > end) throw new Error(`页码范围须在 1–${pageCount} 页内，并按从小到大填写`);
+    ranges.set(`${start}-${end}`, [start, end]);
+  }
+  return [...ranges.values()];
+}
+
+async function splitPdf(blob, name, rangeSpec, onProgress) {
   const { PDFDocument } = await lib('pdfLib');
   const src = await PDFDocument.load(await blob.arrayBuffer());
-  const n = src.getPageCount();
-  if (n < 2) throw new Error('PDF 只有一页，无需拆分');
+  const pageCount = src.getPageCount();
+  if (pageCount < 2) throw new Error('PDF 只有一页，无需拆分');
+  const ranges = pdfSplitRanges(rangeSpec, pageCount);
   const files = [];
-  for (let i = 0; i < n; i++) {
-    onProgress(`正在拆分第 ${i + 1}/${n} 页…`);
+  for (const [index, [start, end]] of ranges.entries()) {
+    onProgress(`正在生成第 ${index + 1}/${ranges.length} 份 PDF…`);
     const out = await PDFDocument.create();
-    const [page] = await out.copyPages(src, [i]);
-    out.addPage(page);
-    files.push(await pdfFile(out, `${name}-第${i + 1}页`));
+    const indices = Array.from({ length: end - start + 1 }, (_, i) => start - 1 + i);
+    const pages = await out.copyPages(src, indices);
+    pages.forEach((page) => out.addPage(page));
+    const label = start === end ? start : `${start}-${end}`;
+    files.push(await pdfFile(out, `${name}-第${label}页`));
   }
   return files;
 }
@@ -432,7 +448,7 @@ async function htmlToMarkdown(html) {
 }
 
 /** 执行转换，返回 File[]；onProgress(文字) 可选 */
-export async function convert(card, blob, id, onProgress = () => {}) {
+export async function convert(card, blob, id, onProgress = () => {}, { rangeSpec = '' } = {}) {
   if (!blob) throw new Error(`找不到「${card.name}」的文件内容`);
   const base = baseName(card.name);
   const named = new File([blob], card.name, { type: blob.type });
@@ -461,7 +477,7 @@ export async function convert(card, blob, id, onProgress = () => {}) {
       pdf.addImage(c.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, c.width, c.height);
       return [file(pdf.output('blob'), `${base}.pdf`, 'application/pdf')];
     }
-    case 'pdf-split': return splitPdf(blob, base, onProgress);
+    case 'pdf-split': return splitPdf(blob, base, rangeSpec, onProgress);
     case 'pdf-compress': return [await compressPdf(blob, base, onProgress)];
     case 'pdf-png': case 'pdf-jpg': {
       const jpg = id === 'pdf-jpg';
