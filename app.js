@@ -100,7 +100,7 @@ function orderAt(areaId, index, excludeId) {
   if (!next) return prev.order + 1024;
   return (prev.order + next.order) / 2;
 }
-const topOrder = (areaId) => Math.max(0, ...cardsIn(areaId, false).map((c) => c.order)) + 1;
+const topOrder = (areaId) => Math.max(0, ...cardsIn(areaId, false).map((c) => c.order), ...(area(areaId)?.shapes || []).map((s) => s.z || 0)) + 1;
 // 当前「默认投放位置」：看板 → 第一列；画布 → 画布视野中央
 const folders = () => areasOf('folder');
 const openFolder = () => (state.view === ARCHIVE && area(state.folder)?.kind === 'folder' ? state.folder : null);
@@ -1587,12 +1587,25 @@ function applyCam() {
   vp.style.backgroundPosition = `${c.x}px ${c.y}px`;
   vp.style.backgroundSize = `${24 * c.z}px ${24 * c.z}px`;
   $('#zoomLabel').textContent = `${Math.round(c.z * 100)}%`;
+  $('#world').style.setProperty('--iz', (1 / c.z).toFixed(4)); // 选框、手柄不随缩放变粗变细
+  positionFmt();
 }
 function renderCanvas() {
   const list = cardsIn(state.view, false);
-  $('#world').innerHTML = list.map((c) => cardHTML(c, true)).join('');
-  $('#canvasEmpty').hidden = list.length > 0;
+  const b = boardOf();
+  // 正在编辑文字时重新渲染：先记住内容，渲染完接着编辑
+  const editing = editingShape && shapeById(editingShape);
+  if (editing) { const tx = $(`.shape[data-sid="${CSS.escape(editing.id)}"] .sh-tx`); if (tx) editing.text = tx.innerText.replace(/\n$/, ''); }
+  if (state.bsel && !(state.bsel.type === 'shape' ? shapeById(state.bsel.id) : b?.links.find((l) => l.id === state.bsel.id))) state.bsel = null;
+  boardRendering = true;
+  $('#world').innerHTML = `<svg class="links" id="links" aria-hidden="true"></svg>${list.map((c) => cardHTML(c, true)).join('')}${(b?.shapes || []).map(shapeHTML).join('')}
+    <div class="conn-dots" id="connDots" hidden>${['t', 'r', 'b', 'l'].map((k) => `<i class="cd cd-${k}" data-dot="${k}" title="拖出箭头连线"></i>`).join('')}</div>`;
+  boardRendering = false;
+  $('#canvasEmpty').hidden = list.length > 0 || (b?.shapes.length || 0) > 0;
+  $('#viewport').dataset.tool = state.tool;
   applyCam();
+  drawLinks();
+  if (editing) { editingShape = null; startEdit(editing.id, true); }
 }
 function toWorld(clientX, clientY) {
   const r = $('#viewport').getBoundingClientRect(), c = cam();
@@ -1630,7 +1643,7 @@ function zoomAt(factor, clientX, clientY, animate = false) {
   applyCam(); saveCam();
 }
 function zoomFit() {
-  const els = $$('#world .card');
+  const els = $$('#world .card, #world .shape');
   const c = cam();
   if (!els.length) return tweenCam({ x: 80, y: 60, z: 1 });
   let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
@@ -1665,6 +1678,7 @@ const pointers = new Map();
 let pan = null, pinch = null, cardDrag = null, suppressClick = false;
 vp.addEventListener('pointerdown', (e) => {
   if (e.button !== 0 && e.pointerType === 'mouse') return;
+  if (pointers.size === 0 && boardDown(e)) return; // 白板：形状、连线、工具
   const cardEl = e.target.closest('.card');
   if (cardEl && (e.ctrlKey || e.metaKey)) return; // 交给转换圆环 / 多选
   if (cardEl && !e.target.closest('.more, .export-handle')) {
@@ -1685,6 +1699,7 @@ vp.addEventListener('pointerdown', (e) => {
   }
 });
 vp.addEventListener('pointermove', (e) => {
+  if (boardMove(e)) return;
   if (cardDrag && e.pointerId === cardDrag.id) {
     const dx = e.clientX - cardDrag.sx, dy = e.clientY - cardDrag.sy;
     if (!cardDrag.moved && Math.hypot(dx, dy) < 4) return;
@@ -1697,6 +1712,7 @@ vp.addEventListener('pointermove', (e) => {
     const z = cam().z;
     cardDrag.el.style.left = `${cardDrag.x + dx / z}px`;
     cardDrag.el.style.top = `${cardDrag.y + dy / z}px`;
+    drawLinks();
     highlightZoneUnder(e.clientX, e.clientY, cardDrag.el);
     return;
   }
@@ -1715,6 +1731,7 @@ vp.addEventListener('pointermove', (e) => {
   }
 });
 async function endPointer(e) {
+  if (await boardUp(e)) return;
   if (cardDrag && e.pointerId === cardDrag.id) {
     const d = cardDrag; cardDrag = null;
     document.body.classList.remove('is-dragging-card');
@@ -1764,10 +1781,520 @@ vp.addEventListener('wheel', (e) => {
   clearTimeout(vp._t); vp._t = setTimeout(saveCam, 200);
 }, { passive: false });
 vp.addEventListener('dblclick', async (e) => {
-  if (e.target.closest('.card')) return;
+  if (e.target.closest('.card, .fmt-bar')) return;
+  const sh = e.target.closest('.shape');
+  if (sh) return startEdit(sh.dataset.sid);
+  const ln = e.target.closest('[data-lid]');
+  if (ln) return editLinkLabel(ln.dataset.lid);
   const p = toWorld(e.clientX, e.clientY);
-  await newNote(state.view, { x: p.x - CARD_W / 2, y: p.y - 30 });
+  await createShape('sticky', p.x - 100, p.y - 100);
 });
+
+// ---------- 画布白板：便签、形状、文字、箭头连线（存于画布区域的 shapes / links） ----------
+const SH_COLORS = [
+  { n: '黄', bg: '#fff1a6', bd: '#d4b235' }, { n: '橙', bg: '#ffdcbd', bd: '#dc8c42' }, { n: '粉', bg: '#ffd5e0', bd: '#d76a8a' },
+  { n: '紫', bg: '#e6dcff', bd: '#9076dc' }, { n: '蓝', bg: '#d4e5ff', bd: '#5788d8' }, { n: '绿', bg: '#d2f1d8', bd: '#47a65f' },
+  { n: '灰', bg: '#e7e7ea', bd: '#97999f' }, { n: '白', bg: '#ffffff', bd: '#c2c3c9' },
+];
+const LINK_COLORS = [null, '#f2643b', '#d6455d', '#3b82f6', '#2f9e55', '#8b5cf6'];
+const SHAPE_NAMES = { sticky: '便签', rect: '矩形', round: '圆角矩形', ellipse: '圆形', diamond: '菱形', text: '文字' };
+const SH_DEF = {
+  sticky: { w: 200, h: 200, fill: 0, fs: 18, al: 'center' }, rect: { w: 200, h: 120, fill: 4, fs: 16, al: 'center' },
+  round: { w: 200, h: 120, fill: 5, fs: 16, al: 'center' }, ellipse: { w: 160, h: 160, fill: 2, fs: 16, al: 'center' },
+  diamond: { w: 180, h: 140, fill: 3, fs: 16, al: 'center' }, text: { w: 240, h: 44, fill: 'none', fs: 20, al: 'left' },
+};
+const FONT_SIZES = [12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64, 80, 96];
+const TOOL_KEYS = { v: 'select', n: 'sticky', t: 'text', r: 'rect', o: 'ellipse', d: 'diamond', l: 'arrow' };
+state.tool = 'select';
+state.bsel = null; // { type: 'shape' | 'link', id }
+let editingShape = null, bd = null, hoverRef = null, boardRendering = false;
+const boardOf = (id = state.view) => { const a = area(id); if (!a || a.kind !== 'canvas') return null; a.shapes ||= []; a.links ||= []; return a; };
+const shapeById = (id) => boardOf()?.shapes.find((s) => s.id === id);
+const linkById = (id) => boardOf()?.links.find((l) => l.id === id);
+const shColor = (s) => (s.fill === 'none' || s.fill == null ? null : SH_COLORS[s.fill] || SH_COLORS[0]);
+const isTypingTarget = (t) => t?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t?.tagName || '');
+
+function shapeHTML(s) {
+  const col = shColor(s);
+  const sel = state.bsel?.type === 'shape' && state.bsel.id === s.id;
+  const style = `left:${Math.round(s.x)}px;top:${Math.round(s.y)}px;width:${Math.round(s.w)}px;height:${Math.round(s.h)}px;z-index:${s.z || 1};`
+    + `--fs:${s.fs || 16}px;--sb:${col ? col.bg : 'transparent'};--sd:${col ? col.bd : 'var(--text-3)'};--tc:${col ? '#1f2023' : 'var(--text)'};text-align:${s.al || 'center'}`;
+  const bg = s.t === 'diamond'
+    ? '<svg class="sh-bg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1.5 98.5,50 50,98.5 1.5,50" vector-effect="non-scaling-stroke"/></svg>'
+    : '<div class="sh-bg"></div>';
+  const handles = sel ? ['nw', 'ne', 'se', 'sw'].map((k) => `<i class="sh-h h-${k}" data-handle="${k}"></i>`).join('') : '';
+  return `<div class="shape st-${s.t}${col ? '' : ' nofill'}${sel ? ' picked' : ''}${s.b ? ' bold' : ''}" data-sid="${s.id}" style="${style}">${bg}<div class="sh-tx" data-ph="${s.t === 'text' ? '输入文字' : '双击输入'}">${esc(s.text || '')}</div>${handles}</div>`;
+}
+
+// ---- 连线几何 ----
+function boxOf(ref) {
+  if (!ref) return null;
+  if (ref.id) {
+    const s = shapeById(ref.id);
+    if (s) return { x: s.x, y: s.y, w: s.w, h: s.h, t: s.t };
+    const el = $(`#world .card[data-id="${CSS.escape(ref.id)}"]`);
+    if (el) return { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight, t: 'card' };
+    return null;
+  }
+  return ref.x != null ? { x: ref.x, y: ref.y, w: 0, h: 0, t: 'pt' } : null;
+}
+const centerOf = (b) => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 });
+// 从 b 的中心朝 (tx, ty) 出发，落在 b 的边框外一点
+function edgePoint(b, tx, ty) {
+  const c = centerOf(b), dx = tx - c.x, dy = ty - c.y;
+  if (b.t === 'pt' || (!dx && !dy)) return c;
+  const g = 5, hw = b.w / 2 + g, hh = b.h / 2 + g;
+  let k;
+  if (b.t === 'ellipse') k = 1 / Math.sqrt((dx * dx) / (hw * hw) + (dy * dy) / (hh * hh));
+  else if (b.t === 'diamond') k = 1 / (Math.abs(dx) / hw + Math.abs(dy) / hh);
+  else k = Math.min(hw / Math.abs(dx || 1e-9), hh / Math.abs(dy || 1e-9));
+  return { x: c.x + dx * k, y: c.y + dy * k };
+}
+function linkGeom(l, override) {
+  const A = boxOf(override?.from || l.from), B = boxOf(override?.to || l.to);
+  if (!A || !B) return null;
+  const ca = centerOf(A), cb = centerOf(B);
+  const p1 = edgePoint(A, cb.x, cb.y), p2 = edgePoint(B, ca.x, ca.y);
+  if (Math.hypot(p2.x - p1.x, p2.y - p1.y) < 2) return null;
+  let d, c1 = p1, c2 = p2, mid;
+  if (l.curve) {
+    const dx = p2.x - p1.x, dy = p2.y - p1.y, horiz = Math.abs(dx) >= Math.abs(dy);
+    c1 = horiz ? { x: p1.x + dx / 2, y: p1.y } : { x: p1.x, y: p1.y + dy / 2 };
+    c2 = horiz ? { x: p2.x - dx / 2, y: p2.y } : { x: p2.x, y: p2.y - dy / 2 };
+    d = `M${p1.x} ${p1.y}C${c1.x} ${c1.y} ${c2.x} ${c2.y} ${p2.x} ${p2.y}`;
+    mid = { x: (p1.x + 3 * c1.x + 3 * c2.x + p2.x) / 8, y: (p1.y + 3 * c1.y + 3 * c2.y + p2.y) / 8 };
+  } else {
+    d = `M${p1.x} ${p1.y}L${p2.x} ${p2.y}`;
+    mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+  }
+  return { d, p1, p2, c1, c2, mid };
+}
+function arrowHead(tip, from, size = 11) {
+  const a = Math.atan2(tip.y - from.y, tip.x - from.x), w = 0.42;
+  const p = (ang) => `${tip.x - size * Math.cos(ang)} ${tip.y - size * Math.sin(ang)}`;
+  return `M${tip.x} ${tip.y}L${p(a - w)}L${p(a + w)}Z`;
+}
+function linkSVG(l, g, { temp = false } = {}) {
+  const sel = !temp && state.bsel?.type === 'link' && state.bsel.id === l.id;
+  const color = l.color || 'var(--text-2)';
+  const heads = (l.end !== 'none' ? `<path class="ah" d="${arrowHead(g.p2, g.c2 === g.p2 ? g.p1 : g.c2)}"/>` : '')
+    + (l.end === 'both' ? `<path class="ah" d="${arrowHead(g.p1, g.c1 === g.p1 ? g.p2 : g.c1)}"/>` : '');
+  const label = l.label ? `<text class="lbl" x="${g.mid.x}" y="${g.mid.y}">${esc(l.label)}</text>` : '';
+  const ends = sel ? `<circle class="lend" data-lend="from" cx="${g.p1.x}" cy="${g.p1.y}"/><circle class="lend" data-lend="to" cx="${g.p2.x}" cy="${g.p2.y}"/>` : '';
+  return `<g class="link${sel ? ' picked' : ''}${temp ? ' temp' : ''}" ${temp ? '' : `data-lid="${l.id}"`} style="--lc:${color}">
+    ${temp ? '' : `<path class="hit" d="${g.d}"/>`}<path class="ln${l.dash ? ' dash' : ''}" d="${g.d}"/>${heads}${label}${ends}</g>`;
+}
+function drawLinks() {
+  const svg = $('#links');
+  const b = boardOf();
+  if (!svg || !b) return;
+  let html = '';
+  for (const l of b.links) {
+    const g = linkGeom(l, bd?.mode === 'link' && bd.lid === l.id ? { [bd.end]: bd.cur } : null);
+    if (g) html += linkSVG(l, g);
+  }
+  if (bd?.mode === 'link' && !bd.lid && bd.moved) {
+    const g = linkGeom({ end: 'arrow' }, { from: bd.from, to: bd.target || bd.cur });
+    if (g) html += linkSVG({ end: 'arrow' }, g, { temp: true });
+  }
+  svg.innerHTML = html;
+}
+// 缩略图加载后卡片变高，连线跟着重算
+$('#world').addEventListener('load', () => { if (boardOf()?.links.length) drawLinks(); }, true);
+
+// ---- 工具 ----
+function setTool(t) {
+  state.tool = t;
+  $$('#canvasPalette [data-tool]').forEach((b) => { b.classList.toggle('on', b.dataset.tool === t); b.setAttribute('aria-pressed', b.dataset.tool === t); });
+  $('#viewport').dataset.tool = t;
+  hideDots();
+}
+$('#canvasPalette').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-tool]');
+  if (b) setTool(state.tool === b.dataset.tool && b.dataset.tool !== 'select' ? 'select' : b.dataset.tool);
+});
+
+async function saveBoard() { const b = boardOf(); if (b) { await saveArea(b); await changed(); } }
+function selectBoard(sel) {
+  state.bsel = sel;
+  if (sel && state.selected.size) clearSelection();
+  renderCanvas();
+}
+async function createShape(t, x, y, w, h) {
+  const b = boardOf();
+  if (!b) return;
+  const d = SH_DEF[t];
+  const s = { id: uid(), t, x: Math.round(x), y: Math.round(y), w: Math.round(w || d.w), h: Math.round(h || d.h), text: '', fill: d.fill, fs: d.fs, al: d.al, z: topOrder(state.view) };
+  b.shapes.push(s);
+  state.bsel = { type: 'shape', id: s.id };
+  setTool('select');
+  renderCanvas();
+  const el = $(`.shape[data-sid="${s.id}"]`);
+  if (el && !reduceMotion.matches) el.animate([{ transform: 'scale(.92)' }, { transform: 'none' }], { duration: 160, easing: 'ease-out' });
+  startEdit(s.id); // 先进入编辑，马上就能打字；保存在后台进行（重绘时会保留正在输入的内容）
+  await saveBoard();
+  return s;
+}
+
+// ---- 编辑文字 ----
+function startEdit(id, keepCaret) {
+  const s = shapeById(id), el = $(`.shape[data-sid="${CSS.escape(id)}"]`);
+  if (!s || !el) return;
+  if (!(state.bsel?.type === 'shape' && state.bsel.id === id)) { state.bsel = { type: 'shape', id }; renderCanvas(); return startEdit(id, keepCaret); }
+  const tx = el.querySelector('.sh-tx');
+  editingShape = id;
+  el.classList.add('editing');
+  try { tx.contentEditable = 'plaintext-only'; } catch { tx.contentEditable = 'true'; }
+  if (tx.contentEditable !== 'plaintext-only') tx.contentEditable = 'true';
+  tx.focus({ preventScroll: true });
+  const r = document.createRange();
+  r.selectNodeContents(tx);
+  if (keepCaret || s.text) r.collapse(false);
+  const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+  fitShapeText(s, el);
+}
+function fitShapeText(s, el) {
+  const tx = el.querySelector('.sh-tx');
+  const need = tx.scrollHeight + (s.t === 'text' ? 8 : s.t === 'diamond' ? s.h * 0.5 : s.t === 'ellipse' ? s.h * 0.3 : 24);
+  if (need > s.h) { el.style.height = `${Math.ceil(need)}px`; } else if (s.t === 'text') el.style.height = `${Math.max(SH_DEF.text.h, Math.ceil(need))}px`;
+  drawLinks();
+}
+async function finishEdit() {
+  const id = editingShape;
+  if (!id) return;
+  editingShape = null;
+  const s = shapeById(id), el = $(`.shape[data-sid="${CSS.escape(id)}"]`);
+  if (!s || !el) return;
+  const tx = el.querySelector('.sh-tx');
+  tx.contentEditable = 'false';
+  el.classList.remove('editing');
+  s.text = tx.innerText.replace(/\n$/, '').replace(/^\n+|\n+$/g, '');
+  s.h = Math.max(s.t === 'text' ? 24 : 30, parseFloat(el.style.height) || s.h);
+  const b = boardOf();
+  if (s.t === 'text' && !s.text.trim()) { b.shapes = b.shapes.filter((x) => x !== s); b.links = b.links.filter((l) => l.from.id !== id && l.to.id !== id); state.bsel = null; }
+  await saveBoard();
+}
+document.addEventListener('input', (e) => {
+  if (!editingShape || !e.target.matches?.('.sh-tx')) return;
+  const s = shapeById(editingShape), el = e.target.closest('.shape');
+  if (s && el) fitShapeText(s, el);
+});
+document.addEventListener('focusout', (e) => { if (editingShape && !boardRendering && e.target.matches?.('.sh-tx') && e.target.isConnected) finishEdit(); });
+
+// ---- 连接点（悬停形状或卡片时出现，按住拖出箭头） ----
+function showDots(el) {
+  const dots = $('#connDots');
+  if (!dots) return;
+  const ref = el.dataset.sid || el.dataset.id;
+  const b = boxOf({ id: ref });
+  if (!b) return hideDots();
+  hoverRef = ref;
+  Object.assign(dots.style, { left: `${b.x}px`, top: `${b.y}px`, width: `${b.w}px`, height: `${b.h}px` });
+  dots.classList.toggle('diamond', b.t === 'diamond');
+  dots.hidden = false;
+}
+function hideDots() { const d = $('#connDots'); if (d) d.hidden = true; hoverRef = null; }
+vp.addEventListener('pointerover', (e) => {
+  if (bd || cardDrag || pan || editingShape || e.pointerType === 'touch' || !['select', 'arrow'].includes(state.tool)) return;
+  if (e.target.closest('.conn-dots')) return;
+  const el = e.target.closest('.shape, .card.on-canvas');
+  if (el) showDots(el); else hideDots();
+});
+vp.addEventListener('pointerleave', () => { if (!bd) hideDots(); });
+
+// ---- 按下 / 拖动 / 松开 ----
+function boardDown(e) {
+  if (!isCanvas(state.view)) return false;
+  if (e.target.closest('.sh-tx[contenteditable="true"], .sh-tx[contenteditable="plaintext-only"]')) return true;
+  if (editingShape) finishEdit();
+  const p = toWorld(e.clientX, e.clientY);
+  const handle = e.target.closest('[data-handle]'), dot = e.target.closest('[data-dot]'), lend = e.target.closest('[data-lend]');
+  const shapeEl = e.target.closest('.shape'), linkEl = e.target.closest('[data-lid]'), cardEl = e.target.closest('.card');
+  const capture = () => { try { vp.setPointerCapture(e.pointerId); } catch {} };
+  const base = { pid: e.pointerId, sx: e.clientX, sy: e.clientY, moved: false };
+  if (handle && shapeEl) {
+    const s = shapeById(shapeEl.dataset.sid);
+    bd = { ...base, mode: 'resize', s, el: shapeEl, k: handle.dataset.handle, o: { x: s.x, y: s.y, w: s.w, h: s.h } };
+    capture(); return true;
+  }
+  if (lend) {
+    const l = linkById(lend.closest('[data-lid]').dataset.lid);
+    bd = { ...base, mode: 'link', lid: l.id, end: lend.dataset.lend, from: lend.dataset.lend === 'from' ? l.to : l.from, cur: p };
+    capture(); hideDots(); return true;
+  }
+  if (dot || (state.tool === 'arrow' && !e.target.closest('.more, .export-handle, .sel'))) {
+    const owner = dot ? hoverRef : (shapeEl?.dataset.sid || (cardEl && cardEl.classList.contains('on-canvas') ? cardEl.dataset.id : null));
+    bd = { ...base, mode: 'link', from: owner ? { id: owner } : { x: Math.round(p.x), y: Math.round(p.y) }, cur: p };
+    capture(); hideDots(); e.preventDefault(); return true;
+  }
+  if (SH_DEF[state.tool]) {
+    bd = { ...base, mode: 'create', t: state.tool, p0: p };
+    capture(); return true;
+  }
+  if (linkEl) {
+    selectBoard({ type: 'link', id: linkEl.dataset.lid });
+    return true;
+  }
+  if (shapeEl) {
+    const s = shapeById(shapeEl.dataset.sid);
+    const was = state.bsel?.type === 'shape' && state.bsel.id === s.id;
+    if (!was) selectBoard({ type: 'shape', id: s.id });
+    bd = { ...base, mode: 'move', s, o: { x: s.x, y: s.y }, was };
+    capture(); return true;
+  }
+  if (state.bsel) {
+    // 点在卡片上：只去掉形状的选中样式，不整体重绘（后面还要拖这张卡片）
+    if (cardEl) { state.bsel = null; $$('#world .shape.picked').forEach((x) => { x.classList.remove('picked'); x.querySelectorAll('.sh-h').forEach((h) => h.remove()); }); drawLinks(); positionFmt(); }
+    else selectBoard(null);
+  }
+  return false;
+}
+function boardMove(e) {
+  if (!bd || e.pointerId !== bd.pid) return false;
+  const z = cam().z, dx = (e.clientX - bd.sx) / z, dy = (e.clientY - bd.sy) / z;
+  if (!bd.moved && Math.hypot(e.clientX - bd.sx, e.clientY - bd.sy) < 4) return true;
+  if (!bd.moved) { bd.moved = true; hideDots(); $('#fmtBar').hidden = true; document.body.classList.add('board-dragging'); }
+  if (bd.mode === 'move') {
+    const el = $(`.shape[data-sid="${CSS.escape(bd.s.id)}"]`);
+    bd.s.x = Math.round(bd.o.x + dx); bd.s.y = Math.round(bd.o.y + dy);
+    if (el) { el.style.left = `${bd.s.x}px`; el.style.top = `${bd.s.y}px`; }
+    drawLinks();
+  } else if (bd.mode === 'resize') {
+    const { o, k, s } = bd, min = 30;
+    let { x, y, w, h } = o;
+    if (k.includes('e')) w = Math.max(min, o.w + dx);
+    if (k.includes('s')) h = Math.max(min, o.h + dy);
+    if (k.includes('w')) { w = Math.max(min, o.w - dx); x = o.x + o.w - w; }
+    if (k.includes('n')) { h = Math.max(min, o.h - dy); y = o.y + o.h - h; }
+    if (e.shiftKey || s.t === 'ellipse' && o.w === o.h && !e.altKey) { const m = Math.max(w, h); if (k.includes('w')) x = o.x + o.w - m; if (k.includes('n')) y = o.y + o.h - m; w = h = m; }
+    Object.assign(s, { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) });
+    Object.assign(bd.el.style, { left: `${s.x}px`, top: `${s.y}px`, width: `${s.w}px`, height: `${s.h}px` });
+    drawLinks();
+  } else if (bd.mode === 'create') {
+    const p = toWorld(e.clientX, e.clientY);
+    const x = Math.min(p.x, bd.p0.x), y = Math.min(p.y, bd.p0.y), w = Math.abs(p.x - bd.p0.x), h = Math.abs(p.y - bd.p0.y);
+    if (!bd.ghost) { bd.ghost = document.createElement('div'); bd.ghost.className = `shape-ghost st-${bd.t}`; $('#world').appendChild(bd.ghost); }
+    Object.assign(bd.ghost.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
+    bd.box = { x, y, w, h };
+  } else if (bd.mode === 'link') {
+    bd.cur = toWorld(e.clientX, e.clientY);
+    const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest('.shape, .card.on-canvas');
+    const id = hit && (hit.dataset.sid || hit.dataset.id);
+    const fromId = bd.from.id;
+    $$('.link-target').forEach((x) => x.classList.remove('link-target'));
+    if (id && id !== fromId) { hit.classList.add('link-target'); bd.target = { id }; } else bd.target = null;
+    if (bd.lid) bd.cur = bd.target || { x: bd.cur.x, y: bd.cur.y };
+    drawLinks();
+  }
+  return true;
+}
+async function boardUp(e) {
+  if (!bd || e.pointerId !== bd.pid) return false;
+  const d = bd; bd = null;
+  document.body.classList.remove('board-dragging');
+  $$('.link-target').forEach((x) => x.classList.remove('link-target'));
+  d.ghost?.remove();
+  if (e.type === 'pointercancel') { renderCanvas(); return true; }
+  if (d.moved) { suppressClick = true; setTimeout(() => { suppressClick = false; }, 0); }
+  const b = boardOf();
+  if (d.mode === 'move' || d.mode === 'resize') {
+    if (d.moved) await saveBoard();
+    else if (d.mode === 'move' && d.was) startEdit(d.s.id); // 再点一下已选中的形状 → 编辑文字
+    else positionFmt();
+    return true;
+  }
+  if (d.mode === 'create') {
+    const box = d.moved && d.box && d.box.w > 12 && d.box.h > 12 ? d.box : null;
+    const def = SH_DEF[d.t];
+    if (box) await createShape(d.t, box.x, box.y, Math.max(40, box.w), Math.max(d.t === 'text' ? def.h : 40, box.h));
+    else await createShape(d.t, d.p0.x - def.w / 2, d.p0.y - def.h / 2);
+    return true;
+  }
+  if (d.mode === 'link') {
+    const end = d.target || { x: Math.round(d.cur.x), y: Math.round(d.cur.y) };
+    if (d.lid) {
+      const l = linkById(d.lid);
+      if (l && d.moved) { l[d.end] = d.target || { x: Math.round(d.cur.x), y: Math.round(d.cur.y) }; await saveBoard(); }
+      else drawLinks();
+      return true;
+    }
+    if (!d.moved || (!d.target && !d.from.id && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 30)) { drawLinks(); return true; }
+    const l = { id: uid(), from: d.from, to: end, end: 'arrow' };
+    b.links.push(l);
+    state.bsel = { type: 'link', id: l.id };
+    setTool('select');
+    await saveBoard();
+    return true;
+  }
+  return true;
+}
+
+// ---- 删除 / 复制 / 层级 ----
+async function deleteBoardSel() {
+  const b = boardOf(), sel = state.bsel;
+  if (!b || !sel) return;
+  const before = { shapes: [...b.shapes], links: [...b.links] };
+  if (sel.type === 'shape') { b.shapes = b.shapes.filter((s) => s.id !== sel.id); b.links = b.links.filter((l) => l.from.id !== sel.id && l.to.id !== sel.id); }
+  else b.links = b.links.filter((l) => l.id !== sel.id);
+  state.bsel = null;
+  await saveBoard();
+  toast(sel.type === 'shape' ? '已删除' : '已删除连线', { action: '撤销', onAction: async () => { Object.assign(b, before); await saveBoard(); } });
+}
+async function duplicateShape(id) {
+  const b = boardOf(), s = shapeById(id);
+  if (!s) return;
+  const c = { ...s, id: uid(), x: s.x + 24, y: s.y + 24, z: topOrder(state.view) };
+  b.shapes.push(c);
+  state.bsel = { type: 'shape', id: c.id };
+  await saveBoard();
+}
+async function editLinkLabel(id) {
+  const l = linkById(id);
+  if (!l) return;
+  state.bsel = { type: 'link', id };
+  const t = await prompt({ title: '连线上的文字', value: l.label || '', placeholder: '例如：然后、依赖、反馈', ok: '保存', optional: true });
+  if (t === null || t === undefined) return renderCanvas();
+  if (t) l.label = t; else delete l.label;
+  await saveBoard();
+}
+
+// ---- 浮动格式条 ----
+const FI = {
+  minus: '<path d="M6 12h12"/>', plus: '<path d="M12 6v12M6 12h12"/>', bold: '<path d="M7 5h6a3.5 3.5 0 0 1 0 7H7zM7 12h7a3.5 3.5 0 0 1 0 7H7z"/>',
+  left: '<path d="M4 6h16M4 10h10M4 14h16M4 18h10"/>', center: '<path d="M4 6h16M7 10h10M4 14h16M7 18h10"/>',
+  front: '<rect x="8" y="8" width="12" height="12" rx="1.5"/><path d="M4 16V5a1 1 0 0 1 1-1h11"/>', copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
+  trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>', label: '<path d="M5 6V4h14v2M12 4v16M9 20h6"/>',
+  dash: '<path d="M3 12h4M10 12h4M17 12h4"/>', curve: '<path d="M4 18C10 18 14 6 20 6"/>', swap: '<path d="M4 8h14l-3-3M20 16H6l3 3"/>',
+};
+const fbtn = (act, icon, title, on) => `<button type="button" class="icon-btn${on ? ' on' : ''}" data-fmt="${act}" title="${title}" aria-label="${title}"${on != null ? ` aria-pressed="${!!on}"` : ''}><svg viewBox="0 0 24 24">${FI[icon]}</svg></button>`;
+function positionFmt() {
+  const bar = $('#fmtBar');
+  if (!bar) return;
+  const sel = state.bsel;
+  const item = sel && (sel.type === 'shape' ? shapeById(sel.id) : linkById(sel.id));
+  if (!item || !isCanvas(state.view) || bd?.moved) { bar.hidden = true; delete bar.dataset.for; return; }
+  const key = `${sel.type}:${sel.id}:${JSON.stringify(item)}`;
+  if (bar.dataset.for !== key) {
+    bar.dataset.for = key;
+    if (sel.type === 'shape') {
+      const s = item;
+      bar.innerHTML = `<select data-fmt="shape" aria-label="形状" title="形状">${Object.entries(SHAPE_NAMES).map(([k, n]) => `<option value="${k}" ${k === s.t ? 'selected' : ''}>${n}</option>`).join('')}</select>
+        <span class="sep"></span>
+        <div class="fb-sw">${SH_COLORS.map((c, k) => `<button type="button" class="sw${s.fill === k ? ' on' : ''}" data-fmt="fill" data-v="${k}" style="--c:${c.bg};--d:${c.bd}" title="${c.n}" aria-label="颜色：${c.n}"></button>`).join('')}
+          <button type="button" class="sw none${shColor(s) ? '' : ' on'}" data-fmt="fill" data-v="none" title="无填充" aria-label="无填充"></button></div>
+        <span class="sep"></span>
+        ${fbtn('fs-', 'minus', '缩小字号')}
+        <select data-fmt="fs" aria-label="字号" title="字号">${[...new Set([...FONT_SIZES, s.fs])].sort((a, b) => a - b).map((n) => `<option value="${n}" ${n === s.fs ? 'selected' : ''}>${n}</option>`).join('')}</select>
+        ${fbtn('fs+', 'plus', '放大字号')}
+        ${fbtn('bold', 'bold', '加粗', !!s.b)}${fbtn('align', s.al === 'left' ? 'left' : 'center', s.al === 'left' ? '左对齐（点一下居中）' : '居中（点一下左对齐）')}
+        <span class="sep"></span>
+        ${fbtn('front', 'front', '置于顶层')}${fbtn('dup', 'copy', '复制（Ctrl+D）')}${fbtn('del', 'trash', '删除（Delete）')}`;
+    } else {
+      const l = item;
+      bar.innerHTML = `<select data-fmt="end" aria-label="箭头" title="箭头"><option value="arrow" ${!l.end || l.end === 'arrow' ? 'selected' : ''}>单向箭头 →</option><option value="both" ${l.end === 'both' ? 'selected' : ''}>双向箭头 ↔</option><option value="none" ${l.end === 'none' ? 'selected' : ''}>无箭头 —</option></select>
+        ${fbtn('swap', 'swap', '反转方向')}${fbtn('dash', 'dash', '虚线', !!l.dash)}${fbtn('curve', 'curve', '曲线', !!l.curve)}
+        <span class="sep"></span>
+        <div class="fb-sw">${LINK_COLORS.map((c, k) => `<button type="button" class="sw line${(l.color || null) === c ? ' on' : ''}" data-fmt="lcolor" data-v="${k}" style="--c:${c || 'var(--text-2)'}" aria-label="线条颜色"></button>`).join('')}</div>
+        <span class="sep"></span>
+        ${fbtn('label', 'label', '线上文字（双击连线也可以）')}${fbtn('del', 'trash', '删除（Delete）')}`;
+    }
+  }
+  // 位置：选中对象上方，放不下就放下方
+  const c = cam(), vr = $('#viewport').getBoundingClientRect(), cv = $('#canvasView').getBoundingClientRect();
+  let bx, by, bh;
+  if (sel.type === 'shape') { bx = item.x + item.w / 2; by = item.y; bh = item.h; }
+  else { const g = linkGeom(item); if (!g) { bar.hidden = true; return; } bx = g.mid.x; by = g.mid.y - 10; bh = 20; }
+  bar.hidden = false;
+  const sx = vr.left - cv.left + c.x + bx * c.z, top = vr.top - cv.top + c.y + by * c.z - bar.offsetHeight - 14;
+  const below = vr.top - cv.top + c.y + (by + bh) * c.z + 14;
+  bar.style.left = `${Math.min(cv.width - bar.offsetWidth / 2 - 8, Math.max(bar.offsetWidth / 2 + 8, sx))}px`;
+  bar.style.top = `${top < 8 ? Math.min(below, cv.height - bar.offsetHeight - 70) : top}px`;
+}
+async function applyFmt(act, v) {
+  const sel = state.bsel;
+  if (!sel) return;
+  if (act === 'del') return deleteBoardSel();
+  if (sel.type === 'shape') {
+    const s = shapeById(sel.id);
+    if (!s) return;
+    if (act === 'dup') return duplicateShape(s.id);
+    if (act === 'shape') {
+      const was = s.t; s.t = v;
+      if (v === 'text' && was !== 'text') { s.fill = 'none'; s.al = 'left'; }
+      if (was === 'text' && v !== 'text' && !shColor(s)) s.fill = SH_DEF[v].fill;
+      if (v === 'ellipse' || v === 'sticky') { const m = Math.max(s.w, s.h); if (Math.abs(s.w - s.h) < m * 0.5) s.w = s.h = m; }
+    }
+    if (act === 'fill') s.fill = v === 'none' ? 'none' : +v;
+    if (act === 'fs') s.fs = +v;
+    if (act === 'fs-' || act === 'fs+') {
+      const cur = s.fs || 16, up = act === 'fs+';
+      s.fs = up ? FONT_SIZES.find((n) => n > cur) || cur : [...FONT_SIZES].reverse().find((n) => n < cur) || cur;
+    }
+    if (act === 'bold') s.b = !s.b;
+    if (act === 'align') s.al = s.al === 'left' ? 'center' : 'left';
+    if (act === 'front') s.z = topOrder(state.view);
+    if (['fs', 'fs-', 'fs+', 'bold', 'shape'].includes(act)) {
+      // 字变大后放不下：自动长高
+      renderCanvas();
+      const el = $(`.shape[data-sid="${CSS.escape(s.id)}"]`), tx = el?.querySelector('.sh-tx');
+      if (tx) { const pad = s.t === 'text' ? 8 : s.t === 'diamond' ? s.h * 0.5 : s.t === 'ellipse' ? s.h * 0.3 : 24; s.h = Math.max(s.t === 'text' ? 24 : s.h, Math.ceil(tx.scrollHeight + pad)); }
+    }
+  } else {
+    const l = linkById(sel.id);
+    if (!l) return;
+    if (act === 'end') l.end = v;
+    if (act === 'swap') [l.from, l.to] = [l.to, l.from];
+    if (act === 'dash') l.dash = !l.dash;
+    if (act === 'curve') l.curve = !l.curve;
+    if (act === 'lcolor') { const c = LINK_COLORS[+v]; if (c) l.color = c; else delete l.color; }
+    if (act === 'label') return editLinkLabel(l.id);
+  }
+  await saveBoard();
+}
+$('#fmtBar').addEventListener('pointerdown', (e) => e.stopPropagation());
+$('#fmtBar').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-fmt]');
+  if (b) applyFmt(b.dataset.fmt, b.dataset.v);
+});
+$('#fmtBar').addEventListener('change', (e) => {
+  const s = e.target.closest('select[data-fmt]');
+  if (s) applyFmt(s.dataset.fmt, s.value);
+});
+
+// ---- 键盘 ----
+document.addEventListener('keydown', (e) => {
+  if (!isCanvas(state.view) || $('#modal').open || $('#viewer').open || ring) return;
+  if (editingShape) {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); $(`.shape[data-sid="${CSS.escape(editingShape)}"] .sh-tx`)?.blur(); }
+    return;
+  }
+  if (isTypingTarget(e.target) || e.altKey) return;
+  const k = e.key.toLowerCase(), sel = state.bsel;
+  if (!e.ctrlKey && !e.metaKey && TOOL_KEYS[k] && !e.target.closest?.('.card')) { e.preventDefault(); setTool(TOOL_KEYS[k]); return; }
+  if (e.key === 'Escape') {
+    if (state.tool !== 'select') { setTool('select'); e.stopPropagation(); }
+    else if (sel) { selectBoard(null); e.stopPropagation(); }
+    return;
+  }
+  if (!sel) return;
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteBoardSel(); return; }
+  if (sel.type !== 'shape') return;
+  const s = shapeById(sel.id);
+  if (!s) return;
+  if ((e.ctrlKey || e.metaKey) && k === 'd') { e.preventDefault(); duplicateShape(s.id); return; }
+  if (e.key === 'Enter') { e.preventDefault(); startEdit(s.id); return; }
+  if (e.key.startsWith('Arrow')) {
+    e.preventDefault();
+    const st = e.shiftKey ? 40 : 10;
+    s.x += e.key === 'ArrowLeft' ? -st : e.key === 'ArrowRight' ? st : 0;
+    s.y += e.key === 'ArrowUp' ? -st : e.key === 'ArrowDown' ? st : 0;
+    const el = $(`.shape[data-sid="${CSS.escape(s.id)}"]`);
+    if (el) { el.style.left = `${s.x}px`; el.style.top = `${s.y}px`; }
+    drawLinks(); positionFmt();
+    clearTimeout(s._t);
+    s._t = setTimeout(() => { delete s._t; saveArea(boardOf()); }, 400);
+  }
+}, true);
 
 // ---------- 添加文件 ----------
 async function addFiles(files, areaId, index = null, pos = null, { quiet = false, extra = {} } = {}) {
