@@ -1,5 +1,5 @@
 import * as db from './db.js?v=6';
-import * as pv from './preview.js?v=4';
+import * as pv from './preview.js?v=5';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -312,7 +312,7 @@ function linkBadge(c) {
 }
 const IS_TOUCH = matchMedia('(hover: none) and (pointer: coarse)').matches;
 const CHECK_SVG = `<svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>`;
-const selBtn = (c) => `<button class="sel" data-action="select" aria-pressed="${state.selected.has(c.id)}" aria-label="选择 ${esc(c.name || '便签')}" title="选择（Ctrl / Shift + 点击也可多选）">${CHECK_SVG}</button>`;
+const selBtn = (c) => `<button class="sel" data-action="select" aria-pressed="${state.selected.has(c.id)}" aria-label="选择 ${esc(c.name || '便签')}" title="选择（Shift + 点击可连续选择）">${CHECK_SVG}</button>`;
 
 const thumbStateOf = (c) => c.kind !== 'file' ? 'none' : (c.thumb || (pv.likelyThumb(c) ? 'pending' : 'none'));
 const PLAY = `<span class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/></svg></span>`;
@@ -1684,9 +1684,9 @@ vp.addEventListener('pointerdown', (e) => {
   if (mouse && e.button !== 0 && e.button !== 1) return;
   const forcePan = spaceDown || (mouse && e.button === 1); // 按住空格或鼠标中键：任何工具下都直接平移
   if (forcePan) e.preventDefault();
+  if (!forcePan && (e.target.closest('.card .sel') || (e.shiftKey || e.ctrlKey || e.metaKey) && e.target.closest('.card'))) return;
   if (!forcePan && pointers.size === 0 && boardDown(e)) return; // 白板：形状、连线、工具
   const cardEl = forcePan ? null : e.target.closest('.card');
-  if (cardEl && (e.ctrlKey || e.metaKey)) return; // 交给转换圆环 / 多选
   if (cardEl && !e.target.closest('.more, .export-handle')) {
     const card = findCard(cardEl.dataset.id);
     cardDrag = { el: cardEl, card, sx: e.clientX, sy: e.clientY, x: card.x || 0, y: card.y || 0, moved: false, id: e.pointerId };
@@ -2867,7 +2867,9 @@ async function preview(id) {
 // 转换一个文件，结果放在原文件旁边（画布上放右侧），返回新卡片
 async function convertOne(card, convId, say = () => {}) {
   const files = await pv.convert(card, await db.getBlob(card.id), convId, say);
-  return placeBeside(card, files);
+  const added = await placeBeside(card, files);
+  if (!added.length) throw new Error('转换结果保存失败');
+  return added;
 }
 async function placeBeside(card, files) {
   const areaId = card.columnId === TRASH ? defaultTarget() : card.columnId;
@@ -2876,6 +2878,11 @@ async function placeBeside(card, files) {
   const pos = canvas ? { x: (card.x || 0) + CARD_W + 60, y: card.y || 0 } : null;
   return addFiles(files, areaId, idx, pos, { quiet: true, extra: { sourceId: card.sourceId || card.id } });
 }
+const confirmPdfCompression = () => confirmBox({
+  title: '压缩 PDF？',
+  body: '会先尝试无损压缩。若效果有限，会尝试将页面转为图片，压缩副本中的文字将无法选中或搜索。原 PDF 会保留。',
+  ok: '开始压缩',
+});
 async function runConvert(btn) {
   if (!(await ensureAccess())) return;
   const card = findCard(btn.dataset.id);
@@ -2885,6 +2892,7 @@ async function runConvert(btn) {
   btn.classList.add('busy');
   say('正在转换…');
   try {
+    if (btn.dataset.conv === 'pdf-compress' && !(await confirmPdfCompression())) { say(''); return; }
     const added = await convertOne(card, btn.dataset.conv, say);
     say(`✓ 已生成 ${added.length} 个文件，放在「${areaName(added[0]?.columnId)}」原文件旁边`);
     toast(`转换完成：${added.map((c) => c.name).slice(0, 2).join('、')}${added.length > 2 ? ` 等 ${added.length} 个` : ''}`,
@@ -3286,7 +3294,7 @@ function cancelPress() {
 }
 document.addEventListener('pointerdown', (e) => {
   pressFired = false;
-  if (e.button !== 0 || e.ctrlKey || e.metaKey) return; // Ctrl/⌘ + 拖动是转换圆环
+  if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
   const el = e.target.closest?.('.card');
   if (!el || e.target.closest('.more, .export-handle, .sel, .suggest-badge')) return;
   const card = findCard(el.dataset.id);
@@ -3334,9 +3342,12 @@ document.addEventListener('dragstart', (e) => { if (pressFired) e.preventDefault
 // 正面 = 格式转换，背面 = 常用操作；Tab / 滚轮翻面，Esc 取消。卡片菜单「转换圆环…」可点选使用并调整大小。
 const RING_SHORT = {
   'img-png': ['PNG'], 'img-jpg': ['JPG'], 'img-webp': ['WEBP'], 'img-pdf': ['PDF'], 'img-small': ['压缩', 'JPG · 2048px'],
-  'pdf-png': ['PNG', '每页一张'], 'pdf-txt': ['TXT', '提取文字'], 'docx-html': ['HTML', '网页'], 'docx-txt': ['TXT', '纯文本'],
+  'pdf-png': ['PNG', '每页一张'], 'pdf-jpg': ['JPG', '每页一张'], 'pdf-txt': ['TXT', '提取文字'],
+  'pdf-md': ['MD', '提取文字'], 'pdf-compress': ['压缩 PDF'], 'pdf-split': ['拆分 PDF', '每页一份'],
+  'docx-html': ['HTML', '网页'], 'docx-txt': ['TXT', '纯文本'], 'docx-md': ['MD', 'Markdown'], 'text-md': ['MD', 'Markdown'],
   'sheet-xlsx': ['XLSX', 'Excel'], 'sheet-csv': ['CSV'], 'sheet-json': ['JSON'], 'md-html': ['HTML', '网页'],
-  'audio-wav': ['WAV'], 'video-png': ['封面', 'PNG'], 'video-wav': ['音频', 'WAV'], 'thumb-png': ['预览图', 'PNG'],
+  'audio-wav': ['WAV'], 'video-png': ['封面', 'PNG'], 'video-jpg': ['封面', 'JPG'], 'video-wav': ['音频', 'WAV'],
+  'thumb-png': ['预览图', 'PNG'], 'thumb-jpg': ['预览图', 'JPG'],
 };
 const FAM_LABEL = { image: '图片', video: '视频', audio: '音频', pdf: 'PDF', affinity: 'Affinity', docx: 'Word', sheet: '表格', md: 'Markdown', zipdoc: '文档', text: '文本', other: '文件' };
 const RICON = {
@@ -3362,6 +3373,8 @@ function ringTargets(card) {
   }
   return [card];
 }
+const isPdfFile = (c) => c.kind === 'file' && (extOf(c.name) === 'pdf' || c.type === 'application/pdf');
+
 function ringFaces(card, list) {
   const front = [];
   if (card.kind === 'note') front.push({ id: 'note-txt', label: 'TXT', sub: '纯文本' }, { id: 'note-md', label: 'MD', sub: 'Markdown' });
@@ -3373,6 +3386,8 @@ function ringFaces(card, list) {
     }
     const imgs = list.filter((x) => x.kind === 'file' && pv.family(x) === 'image' && extOf(x.name) !== 'svg');
     if (imgs.length > 1 && imgs.includes(card)) front.push({ id: 'merge-pdf', label: '合并 PDF', sub: `${imgs.length} 张合成一份`, icon: 'merge' });
+    const pdfs = list.filter(isPdfFile);
+    if (pdfs.length > 1 && pdfs.includes(card)) front.push({ id: 'merge-pdf-files', label: '合并 PDF', sub: `${pdfs.length} 份合为一份`, icon: 'merge' });
   }
   const many = list.length > 1, files = list.filter((c) => c.kind === 'file');
   const zone = zones().find((z) => z.id !== card.columnId);
@@ -3402,7 +3417,8 @@ function openRing(card, x, y, { sticky = false } = {}) {
     <div class="cr-hint">${sticky ? '点一格执行 · Tab / 滚轮翻面 · Esc 关闭' : '松手执行 · 滚轮 / Tab 翻面 · 中心或 Esc 取消'}</div>
     ${sticky ? `<label class="cr-size"><span>圆环大小</span><input type="range" min="70" max="140" step="5" value="${Math.round(ringScale() * 100)}"><output>${Math.round(ringScale() * 100)}%</output></label>` : ''}`;
   document.body.appendChild(el);
-  ring = { el, card, list, faces, face: faces.front.length ? 'front' : 'back', hover: -1, sticky, t: typeOf(card), x, y };
+  const t = typeOf(card);
+  ring = { el, card, list, faces, face: faces.front.length ? 'front' : 'back', hover: -1, sticky, t, x, y };
   layoutRing();
   if (!sticky) {
     const g = document.createElement('div');
@@ -3499,6 +3515,7 @@ function closeRing(chosen) {
   ghost?.remove();
   if (reduceMotion.matches) return el.remove();
   el.style.pointerEvents = 'none';
+  el.setAttribute('aria-hidden', 'true');
   el.classList.add('closing');
   const dur = chosen ? 220 : 140;
   el.animate([{ opacity: 1, transform: 'translate(-50%,-50%) scale(1)' }, { opacity: 0, transform: `translate(-50%,-50%) scale(${chosen ? 1.06 : 0.9})` }],
@@ -3543,7 +3560,7 @@ async function ringRun(it, card, list) {
     }
     case 'a-trash': {
       for (const id of ids) await trashCard(id);
-      state.selected.clear(); syncSelectionUI();
+      clearSelection();
       return;
     }
     case 'note-txt': case 'note-md': {
@@ -3552,23 +3569,35 @@ async function ringRun(it, card, list) {
       const added = await placeBeside(card, [new File([text], `${(card.name || '便签').replace(/[\\/:*?"<>|]/g, ' ').slice(0, 60)}.${md ? 'md' : 'txt'}`, { type: md ? 'text/markdown' : 'text/plain;charset=utf-8' })]);
       return toast(`已生成「${added[0]?.name}」`);
     }
-    case 'merge-pdf': {
+    case 'merge-pdf': case 'merge-pdf-files': {
       if (!(await ensureAccess())) return;
-      const imgs = files.filter((c) => pv.family(c) === 'image' && extOf(c.name) !== 'svg');
+      const pdf = it.id === 'merge-pdf-files';
+      const inputs = files.filter(pdf ? isPdfFile : (c) => pv.family(c) === 'image' && extOf(c.name) !== 'svg');
+      if (pdf) {
+        const order = new Map($$('.card[data-id]').map((el, i) => [el.dataset.id, i]));
+        inputs.sort((a, b) => (order.get(a.id) ?? Infinity) - (order.get(b.id) ?? Infinity));
+      }
       const t = toast('正在合并 PDF…', { sticky: true });
       try {
-        const items = [];
-        for (const c of imgs) items.push({ blob: await db.getBlob(c.id) });
-        const f = await pv.mergeImagesPdf(items, `${card.name.replace(/\.[^.]+$/, '')} 等${imgs.length}张`, (s) => t.set(s));
-        const added = await placeBeside(card, [f]);
-        t.close();
-        return toast(`已合并为「${added[0]?.name}」`, { action: '下载', onAction: () => download(added[0].id) });
-      } catch (e) { t.close(); throw e; }
+        const blobs = [];
+        for (const c of inputs) {
+          const blob = await db.getBlob(c.id);
+          if (!blob) throw new Error(`找不到「${c.name}」的文件内容`);
+          blobs.push(blob);
+        }
+        const name = `${inputs[0].name.replace(/\.[^.]+$/, '')}-合并`;
+        const f = pdf ? await pv.mergePdfs(blobs, name, (s) => t.set(s))
+          : await pv.mergeImagesPdf(blobs.map((blob) => ({ blob })), name, (s) => t.set(s));
+        const [added] = await placeBeside(card, [f]);
+        if (!added) throw new Error('合并结果保存失败');
+        return toast(`已合并为「${added.name}」`, { action: '下载', onAction: () => download(added.id) });
+      } finally { t.close(); }
     }
   }
   // 格式转换：对所有支持这项转换的已选文件执行
   if (!(await ensureAccess())) return;
   const todo = files.filter((c) => pv.conversionsFor(c, c.thumb === 'ok').some((x) => x.id === it.id));
+  if (it.id === 'pdf-compress' && !(await confirmPdfCompression())) return;
   const t = toast(`正在转换为 ${it.label}…`, { sticky: true });
   const added = []; let fail = 0, err = null;
   for (let k = 0; k < todo.length; k++) {
@@ -3789,6 +3818,7 @@ async function playPackAnimation(cards, title) {
 }
 
 // ---------- 多选 ----------
+let selectionAnchor = null;
 function syncSelectionUI() {
   document.body.classList.toggle('selecting', state.selected.size > 0);
   $$('.card[data-id]').forEach((el) => {
@@ -3798,12 +3828,27 @@ function syncSelectionUI() {
   });
   renderSelBar();
 }
-function toggleSelect(id) {
+function toggleSelect(id, rangeList) {
   if (!findCard(id)) return;
-  state.selected.has(id) ? state.selected.delete(id) : state.selected.add(id);
+  if (rangeList && state.selected.has(selectionAnchor)) {
+    const ids = $$('.card[data-id]:not(.dim)', rangeList).map((el) => el.dataset.id);
+    const start = ids.indexOf(selectionAnchor), end = ids.indexOf(id);
+    if (start >= 0 && end >= 0) {
+      ids.slice(Math.min(start, end), Math.max(start, end) + 1).forEach((cardId) => state.selected.add(cardId));
+      return syncSelectionUI();
+    }
+  }
+  if (state.selected.has(id)) {
+    state.selected.delete(id);
+    if (selectionAnchor === id) selectionAnchor = null;
+  } else {
+    state.selected.add(id);
+    selectionAnchor = id;
+  }
   syncSelectionUI();
 }
 function clearSelection() {
+  selectionAnchor = null;
   if (!state.selected.size) return;
   state.selected.clear();
   syncSelectionUI();
@@ -4113,13 +4158,14 @@ document.addEventListener('click', async (e) => {
   const cardEl = e.target.closest('.card');
   const colEl = e.target.closest('.column');
   const col = colEl && area(colEl.dataset.colId);
-  // 多选：Ctrl/⌘/Shift + 点击，或已在多选状态时直接点击 → 勾选 / 取消
-  if (cardEl && !btn && (e.ctrlKey || e.metaKey || e.shiftKey || state.selected.size)) { toggleSelect(cardEl.dataset.id); return; }
+  // Shift 点击卡片或勾选按钮时，范围以当前列表中的卡片顺序为准。
+  const rangeList = e.shiftKey ? cardEl?.closest('.list, #world') : null;
+  if (cardEl && !btn && (e.ctrlKey || e.metaKey || e.shiftKey || state.selected.size)) return toggleSelect(cardEl.dataset.id, rangeList);
   if (!btn) { if (cardEl) preview(cardEl.dataset.id); return; }
   switch (btn.dataset.action) {
     case 'accept-suggest': return acceptSuggestion(btn.dataset.id);
     case 'assoc-panel': return openAssocPanel();
-    case 'select': return toggleSelect(cardEl.dataset.id);
+    case 'select': return toggleSelect(cardEl.dataset.id, rangeList);
     case 'sel-done': return completeCards([...state.selected]);
     case 'sel-link': return linkSelected();
     case 'sel-move': return menuAnchor === btn ? closeMenu() : moveMenu(btn);

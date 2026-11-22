@@ -2,6 +2,8 @@
 const CDN = 'https://cdnjs.cloudflare.com/ajax/libs/';
 const LIBS = {
   pdf: { src: `${CDN}pdf.js/3.11.174/pdf.min.js`, global: 'pdfjsLib', init: (l) => { l.GlobalWorkerOptions.workerSrc = `${CDN}pdf.js/3.11.174/pdf.worker.min.js`; } },
+  pdfLib: { src: `${CDN}pdf-lib/1.17.1/pdf-lib.min.js`, global: 'PDFLib' },
+  turndown: { src: 'https://cdn.jsdelivr.net/npm/turndown@7.2.0/dist/turndown.js', global: 'TurndownService' },
   zip: { src: `${CDN}jszip/3.10.1/jszip.min.js`, global: 'JSZip' },
   mammoth: { src: `${CDN}mammoth/1.6.0/mammoth.browser.min.js`, global: 'mammoth' },
   xlsx: { src: `${CDN}xlsx/0.18.5/xlsx.full.min.js`, global: 'XLSX' },
@@ -306,8 +308,15 @@ export function conversionsFor(card, hasThumb) {
     list.push({ id: 'img-pdf', label: 'PDF' });
     if (e !== 'svg' && e !== 'gif') list.push({ id: 'img-small', label: '压缩 JPG' });
   }
-  if (fam === 'pdf') list.push({ id: 'pdf-png', label: '每页 PNG' }, { id: 'pdf-txt', label: '提取文字 TXT' });
-  if (fam === 'docx') list.push({ id: 'docx-html', label: 'HTML 网页' }, { id: 'docx-txt', label: '纯文本 TXT' });
+  if (fam === 'pdf') {
+    list.push({ id: 'pdf-png', label: '每页 PNG' }, { id: 'pdf-jpg', label: '每页 JPG' },
+      { id: 'pdf-txt', label: '提取文字 TXT' }, { id: 'pdf-md', label: 'Markdown' });
+    if (e === 'pdf' || card.type === 'application/pdf') {
+      list.push({ id: 'pdf-compress', label: '压缩 PDF' }, { id: 'pdf-split', label: '拆分 PDF' });
+    }
+  }
+  if (fam === 'docx') list.push({ id: 'docx-html', label: 'HTML 网页' }, { id: 'docx-txt', label: '纯文本 TXT' }, { id: 'docx-md', label: 'Markdown' });
+  if (fam === 'text' && /^(html?|txt)$/.test(e)) list.push({ id: 'text-md', label: 'Markdown' });
   if (fam === 'sheet') {
     if (e === 'csv' || e === 'tsv') list.push({ id: 'sheet-xlsx', label: 'Excel XLSX' });
     else list.push({ id: 'sheet-csv', label: 'CSV' });
@@ -315,8 +324,10 @@ export function conversionsFor(card, hasThumb) {
   }
   if (fam === 'md') list.push({ id: 'md-html', label: 'HTML 网页' });
   if (fam === 'audio') { if (e !== 'wav') list.push({ id: 'audio-wav', label: 'WAV' }); }
-  if (fam === 'video') list.push({ id: 'video-png', label: '封面 PNG' }, { id: 'video-wav', label: '提取音频 WAV' });
-  if (hasThumb && ['affinity', 'zipdoc', 'other'].includes(fam)) list.push({ id: 'thumb-png', label: fam === 'affinity' ? '预览图 PNG' : '内嵌预览 PNG' });
+  if (fam === 'video') list.push({ id: 'video-png', label: '封面 PNG' }, { id: 'video-jpg', label: '封面 JPG' }, { id: 'video-wav', label: '提取音频 WAV' });
+  if (hasThumb && ['affinity', 'zipdoc', 'other'].includes(fam)) {
+    list.push({ id: 'thumb-png', label: fam === 'affinity' ? '预览图 PNG' : '内嵌预览 PNG' }, { id: 'thumb-jpg', label: '预览图 JPG' });
+  }
   return list;
 }
 
@@ -356,8 +367,73 @@ export async function mergeImagesPdf(items, name, onProgress = () => {}) {
   return new File([pdf.output('blob')], `${name}.pdf`, { type: 'application/pdf' });
 }
 
+const pdfFile = async (doc, name) => new File([await doc.save()], `${name}.pdf`, { type: 'application/pdf' });
+
+export async function mergePdfs(blobs, name, onProgress = () => {}) {
+  const { PDFDocument } = await lib('pdfLib');
+  const out = await PDFDocument.create();
+  for (const [i, blob] of blobs.entries()) {
+    onProgress(`正在合并第 ${i + 1}/${blobs.length} 份…`);
+    const src = await PDFDocument.load(await blob.arrayBuffer());
+    const pages = await out.copyPages(src, src.getPageIndices());
+    pages.forEach((page) => out.addPage(page));
+  }
+  return pdfFile(out, name);
+}
+
+async function splitPdf(blob, name, onProgress) {
+  const { PDFDocument } = await lib('pdfLib');
+  const src = await PDFDocument.load(await blob.arrayBuffer());
+  const n = src.getPageCount();
+  if (n < 2) throw new Error('PDF 只有一页，无需拆分');
+  const files = [];
+  for (let i = 0; i < n; i++) {
+    onProgress(`正在拆分第 ${i + 1}/${n} 页…`);
+    const out = await PDFDocument.create();
+    const [page] = await out.copyPages(src, [i]);
+    out.addPage(page);
+    files.push(await pdfFile(out, `${name}-第${i + 1}页`));
+  }
+  return files;
+}
+
+async function compressPdf(blob, name, onProgress) {
+  const { PDFDocument } = await lib('pdfLib');
+  const src = await PDFDocument.load(await blob.arrayBuffer(), { updateMetadata: false });
+  const outName = `${name}-压缩`;
+  const optimized = await pdfFile(src, outName);
+  if (optimized.size <= blob.size * 0.9) return optimized;
+
+  const doc = await pdfDoc(blob);
+  try {
+    const out = await PDFDocument.create();
+    for (let i = 1; i <= doc.numPages; i++) {
+      onProgress(`正在压缩第 ${i}/${doc.numPages} 页…`);
+      const { width, height } = (await doc.getPage(i)).getViewport({ scale: 1 });
+      const c = await renderPdfPage(doc, i, width * Math.min(2, 2200 / Math.max(width, height)));
+      const jpg = await toBlob(c, 'image/jpeg', 0.72);
+      c.width = c.height = 1;
+      if (!jpg) throw new Error('无法生成页面图像');
+      const image = await out.embedJpg(await jpg.arrayBuffer());
+      out.addPage([width, height]).drawImage(image, { x: 0, y: 0, width, height });
+    }
+    const compressed = await pdfFile(out, outName);
+    if (optimized.size < blob.size && optimized.size <= compressed.size) return optimized;
+    if (compressed.size >= blob.size) throw new Error('原 PDF 已足够小，未生成压缩副本');
+    return compressed;
+  } finally { await doc.destroy(); }
+}
+
+async function htmlToMarkdown(html) {
+  const Turndown = await lib('turndown');
+  const service = new Turndown({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
+  service.keep('table');
+  return service.turndown(await sanitize(html));
+}
+
 /** 执行转换，返回 File[]；onProgress(文字) 可选 */
 export async function convert(card, blob, id, onProgress = () => {}) {
+  if (!blob) throw new Error(`找不到「${card.name}」的文件内容`);
   const base = baseName(card.name);
   const named = new File([blob], card.name, { type: blob.type });
   const file = (parts, name, type) => new File(Array.isArray(parts) ? parts : [parts], name, { type });
@@ -385,20 +461,30 @@ export async function convert(card, blob, id, onProgress = () => {}) {
       pdf.addImage(c.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, c.width, c.height);
       return [file(pdf.output('blob'), `${base}.pdf`, 'application/pdf')];
     }
-    case 'pdf-png': {
+    case 'pdf-split': return splitPdf(blob, base, onProgress);
+    case 'pdf-compress': return [await compressPdf(blob, base, onProgress)];
+    case 'pdf-png': case 'pdf-jpg': {
+      const jpg = id === 'pdf-jpg';
+      const ext = jpg ? 'jpg' : 'png', type = jpg ? 'image/jpeg' : 'image/png';
       const doc = await pdfDoc(blob);
       try {
-        const n = Math.min(doc.numPages, 30), out = [];
+        const n = jpg ? doc.numPages : Math.min(doc.numPages, 30), out = [];
         for (let i = 1; i <= n; i++) {
           onProgress(`正在渲染第 ${i}/${n} 页…`);
           const page = await doc.getPage(i);
-          const w = Math.min(2400, page.getViewport({ scale: 2 }).width);
-          out.push(file(await toBlob(await renderPdfPage(doc, i, w), 'image/png'), `${base}-第${i}页.png`, 'image/png'));
+          const { width, height } = page.getViewport({ scale: 1 });
+          const maxSide = jpg ? Math.max(width, height) : width;
+          const c = await renderPdfPage(doc, i, width * Math.min(2, 2400 / maxSide));
+          const image = await toBlob(c, type, 0.92);
+          c.width = c.height = 1;
+          if (!image) throw new Error(`无法导出第 ${i} 页`);
+          out.push(file(image, `${base}-第${i}页.${ext}`, type));
         }
         return out;
       } finally { doc.destroy(); }
     }
-    case 'pdf-txt': {
+    case 'pdf-txt': case 'pdf-md': {
+      const md = id === 'pdf-md';
       const doc = await pdfDoc(blob);
       try {
         const pages = [];
@@ -407,11 +493,21 @@ export async function convert(card, blob, id, onProgress = () => {}) {
           const tc = await (await doc.getPage(i)).getTextContent();
           pages.push(tc.items.map((it) => it.str + (it.hasEOL ? '\n' : '')).join(''));
         }
+        if (md) {
+          if (!pages.some((text) => text.trim())) throw new Error('PDF 没有可提取的文字，扫描页需先做 OCR');
+          const text = pages.map((page, i) => `## 第 ${i + 1} 页\n\n${page.trim()}`).join('\n\n');
+          return [file(text, `${base}.md`, 'text/markdown;charset=utf-8')];
+        }
         return [file(pages.join('\n\n'), `${base}.txt`, 'text/plain;charset=utf-8')];
       } finally { doc.destroy(); }
     }
-    case 'docx-html': {
+    case 'text-md': {
+      const text = await blob.text();
+      return [file(/html?$/.test(extOf(card.name)) ? await htmlToMarkdown(text) : text, `${base}.md`, 'text/markdown;charset=utf-8')];
+    }
+    case 'docx-html': case 'docx-md': {
       const { value } = await (await lib('mammoth')).convertToHtml({ arrayBuffer: await blob.arrayBuffer() });
+      if (id === 'docx-md') return [file(await htmlToMarkdown(value), `${base}.md`, 'text/markdown;charset=utf-8')];
       return [file(htmlDoc(base, await sanitize(value)), `${base}.html`, 'text/html;charset=utf-8')];
     }
     case 'docx-txt': {
@@ -441,15 +537,22 @@ export async function convert(card, blob, id, onProgress = () => {}) {
       onProgress('正在解码音频…');
       return [file(wavBlob(await decodeAudioFull(blob)), `${base}.wav`, 'audio/wav')];
     }
-    case 'video-png': {
+    case 'video-png': case 'video-jpg': {
+      const jpg = id === 'video-jpg';
+      const ext = jpg ? 'jpg' : 'png', type = jpg ? 'image/jpeg' : 'image/png';
       const f = await videoFrame(blob, 4000);
-      return [file(await toBlob(f.c, 'image/png'), `${base}-封面.png`, 'image/png')];
+      return [file(await toBlob(f.c, type, 0.92), `${base}-封面.${ext}`, type)];
     }
-    case 'thumb-png': {
+    case 'thumb-png': case 'thumb-jpg': {
+      const jpg = id === 'thumb-jpg';
+      const ext = jpg ? 'jpg' : 'png', type = jpg ? 'image/jpeg' : 'image/png';
       let b = family(card) === 'affinity' || family(card) === 'other' ? await embeddedImage(blob, family(card)) : await zipThumb(blob);
       if (!b) throw new Error('没有找到内嵌预览图');
-      if (b.type !== 'image/png') { const im = await decodeImage(b); b = await toBlob(scaled(im, im.width, im.height, 8000, 8000), 'image/png'); }
-      return [file(b, `${base}-预览.png`, 'image/png')];
+      if (b.type !== type) {
+        const im = await decodeImage(b);
+        b = await toBlob(scaled(im, im.width, im.height, 8000, 8000, jpg ? '#fff' : null), type, 0.92);
+      }
+      return [file(b, `${base}-预览.${ext}`, type)];
     }
   }
   throw new Error('不支持的转换');
