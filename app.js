@@ -2955,7 +2955,8 @@ async function choosePdfSplit(card, blob) {
   modal.setAttribute('aria-labelledby', 'pdfSplitTitle');
   const assignments = new Map();
   const pendingThumbnails = new Set();
-  let pdf, page = 1, part = 1, partCount = 2, active = true, renderId = 0, thumbnails, drawingThumbnails = false;
+  let pdf, page = 1, part = 1, partCount = 2, selectionAnchor = null;
+  let active = true, renderId = 0, thumbnails, drawingThumbnails = false;
   const partHue = (number) => (216 + (number - 1) * 137.508) % 360;
   const result = dialog(`<h3 id="pdfSplitTitle" tabindex="-1" autofocus>拆分 PDF</h3>
     <p class="pdf-split-name">${esc(card.name)}</p>
@@ -2975,7 +2976,7 @@ async function choosePdfSplit(card, blob) {
           <button type="button" class="btn" id="pdfSplitAdd" disabled>添加部分</button>
         </div>
         <div class="pdf-split-parts" id="pdfSplitParts" role="group" aria-label="选择要编辑的部分"></div>
-        <p>先选部分，再勾选页面。点击缩略图可预览大图，未分组的页面不会导出。</p>
+        <p>先选部分，再勾选页面。Shift + 点击可连续勾选，点击缩略图可预览。未分组页面不导出。</p>
         <div class="pdf-split-pages" id="pdfSplitPages" role="group" aria-label="勾选页面"></div>
         <p id="pdfSplitSummary" role="status"></p>
       </section>
@@ -3019,9 +3020,30 @@ async function choosePdfSplit(card, blob) {
     check.title = assigned && assigned !== part ? `移到第 ${part} 部分` : '';
   }
   function selectPart(number) {
+    if (part !== number) selectionAnchor = null;
     part = number;
     grid.style.setProperty('--active-hue', partHue(number));
     for (const tile of grid.children) syncTile(tile);
+    updateSummary();
+  }
+  function selectPage(check, checked, extend) {
+    const tile = check.closest('[data-page]'), number = Number(tile.dataset.page);
+    if (extend && selectionAnchor !== null) {
+      const first = Math.min(selectionAnchor, number), last = Math.max(selectionAnchor, number);
+      for (let n = first; n <= last; n++) {
+        assignments.set(n, part);
+        syncTile(grid.children[n - 1]);
+      }
+    } else {
+      if (checked) {
+        assignments.set(number, part);
+        selectionAnchor = number;
+      } else {
+        assignments.delete(number);
+        if (selectionAnchor === number) selectionAnchor = null;
+      }
+      syncTile(tile);
+    }
     updateSummary();
   }
   async function showPage() {
@@ -3083,18 +3105,19 @@ async function choosePdfSplit(card, blob) {
     button.focus();
   };
   grid.onclick = (e) => {
+    const check = e.target.closest('input[type="checkbox"]');
+    if (check) return selectPage(check, check.checked, e.shiftKey);
+    const label = e.shiftKey && e.target.closest('label');
+    if (label) {
+      e.preventDefault();
+      const input = $('input', label);
+      input.focus({ preventScroll: true });
+      return selectPage(input, !input.checked, true);
+    }
     const thumbnail = e.target.closest('.pdf-split-thumb');
     if (!thumbnail) return;
     page = Number(thumbnail.parentElement.dataset.page);
     showPage();
-  };
-  grid.onchange = (e) => {
-    if (!e.target.matches('input[type="checkbox"]')) return;
-    const tile = e.target.closest('[data-page]'), number = Number(tile.dataset.page);
-    if (e.target.checked) assignments.set(number, part);
-    else assignments.delete(number);
-    syncTile(tile);
-    updateSummary();
   };
 
   async function loadPdf() {
