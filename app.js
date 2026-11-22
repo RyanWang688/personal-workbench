@@ -1,5 +1,5 @@
 import * as db from './db.js?v=6';
-import * as pv from './preview.js?v=6';
+import * as pv from './preview.js?v=7';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -2868,9 +2868,9 @@ async function preview(id) {
 async function convertOne(card, convId, say = () => {}) {
   const blob = await db.getBlob(card.id);
   if (!blob) throw new Error(`找不到「${card.name}」的文件内容`);
-  const rangeSpec = convId === 'pdf-split' ? await choosePdfSplit(card, blob) : '';
-  if (rangeSpec === null) return null;
-  const files = await pv.convert(card, blob, convId, say, { rangeSpec });
+  const assignments = convId === 'pdf-split' ? await choosePdfSplit(card, blob) : undefined;
+  if (assignments === null) return null;
+  const files = await pv.convert(card, blob, convId, say, { assignments });
   const added = await placeBeside(card, files);
   if (!added.length) throw new Error('转换结果保存失败');
   return added;
@@ -2953,7 +2953,10 @@ async function choosePdfSplit(card, blob) {
   const modal = $('#modal');
   modal.classList.add('pdf-split-modal');
   modal.setAttribute('aria-labelledby', 'pdfSplitTitle');
-  let pdf, page = 1, rangeStart = null, active = true, renderId = 0;
+  const assignments = new Map();
+  const pendingThumbnails = new Set();
+  let pdf, page = 1, part = 1, partCount = 2, active = true, renderId = 0, thumbnails, drawingThumbnails = false;
+  const partHue = (number) => (216 + (number - 1) * 137.508) % 360;
   const result = dialog(`<h3 id="pdfSplitTitle" tabindex="-1" autofocus>拆分 PDF</h3>
     <p class="pdf-split-name">${esc(card.name)}</p>
     <div class="pdf-split-layout">
@@ -2966,40 +2969,71 @@ async function choosePdfSplit(card, blob) {
           <button type="button" class="btn" id="pdfSplitNext" disabled>下一页</button>
         </nav>
       </section>
-      <section class="pdf-split-options" aria-label="拆分页码">
-        <label class="field"><span>拆分页码</span>
-          <input type="text" id="pdfSplitRanges" aria-describedby="pdfSplitHelp pdfSplitSummary" placeholder="例如 1-3, 5, 7-9" disabled>
-        </label>
-        <p id="pdfSplitHelp">逗号隔开多组，每组生成一份 PDF。留空则逐页拆分。</p>
-        <div class="pdf-split-picks">
-          <button type="button" class="btn" id="pdfSplitPick" disabled>加入当前页</button>
-          <button type="button" class="btn" id="pdfSplitRange" disabled>标记范围起点</button>
+      <section class="pdf-split-options" aria-label="分组勾选">
+        <div class="pdf-split-parts-head">
+          <h4>拆分部分</h4>
+          <button type="button" class="btn" id="pdfSplitAdd" disabled>添加部分</button>
         </div>
+        <div class="pdf-split-parts" id="pdfSplitParts" role="group" aria-label="选择要编辑的部分"></div>
+        <p>先选部分，再勾选页面。点击缩略图可预览大图，未分组的页面不会导出。</p>
+        <div class="pdf-split-pages" id="pdfSplitPages" role="group" aria-label="勾选页面"></div>
         <p id="pdfSplitSummary" role="status"></p>
       </section>
-    </div>${actions('开始拆分')}`, () => ranges.value.trim());
-  const paper = $('#pdfSplitPaper'), pageInput = $('#pdfSplitPage'), ranges = $('#pdfSplitRanges');
-  const prev = $('#pdfSplitPrev'), next = $('#pdfSplitNext'), pick = $('#pdfSplitPick'), range = $('#pdfSplitRange');
+    </div>${actions('开始拆分')}`, () => new Map(assignments));
+  const paper = $('#pdfSplitPaper'), pageInput = $('#pdfSplitPage'), grid = $('#pdfSplitPages');
+  const prev = $('#pdfSplitPrev'), next = $('#pdfSplitNext'), add = $('#pdfSplitAdd'), parts = $('#pdfSplitParts');
   const submit = $('#modalInner button[value="ok"]'), summary = $('#pdfSplitSummary');
   submit.disabled = true;
 
-  function syncRanges() {
-    try {
-      const groups = pv.pdfSplitRanges(ranges.value, pdf.numPages);
-      summary.textContent = `将生成 ${groups.length} 份 PDF`;
-      ranges.removeAttribute('aria-invalid');
-      submit.disabled = false;
-    } catch (e) {
-      summary.textContent = e.message;
-      ranges.setAttribute('aria-invalid', 'true');
-      submit.disabled = true;
+  function addPartButton(number) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn pdf-split-part';
+    button.dataset.part = number;
+    button.style.setProperty('--part-hue', partHue(number));
+    button.innerHTML = `<span>第 ${number} 部分</span><small></small>`;
+    parts.append(button);
+    return button;
+  }
+  function updateSummary() {
+    const counts = new Map();
+    for (const number of assignments.values()) counts.set(number, (counts.get(number) || 0) + 1);
+    for (const button of parts.children) {
+      const number = Number(button.dataset.part);
+      button.setAttribute('aria-pressed', String(part === number));
+      button.lastElementChild.textContent = (counts.get(number) || 0) + ' 页';
     }
+    submit.disabled = !assignments.size;
+    summary.textContent = assignments.size
+      ? `已分组 ${assignments.size}/${pdf.numPages} 页 · 将生成 ${counts.size} 份 PDF`
+      : '勾选至少一页即可拆分';
+  }
+  function syncTile(tile) {
+    const number = Number(tile.dataset.page), assigned = assignments.get(number);
+    const check = $('input', tile), badge = $('.pdf-split-page-part', tile);
+    check.checked = assigned === part;
+    check.indeterminate = Boolean(assigned && assigned !== part);
+    tile.classList.toggle('assigned', Boolean(assigned));
+    if (assigned) tile.style.setProperty('--part-hue', partHue(assigned));
+    badge.textContent = assigned ? `第 ${assigned} 部分` : '';
+    check.title = assigned && assigned !== part ? `移到第 ${part} 部分` : '';
+  }
+  function selectPart(number) {
+    part = number;
+    grid.style.setProperty('--active-hue', partHue(number));
+    for (const tile of grid.children) syncTile(tile);
+    updateSummary();
   }
   async function showPage() {
     const id = ++renderId, n = page;
     prev.disabled = n <= 1;
     next.disabled = n >= pdf.numPages;
     pageInput.value = n;
+    $('[aria-current="page"]', grid)?.removeAttribute('aria-current');
+    const tile = grid.children[n - 1];
+    $('.pdf-split-thumb', tile).setAttribute('aria-current', 'page');
+    const tileBox = tile.getBoundingClientRect(), gridBox = grid.getBoundingClientRect();
+    if (tileBox.top < gridBox.top || tileBox.bottom > gridBox.bottom) grid.scrollTop += tileBox.top - gridBox.top;
     paper.textContent = `正在加载第 ${n} 页…`;
     try {
       const canvas = await pv.renderPdfPage(pdf, n, 1100, 1400);
@@ -3008,7 +3042,7 @@ async function choosePdfSplit(card, blob) {
       canvas.setAttribute('aria-label', `PDF 第 ${n} 页`);
       paper.replaceChildren(canvas);
     } catch {
-      if (active && id === renderId) paper.textContent = `第 ${n} 页无法预览，可继续按页码选择。`;
+      if (active && id === renderId) paper.textContent = `第 ${n} 页无法预览，可继续勾选页面。`;
     }
   }
   function jump() {
@@ -3018,28 +3052,50 @@ async function choosePdfSplit(card, blob) {
       showPage();
     } else pageInput.value = page;
   }
-  function appendPages(start, end = start) {
-    const entry = start === end ? String(start) : `${Math.min(start, end)}-${Math.max(start, end)}`;
-    const current = ranges.value.trim().replace(/[,，、;；]+$/, '').trim();
-    ranges.value = current ? `${current}, ${entry}` : entry;
-    syncRanges();
+  async function drawThumbnails() {
+    if (drawingThumbnails) return;
+    drawingThumbnails = true;
+    try {
+      for (const tile of pendingThumbnails) {
+        if (!active) break;
+        pendingThumbnails.delete(tile);
+        thumbnails.unobserve(tile);
+        try {
+          const canvas = await pv.renderPdfPage(pdf, Number(tile.dataset.page), 140, 170);
+          if (active) $('.pdf-split-thumb', tile).replaceChildren(canvas);
+        } catch { /* 页码仍可用于预览和勾选。 */ }
+      }
+    } finally { drawingThumbnails = false; }
   }
+
   prev.onclick = () => { page--; showPage(); };
   next.onclick = () => { page++; showPage(); };
   pageInput.onchange = jump;
   pageInput.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); jump(); } };
-  pick.onclick = () => appendPages(page);
-  range.onclick = () => {
-    if (rangeStart === null) {
-      rangeStart = page;
-      range.textContent = `从第 ${page} 页到当前页`;
-    } else {
-      appendPages(rangeStart, page);
-      rangeStart = null;
-      range.textContent = '标记范围起点';
-    }
+  parts.onclick = (e) => {
+    const button = e.target.closest('[data-part]');
+    if (button) selectPart(Number(button.dataset.part));
   };
-  ranges.oninput = syncRanges;
+  add.onclick = () => {
+    const button = addPartButton(++partCount);
+    selectPart(partCount);
+    add.disabled = partCount >= pdf.numPages;
+    button.focus();
+  };
+  grid.onclick = (e) => {
+    const thumbnail = e.target.closest('.pdf-split-thumb');
+    if (!thumbnail) return;
+    page = Number(thumbnail.parentElement.dataset.page);
+    showPage();
+  };
+  grid.onchange = (e) => {
+    if (!e.target.matches('input[type="checkbox"]')) return;
+    const tile = e.target.closest('[data-page]'), number = Number(tile.dataset.page);
+    if (e.target.checked) assignments.set(number, part);
+    else assignments.delete(number);
+    syncTile(tile);
+    updateSummary();
+  };
 
   async function loadPdf() {
     try {
@@ -3052,9 +3108,28 @@ async function choosePdfSplit(card, blob) {
         return;
       }
       pageInput.max = pdf.numPages;
-      pageInput.disabled = ranges.disabled = pick.disabled = range.disabled = false;
-      syncRanges();
+      pageInput.disabled = false;
+      add.disabled = pdf.numPages <= partCount;
+      addPartButton(1);
+      addPartButton(2);
+      grid.innerHTML = Array.from({ length: pdf.numPages }, (_, i) => {
+        const n = i + 1;
+        return `<div class="pdf-split-tile" data-page="${n}">
+          <button type="button" class="pdf-split-thumb" aria-label="预览第 ${n} 页"><span aria-hidden="true">${n}</span></button>
+          <label><input type="checkbox" aria-describedby="pdfSplitPart${n}">第 ${n} 页</label>
+          <span class="pdf-split-page-part" id="pdfSplitPart${n}"></span>
+        </div>`;
+      }).join('');
+      selectPart(1);
       showPage();
+      thumbnails = new IntersectionObserver((entries) => {
+        for (const { target, isIntersecting } of entries) {
+          if (isIntersecting) pendingThumbnails.add(target);
+          else pendingThumbnails.delete(target);
+        }
+        drawThumbnails();
+      }, { root: grid, rootMargin: '100px 0px' });
+      for (const tile of grid.children) thumbnails.observe(tile);
     } catch {
       if (active) paper.textContent = '无法打开 PDF。请检查文件是否已损坏或受密码保护。';
     }
@@ -3063,6 +3138,8 @@ async function choosePdfSplit(card, blob) {
   try { return await result; }
   finally {
     active = false;
+    thumbnails?.disconnect();
+    pendingThumbnails.clear();
     modal.classList.remove('pdf-split-modal');
     modal.removeAttribute('aria-labelledby');
     if (pdf) await pdf.destroy().catch(console.warn);
@@ -3469,7 +3546,7 @@ document.addEventListener('dragstart', (e) => { if (pressFired) e.preventDefault
 const RING_SHORT = {
   'img-png': ['PNG'], 'img-jpg': ['JPG'], 'img-webp': ['WEBP'], 'img-pdf': ['PDF'], 'img-small': ['压缩', 'JPG · 2048px'],
   'pdf-png': ['PNG', '每页一张'], 'pdf-jpg': ['JPG', '每页一张'], 'pdf-txt': ['TXT', '提取文字'],
-  'pdf-md': ['MD', '提取文字'], 'pdf-compress': ['压缩 PDF'], 'pdf-split': ['拆分 PDF', '自选页码'],
+  'pdf-md': ['MD', '提取文字'], 'pdf-compress': ['压缩 PDF'], 'pdf-split': ['拆分 PDF', '勾选分组'],
   'docx-html': ['HTML', '网页'], 'docx-txt': ['TXT', '纯文本'], 'docx-md': ['MD', 'Markdown'], 'text-md': ['MD', 'Markdown'],
   'sheet-xlsx': ['XLSX', 'Excel'], 'sheet-csv': ['CSV'], 'sheet-json': ['JSON'], 'md-html': ['HTML', '网页'],
   'audio-wav': ['WAV'], 'video-png': ['封面', 'PNG'], 'video-jpg': ['封面', 'JPG'], 'video-wav': ['音频', 'WAV'],

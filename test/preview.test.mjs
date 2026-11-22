@@ -1,17 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { convert, conversionsFor, pdfSplitRanges } from '../preview.js';
+import { convert, conversionsFor, pdfSplitParts } from '../preview.js';
 
 test('PDF files offer the new actions even without a thumbnail', () => {
   const options = conversionsFor({ name: 'document.pdf' }, false).map(({ id }) => id);
   for (const id of ['pdf-jpg', 'pdf-md', 'pdf-compress', 'pdf-split']) assert.ok(options.includes(id));
 });
 
-test('PDF split groups preserve the requested order and default to single pages', () => {
-  assert.deepEqual(pdfSplitRanges('7–８、１-３，5', 8), [[7, 8], [1, 3], [5, 5]]);
-  assert.deepEqual(pdfSplitRanges('', 3), [[1, 1], [2, 2], [3, 3]]);
-  assert.deepEqual(pdfSplitRanges('1-2, 1-2, 2', 3), [[1, 2], [2, 2]]);
-  for (const invalid of ['0', '4', '3-1', '1-', 'two']) assert.throws(() => pdfSplitRanges(invalid, 3));
+test('PDF split exports nonempty groups in part order and keeps pages in source order', () => {
+  const assignments = new Map([[8, 3], [4, 1], [5, 3], [2, 1]]);
+  assert.deepEqual(pdfSplitParts(assignments, 8), [
+    { part: 1, pages: [2, 4] },
+    { part: 3, pages: [5, 8] },
+  ]);
+  assert.deepEqual(pdfSplitParts(new Map(), 8), []);
+  assert.throws(() => pdfSplitParts(new Map([[9, 1]]), 8), /页码/);
+  assert.throws(() => pdfSplitParts(new Map([[2, 0]]), 8), /部分/);
 });
 
 test('PDF to Markdown keeps page order and reports pages without extractable text', async () => {
