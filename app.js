@@ -1596,16 +1596,19 @@ function renderCanvas() {
   // 正在编辑文字时重新渲染：先记住内容，渲染完接着编辑
   const editing = editingShape && shapeById(editingShape);
   if (editing) { const tx = $(`.shape[data-sid="${CSS.escape(editing.id)}"] .sh-tx`); if (tx) editing.text = tx.innerText.replace(/\n$/, ''); }
-  if (state.bsel && !(state.bsel.type === 'shape' ? shapeById(state.bsel.id) : b?.links.find((l) => l.id === state.bsel.id))) state.bsel = null;
+  if (state.bsel?.type === 'shape') { state.bsel.ids = state.bsel.ids.filter((id) => shapeById(id)); if (!state.bsel.ids.length) state.bsel = null; }
+  else if (state.bsel && !b?.links.find((l) => l.id === state.bsel.id)) state.bsel = null;
   boardRendering = true;
   $('#world').innerHTML = `<svg class="links" id="links" aria-hidden="true"></svg>${list.map((c) => cardHTML(c, true)).join('')}${(b?.shapes || []).map(shapeHTML).join('')}
-    <div class="conn-dots" id="connDots" hidden>${['t', 'r', 'b', 'l'].map((k) => `<i class="cd cd-${k}" data-dot="${k}" title="拖出箭头连线"></i>`).join('')}</div>`;
+    <div class="group-box" id="groupBox" hidden></div><div class="guides" id="guides"></div>
+    <div class="conn-dots" id="connDots" hidden>${['t', 'r', 'b', 'l'].map((k) => `<i class="cd cd-${k}" data-dot="${k}" title="拖出箭头；拖到空白处会新建一个相连的形状"></i>`).join('')}</div>`;
   boardRendering = false;
   $('#canvasEmpty').hidden = list.length > 0 || (b?.shapes.length || 0) > 0;
   $('#viewport').dataset.tool = state.tool;
+  decorateBoard();
   applyCam();
   drawLinks();
-  if (editing) { editingShape = null; startEdit(editing.id, true); }
+  if (editing) { editingShape = null; startEdit(editing.id, { keep: true }); }
 }
 function toWorld(clientX, clientY) {
   const r = $('#viewport').getBoundingClientRect(), c = cam();
@@ -1677,9 +1680,12 @@ const vp = $('#viewport');
 const pointers = new Map();
 let pan = null, pinch = null, cardDrag = null, suppressClick = false;
 vp.addEventListener('pointerdown', (e) => {
-  if (e.button !== 0 && e.pointerType === 'mouse') return;
-  if (pointers.size === 0 && boardDown(e)) return; // 白板：形状、连线、工具
-  const cardEl = e.target.closest('.card');
+  const mouse = e.pointerType === 'mouse';
+  if (mouse && e.button !== 0 && e.button !== 1) return;
+  const forcePan = spaceDown || (mouse && e.button === 1); // 按住空格或鼠标中键：任何工具下都直接平移
+  if (forcePan) e.preventDefault();
+  if (!forcePan && pointers.size === 0 && boardDown(e)) return; // 白板：形状、连线、工具
+  const cardEl = forcePan ? null : e.target.closest('.card');
   if (cardEl && (e.ctrlKey || e.metaKey)) return; // 交给转换圆环 / 多选
   if (cardEl && !e.target.closest('.more, .export-handle')) {
     const card = findCard(cardEl.dataset.id);
@@ -1805,25 +1811,74 @@ const SH_DEF = {
 };
 const FONT_SIZES = [12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64, 80, 96];
 const TOOL_KEYS = { v: 'select', n: 'sticky', t: 'text', r: 'rect', o: 'ellipse', d: 'diamond', l: 'arrow' };
+const TOOL_HINT = {
+  sticky: '点击贴一张便签，或拖出大小', text: '点击放置文字框，然后直接输入', rect: '点击放置，或拖出大小（Shift 画正方形）',
+  ellipse: '点击放置，或拖出大小（Shift 画正圆）', diamond: '点击放置，或拖出大小', arrow: '从一个对象拖到另一个对象',
+};
+const ALIGN_OPS = { l: '左对齐', ch: '水平居中', r: '右对齐', t: '顶部对齐', cv: '垂直居中', b: '底部对齐', dh: '横向均匀分布', dv: '纵向均匀分布' };
 state.tool = 'select';
-state.bsel = null; // { type: 'shape' | 'link', id }
-let editingShape = null, bd = null, hoverRef = null, boardRendering = false;
+state.toolLock = false;
+state.bsel = null; // { type: 'shape', ids: [...] } | { type: 'link', id }
+let editingShape = null, editSnap = null, editOrig = '', bd = null, hoverRef = null, boardRendering = false;
+let spaceDown = false, fmtPop = null, boardClip = null, lastPointer = null, pasteN = 0;
 const boardOf = (id = state.view) => { const a = area(id); if (!a || a.kind !== 'canvas') return null; a.shapes ||= []; a.links ||= []; return a; };
 const shapeById = (id) => boardOf()?.shapes.find((s) => s.id === id);
 const linkById = (id) => boardOf()?.links.find((l) => l.id === id);
 const shColor = (s) => (s.fill === 'none' || s.fill == null ? null : SH_COLORS[s.fill] || SH_COLORS[0]);
 const isTypingTarget = (t) => t?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t?.tagName || '');
+const selIds = () => (state.bsel?.type === 'shape' ? state.bsel.ids : []);
+const isPicked = (id) => selIds().includes(id);
+const selShapes = () => selIds().map(shapeById).filter(Boolean);
+const pickShapes = (ids) => (ids.length ? { type: 'shape', ids: [...new Set(ids)] } : null);
+const unionBox = (list) => {
+  if (!list.length) return null;
+  const x1 = Math.min(...list.map((b) => b.x)), y1 = Math.min(...list.map((b) => b.y));
+  return { x: x1, y: y1, w: Math.max(...list.map((b) => b.x + b.w)) - x1, h: Math.max(...list.map((b) => b.y + b.h)) - y1 };
+};
+const shEl = (id) => $(`#world .shape[data-sid="${CSS.escape(id)}"]`);
 
 function shapeHTML(s) {
   const col = shColor(s);
-  const sel = state.bsel?.type === 'shape' && state.bsel.id === s.id;
+  const sel = isPicked(s.id), single = sel && selIds().length === 1;
   const style = `left:${Math.round(s.x)}px;top:${Math.round(s.y)}px;width:${Math.round(s.w)}px;height:${Math.round(s.h)}px;z-index:${s.z || 1};`
     + `--fs:${s.fs || 16}px;--sb:${col ? col.bg : 'transparent'};--sd:${col ? col.bd : 'var(--text-3)'};--tc:${col ? '#1f2023' : 'var(--text)'};text-align:${s.al || 'center'}`;
   const bg = s.t === 'diamond'
     ? '<svg class="sh-bg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1.5 98.5,50 50,98.5 1.5,50" vector-effect="non-scaling-stroke"/></svg>'
     : '<div class="sh-bg"></div>';
-  const handles = sel ? ['nw', 'ne', 'se', 'sw'].map((k) => `<i class="sh-h h-${k}" data-handle="${k}"></i>`).join('') : '';
+  const handles = single ? ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((k) => `<i class="sh-h h-${k}" data-handle="${k}"></i>`).join('') : '';
   return `<div class="shape st-${s.t}${col ? '' : ' nofill'}${sel ? ' picked' : ''}${s.b ? ' bold' : ''}" data-sid="${s.id}" style="${style}">${bg}<div class="sh-tx" data-ph="${s.t === 'text' ? '输入文字' : '双击输入'}">${esc(s.text || '')}</div>${handles}</div>`;
+}
+// 重绘后的装饰：便签字号自适应、多选外框
+function decorateBoard() {
+  for (const s of boardOf()?.shapes || []) if (s.t === 'sticky' && s.text) { const el = shEl(s.id); if (el) fitSticky(s, el); }
+  const box = $('#groupBox');
+  if (!box) return;
+  const ub = selIds().length > 1 ? unionBox(selShapes()) : null;
+  box.hidden = !ub;
+  if (ub) Object.assign(box.style, { left: `${ub.x}px`, top: `${ub.y}px`, width: `${ub.w}px`, height: `${ub.h}px` });
+}
+
+// ---- 撤销 / 重做（每个画布各自一份历史） ----
+const hist = new Map();
+const H = () => { let h = hist.get(state.view); if (!h) hist.set(state.view, (h = { u: [], r: [] })); return h; };
+const snapBoard = () => { const b = boardOf(); return JSON.stringify({ s: b.shapes, l: b.links }, (k, v) => (k === '_t' ? undefined : v)); };
+function record(snap = snapBoard()) {
+  const h = H();
+  if (h.u[h.u.length - 1] === snap) return;
+  h.u.push(snap);
+  if (h.u.length > 100) h.u.shift();
+  h.r.length = 0;
+}
+async function undoBoard(redo = false) {
+  if (editingShape) await finishEdit();
+  const h = H(), from = redo ? h.r : h.u, to = redo ? h.u : h.r;
+  if (!from.length) return toast(redo ? '没有可以重做的操作' : '没有可以撤销的操作');
+  to.push(snapBoard());
+  const { s, l } = JSON.parse(from.pop());
+  const b = boardOf();
+  b.shapes = s; b.links = l;
+  state.bsel = null;
+  await saveBoard();
 }
 
 // ---- 连线几何 ----
@@ -1903,44 +1958,75 @@ function drawLinks() {
 $('#world').addEventListener('load', () => { if (boardOf()?.links.length) drawLinks(); }, true);
 
 // ---- 工具 ----
-function setTool(t) {
+function setTool(t, lock = false) {
   state.tool = t;
-  $$('#canvasPalette [data-tool]').forEach((b) => { b.classList.toggle('on', b.dataset.tool === t); b.setAttribute('aria-pressed', b.dataset.tool === t); });
+  state.toolLock = lock && t !== 'select';
+  $$('#canvasPalette [data-tool]').forEach((b) => {
+    const on = b.dataset.tool === t;
+    b.classList.toggle('on', on); b.classList.toggle('locked', on && state.toolLock); b.setAttribute('aria-pressed', on);
+  });
   $('#viewport').dataset.tool = t;
+  const hint = $('#toolHint');
+  if (hint) {
+    hint.hidden = t === 'select';
+    if (t !== 'select') hint.innerHTML = `${esc(TOOL_HINT[t] || '')}<span>${state.toolLock ? '已锁定，可以连续放置' : '双击工具可连续使用'} · Esc 退出</span>`;
+  }
   hideDots();
 }
+function afterCreateTool() { if (!state.toolLock) setTool('select'); }
 $('#canvasPalette').addEventListener('click', (e) => {
   const b = e.target.closest('[data-tool]');
-  if (b) setTool(state.tool === b.dataset.tool && b.dataset.tool !== 'select' ? 'select' : b.dataset.tool);
+  if (b) setTool(state.tool === b.dataset.tool && b.dataset.tool !== 'select' && !state.toolLock ? 'select' : b.dataset.tool);
+});
+$('#canvasPalette').addEventListener('dblclick', (e) => {
+  const b = e.target.closest('[data-tool]');
+  if (b && b.dataset.tool !== 'select') setTool(b.dataset.tool, true);
 });
 
 async function saveBoard() { const b = boardOf(); if (b) { await saveArea(b); await changed(); } }
 function selectBoard(sel) {
   state.bsel = sel;
+  fmtPop = null;
   if (sel && state.selected.size) clearSelection();
   renderCanvas();
 }
-async function createShape(t, x, y, w, h) {
-  const b = boardOf();
-  if (!b) return;
+function newShape(t, x, y, w, h, like) {
   const d = SH_DEF[t];
   const s = { id: uid(), t, x: Math.round(x), y: Math.round(y), w: Math.round(w || d.w), h: Math.round(h || d.h), text: '', fill: d.fill, fs: d.fs, al: d.al, z: topOrder(state.view) };
+  if (like && like.t === t) Object.assign(s, { fill: like.fill, fs: like.fs, al: like.al, b: like.b });
+  else if (like && like.t !== 'text' && t !== 'text' && shColor(like)) s.fill = like.fill;
+  if (!s.b) delete s.b;
+  return s;
+}
+async function createShape(t, x, y, w, h, { like, linkFrom } = {}) {
+  const b = boardOf();
+  if (!b) return;
+  record();
+  const s = newShape(t, x, y, w, h, like);
   b.shapes.push(s);
-  state.bsel = { type: 'shape', id: s.id };
-  setTool('select');
+  if (linkFrom) b.links.push({ id: uid(), from: linkFrom, to: { id: s.id }, end: 'arrow' });
+  state.bsel = pickShapes([s.id]);
+  afterCreateTool();
   renderCanvas();
-  const el = $(`.shape[data-sid="${s.id}"]`);
-  if (el && !reduceMotion.matches) el.animate([{ transform: 'scale(.92)' }, { transform: 'none' }], { duration: 160, easing: 'ease-out' });
-  startEdit(s.id); // 先进入编辑，马上就能打字；保存在后台进行（重绘时会保留正在输入的内容）
+  const el = shEl(s.id);
+  if (el && !reduceMotion.matches) el.animate([{ transform: 'scale(.9)' }, { transform: 'none' }], { duration: 170, easing: 'cubic-bezier(.2,.9,.3,1.2)' });
+  startEdit(s.id, { fresh: true }); // 先进入编辑，马上就能打字；保存在后台进行
   await saveBoard();
   return s;
 }
+// 在已选形状旁边（某个方向）新建一个相连的同款形状
+async function createConnected(s, dir) {
+  const gap = 90, w = s.w, h = s.h;
+  const pos = { ArrowRight: [s.x + s.w + gap, s.y], ArrowLeft: [s.x - gap - w, s.y], ArrowDown: [s.x, s.y + s.h + gap], ArrowUp: [s.x, s.y - gap - h] }[dir];
+  await createShape(s.t === 'text' ? 'rect' : s.t, pos[0], pos[1], w, h, { like: s, linkFrom: { id: s.id } });
+}
 
 // ---- 编辑文字 ----
-function startEdit(id, keepCaret) {
-  const s = shapeById(id), el = $(`.shape[data-sid="${CSS.escape(id)}"]`);
+function startEdit(id, opts = {}) {
+  const s = shapeById(id), el = shEl(id);
   if (!s || !el) return;
-  if (!(state.bsel?.type === 'shape' && state.bsel.id === id)) { state.bsel = { type: 'shape', id }; renderCanvas(); return startEdit(id, keepCaret); }
+  if (!(isPicked(id) && selIds().length === 1)) { state.bsel = pickShapes([id]); renderCanvas(); return startEdit(id, opts); }
+  if (!opts.keep) { editSnap = opts.fresh ? null : snapBoard(); editOrig = s.text || ''; }
   const tx = el.querySelector('.sh-tx');
   editingShape = id;
   el.classList.add('editing');
@@ -1949,27 +2035,39 @@ function startEdit(id, keepCaret) {
   tx.focus({ preventScroll: true });
   const r = document.createRange();
   r.selectNodeContents(tx);
-  if (keepCaret || s.text) r.collapse(false);
+  if (opts.keep || s.text) r.collapse(false);
   const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
   fitShapeText(s, el);
 }
-function fitShapeText(s, el) {
+// 便签：字多了自动缩小字号（不改便签大小）；其他形状：字多了自动长高
+function fitSticky(s, el) {
   const tx = el.querySelector('.sh-tx');
-  const need = tx.scrollHeight + (s.t === 'text' ? 8 : s.t === 'diamond' ? s.h * 0.5 : s.t === 'ellipse' ? s.h * 0.3 : 24);
-  if (need > s.h) { el.style.height = `${Math.ceil(need)}px`; } else if (s.t === 'text') el.style.height = `${Math.max(SH_DEF.text.h, Math.ceil(need))}px`;
+  let fs = s.fs || 18;
+  el.style.setProperty('--fs', `${fs}px`);
+  const avail = el.clientHeight - 36;
+  while (tx.scrollHeight > avail && fs > 10) { fs -= 1; el.style.setProperty('--fs', `${fs}px`); }
+}
+function fitShapeText(s, el) {
+  if (s.t === 'sticky') { fitSticky(s, el); return; }
+  const tx = el.querySelector('.sh-tx');
+  const need = tx.scrollHeight + (s.t === 'text' ? 8 : s.t === 'diamond' ? s.h * 0.5 : s.t === 'ellipse' ? s.h * 0.3 : 28);
+  if (need > s.h) el.style.height = `${Math.ceil(need)}px`;
+  else if (s.t === 'text') el.style.height = `${Math.max(SH_DEF.text.h, Math.ceil(need))}px`;
   drawLinks();
 }
 async function finishEdit() {
   const id = editingShape;
   if (!id) return;
   editingShape = null;
-  const s = shapeById(id), el = $(`.shape[data-sid="${CSS.escape(id)}"]`);
+  const s = shapeById(id), el = shEl(id);
   if (!s || !el) return;
   const tx = el.querySelector('.sh-tx');
   tx.contentEditable = 'false';
   el.classList.remove('editing');
   s.text = tx.innerText.replace(/\n$/, '').replace(/^\n+|\n+$/g, '');
   s.h = Math.max(s.t === 'text' ? 24 : 30, parseFloat(el.style.height) || s.h);
+  if (editSnap && s.text !== editOrig) record(editSnap);
+  editSnap = null;
   const b = boardOf();
   if (s.t === 'text' && !s.text.trim()) { b.shapes = b.shapes.filter((x) => x !== s); b.links = b.links.filter((l) => l.from.id !== id && l.to.id !== id); state.bsel = null; }
   await saveBoard();
@@ -1981,7 +2079,7 @@ document.addEventListener('input', (e) => {
 });
 document.addEventListener('focusout', (e) => { if (editingShape && !boardRendering && e.target.matches?.('.sh-tx') && e.target.isConnected) finishEdit(); });
 
-// ---- 连接点（悬停形状或卡片时出现，按住拖出箭头） ----
+// ---- 连接点（悬停形状或卡片时出现，按住拖出箭头；拖到空白处会新建一个相连的形状） ----
 function showDots(el) {
   const dots = $('#connDots');
   if (!dots) return;
@@ -1990,17 +2088,49 @@ function showDots(el) {
   if (!b) return hideDots();
   hoverRef = ref;
   Object.assign(dots.style, { left: `${b.x}px`, top: `${b.y}px`, width: `${b.w}px`, height: `${b.h}px` });
-  dots.classList.toggle('diamond', b.t === 'diamond');
   dots.hidden = false;
 }
 function hideDots() { const d = $('#connDots'); if (d) d.hidden = true; hoverRef = null; }
 vp.addEventListener('pointerover', (e) => {
-  if (bd || cardDrag || pan || editingShape || e.pointerType === 'touch' || !['select', 'arrow'].includes(state.tool)) return;
+  if (bd || cardDrag || pan || editingShape || spaceDown || e.pointerType === 'touch' || !['select', 'arrow'].includes(state.tool)) return;
   if (e.target.closest('.conn-dots')) return;
   const el = e.target.closest('.shape, .card.on-canvas');
-  if (el) showDots(el); else hideDots();
+  if (el && !(el.classList.contains('picked') && selIds().length > 1)) showDots(el); else hideDots();
 });
 vp.addEventListener('pointerleave', () => { if (!bd) hideDots(); });
+vp.addEventListener('pointermove', (e) => { lastPointer = { x: e.clientX, y: e.clientY }; }, true);
+
+// ---- 对齐吸附 ----
+function snapTargets(exclude) {
+  const xs = [], ys = [], add = (b) => { xs.push(b.x, b.x + b.w / 2, b.x + b.w); ys.push(b.y, b.y + b.h / 2, b.y + b.h); };
+  for (const s of boardOf().shapes) if (!exclude.has(s.id)) add(s);
+  for (const el of $$('#world .card.on-canvas')) add({ x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight });
+  return { xs, ys };
+}
+function nearest(vals, cands, tol) {
+  let best = null;
+  for (let i = 0; i < vals.length; i++) for (const c of cands) {
+    const d = c - vals[i];
+    if (Math.abs(d) <= tol && (!best || Math.abs(d) < Math.abs(best.d))) best = { d, at: c };
+  }
+  return best;
+}
+function showGuides(gx, gy, box) {
+  const g = $('#guides');
+  if (!g) return;
+  const ext = 4000;
+  g.innerHTML = (gx ? `<i class="gl gx" style="left:${gx.at}px;top:${box.y - ext}px;height:${box.h + ext * 2}px"></i>` : '')
+    + (gy ? `<i class="gl gy" style="top:${gy.at}px;left:${box.x - ext}px;width:${box.w + ext * 2}px"></i>` : '');
+}
+const clearGuides = () => { const g = $('#guides'); if (g) g.innerHTML = ''; };
+function showSizeTip(e, w, h) {
+  const tip = $('#sizeTip'), cv = $('#canvasView').getBoundingClientRect();
+  if (!tip) return;
+  tip.hidden = false;
+  tip.textContent = `${Math.round(w)} × ${Math.round(h)}`;
+  tip.style.left = `${e.clientX - cv.left + 14}px`; tip.style.top = `${e.clientY - cv.top + 16}px`;
+}
+const hideSizeTip = () => { const t = $('#sizeTip'); if (t) t.hidden = true; };
 
 // ---- 按下 / 拖动 / 松开 ----
 function boardDown(e) {
@@ -2011,7 +2141,7 @@ function boardDown(e) {
   const handle = e.target.closest('[data-handle]'), dot = e.target.closest('[data-dot]'), lend = e.target.closest('[data-lend]');
   const shapeEl = e.target.closest('.shape'), linkEl = e.target.closest('[data-lid]'), cardEl = e.target.closest('.card');
   const capture = () => { try { vp.setPointerCapture(e.pointerId); } catch {} };
-  const base = { pid: e.pointerId, sx: e.clientX, sy: e.clientY, moved: false };
+  const base = { pid: e.pointerId, sx: e.clientX, sy: e.clientY, moved: false, snap: snapBoard() };
   if (handle && shapeEl) {
     const s = shapeById(shapeEl.dataset.sid);
     bd = { ...base, mode: 'resize', s, el: shapeEl, k: handle.dataset.handle, o: { x: s.x, y: s.y, w: s.w, h: s.h } };
@@ -2024,28 +2154,39 @@ function boardDown(e) {
   }
   if (dot || (state.tool === 'arrow' && !e.target.closest('.more, .export-handle, .sel'))) {
     const owner = dot ? hoverRef : (shapeEl?.dataset.sid || (cardEl && cardEl.classList.contains('on-canvas') ? cardEl.dataset.id : null));
-    bd = { ...base, mode: 'link', from: owner ? { id: owner } : { x: Math.round(p.x), y: Math.round(p.y) }, cur: p };
+    bd = { ...base, mode: 'link', fromDot: !!dot, from: owner ? { id: owner } : { x: Math.round(p.x), y: Math.round(p.y) }, cur: p };
     capture(); hideDots(); e.preventDefault(); return true;
   }
   if (SH_DEF[state.tool]) {
     bd = { ...base, mode: 'create', t: state.tool, p0: p };
     capture(); return true;
   }
-  if (linkEl) {
-    selectBoard({ type: 'link', id: linkEl.dataset.lid });
-    return true;
-  }
+  if (linkEl) { selectBoard({ type: 'link', id: linkEl.dataset.lid }); return true; }
   if (shapeEl) {
-    const s = shapeById(shapeEl.dataset.sid);
-    const was = state.bsel?.type === 'shape' && state.bsel.id === s.id;
-    if (!was) selectBoard({ type: 'shape', id: s.id });
-    bd = { ...base, mode: 'move', s, o: { x: s.x, y: s.y }, was };
+    const id = shapeEl.dataset.sid;
+    const was = isPicked(id);
+    if (e.shiftKey) {
+      // Shift + 点击：加入 / 移出多选
+      const ids = was ? selIds().filter((x) => x !== id) : [...selIds(), id];
+      selectBoard(pickShapes(ids));
+      if (was) return true;
+    } else if (!was) selectBoard(pickShapes([id]));
+    const items = selShapes().map((s) => ({ s, o: { x: s.x, y: s.y } }));
+    bd = { ...base, mode: 'move', items, clicked: id, was: was && !e.shiftKey && selIds().length === 1 };
+    capture(); return true;
+  }
+  if (e.shiftKey && state.tool === 'select' && !cardEl) {
+    // Shift + 拖动空白处：框选
+    bd = { ...base, mode: 'marquee', p0: p, base: [...selIds()] };
     capture(); return true;
   }
   if (state.bsel) {
     // 点在卡片上：只去掉形状的选中样式，不整体重绘（后面还要拖这张卡片）
-    if (cardEl) { state.bsel = null; $$('#world .shape.picked').forEach((x) => { x.classList.remove('picked'); x.querySelectorAll('.sh-h').forEach((h) => h.remove()); }); drawLinks(); positionFmt(); }
-    else selectBoard(null);
+    if (cardEl) {
+      state.bsel = null;
+      $$('#world .shape.picked').forEach((x) => { x.classList.remove('picked'); x.querySelectorAll('.sh-h').forEach((h) => h.remove()); });
+      decorateBoard(); drawLinks(); positionFmt();
+    } else selectBoard(null);
   }
   return false;
 }
@@ -2053,36 +2194,67 @@ function boardMove(e) {
   if (!bd || e.pointerId !== bd.pid) return false;
   const z = cam().z, dx = (e.clientX - bd.sx) / z, dy = (e.clientY - bd.sy) / z;
   if (!bd.moved && Math.hypot(e.clientX - bd.sx, e.clientY - bd.sy) < 4) return true;
-  if (!bd.moved) { bd.moved = true; hideDots(); $('#fmtBar').hidden = true; document.body.classList.add('board-dragging'); }
+  if (!bd.moved) {
+    bd.moved = true; hideDots(); $('#fmtBar').hidden = true; document.body.classList.add('board-dragging');
+    if (bd.mode === 'move' || bd.mode === 'resize') bd.snapT = snapTargets(new Set(bd.mode === 'move' ? bd.items.map((i) => i.s.id) : [bd.s.id]));
+  }
+  const tol = 6 / z, snapOn = !e.altKey;
   if (bd.mode === 'move') {
-    const el = $(`.shape[data-sid="${CSS.escape(bd.s.id)}"]`);
-    bd.s.x = Math.round(bd.o.x + dx); bd.s.y = Math.round(bd.o.y + dy);
-    if (el) { el.style.left = `${bd.s.x}px`; el.style.top = `${bd.s.y}px`; }
+    const ob = unionBox(bd.items.map((i) => ({ ...i.s, x: i.o.x, y: i.o.y })));
+    let mx = dx, my = dy, gx = null, gy = null;
+    if (snapOn) {
+      const bx = ob.x + dx, by = ob.y + dy;
+      gx = nearest([bx, bx + ob.w / 2, bx + ob.w], bd.snapT.xs, tol);
+      gy = nearest([by, by + ob.h / 2, by + ob.h], bd.snapT.ys, tol);
+      if (gx) mx += gx.d;
+      if (gy) my += gy.d;
+    }
+    for (const it of bd.items) {
+      it.s.x = Math.round(it.o.x + mx); it.s.y = Math.round(it.o.y + my);
+      const el = shEl(it.s.id);
+      if (el) { el.style.left = `${it.s.x}px`; el.style.top = `${it.s.y}px`; }
+    }
+    showGuides(gx, gy, { x: ob.x + mx, y: ob.y + my, w: ob.w, h: ob.h });
     drawLinks();
   } else if (bd.mode === 'resize') {
     const { o, k, s } = bd, min = 30;
-    let { x, y, w, h } = o;
-    if (k.includes('e')) w = Math.max(min, o.w + dx);
-    if (k.includes('s')) h = Math.max(min, o.h + dy);
-    if (k.includes('w')) { w = Math.max(min, o.w - dx); x = o.x + o.w - w; }
-    if (k.includes('n')) { h = Math.max(min, o.h - dy); y = o.y + o.h - h; }
-    if (e.shiftKey || s.t === 'ellipse' && o.w === o.h && !e.altKey) { const m = Math.max(w, h); if (k.includes('w')) x = o.x + o.w - m; if (k.includes('n')) y = o.y + o.h - m; w = h = m; }
+    let { x, y, w, h } = o, gx = null, gy = null;
+    if (k.includes('e')) { w = Math.max(min, o.w + dx); if (snapOn && (gx = nearest([x + w], bd.snapT.xs, tol))) w += gx.d; }
+    if (k.includes('w')) { x = o.x + dx; if (snapOn && (gx = nearest([x], bd.snapT.xs, tol))) x += gx.d; w = Math.max(min, o.x + o.w - x); x = o.x + o.w - w; }
+    if (k.includes('s')) { h = Math.max(min, o.h + dy); if (snapOn && (gy = nearest([y + h], bd.snapT.ys, tol))) h += gy.d; }
+    if (k.includes('n')) { y = o.y + dy; if (snapOn && (gy = nearest([y], bd.snapT.ys, tol))) y += gy.d; h = Math.max(min, o.y + o.h - y); y = o.y + o.h - h; }
+    if (k.length === 2 && (e.shiftKey || (s.t === 'ellipse' && o.w === o.h))) {
+      const m = Math.max(w, h); if (k.includes('w')) x = o.x + o.w - m; if (k.includes('n')) y = o.y + o.h - m; w = h = m; gx = gy = null;
+    }
     Object.assign(s, { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) });
     Object.assign(bd.el.style, { left: `${s.x}px`, top: `${s.y}px`, width: `${s.w}px`, height: `${s.h}px` });
+    if (s.t === 'sticky') fitSticky(s, bd.el);
+    showGuides(gx, gy, s);
+    showSizeTip(e, s.w, s.h);
     drawLinks();
   } else if (bd.mode === 'create') {
     const p = toWorld(e.clientX, e.clientY);
-    const x = Math.min(p.x, bd.p0.x), y = Math.min(p.y, bd.p0.y), w = Math.abs(p.x - bd.p0.x), h = Math.abs(p.y - bd.p0.y);
+    let w = Math.abs(p.x - bd.p0.x), h = Math.abs(p.y - bd.p0.y);
+    if (e.shiftKey) w = h = Math.max(w, h);
+    const x = p.x < bd.p0.x ? bd.p0.x - w : bd.p0.x, y = p.y < bd.p0.y ? bd.p0.y - h : bd.p0.y;
     if (!bd.ghost) { bd.ghost = document.createElement('div'); bd.ghost.className = `shape-ghost st-${bd.t}`; $('#world').appendChild(bd.ghost); }
     Object.assign(bd.ghost.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
     bd.box = { x, y, w, h };
+    showSizeTip(e, w, h);
+  } else if (bd.mode === 'marquee') {
+    const p = toWorld(e.clientX, e.clientY);
+    const r = { x: Math.min(p.x, bd.p0.x), y: Math.min(p.y, bd.p0.y), w: Math.abs(p.x - bd.p0.x), h: Math.abs(p.y - bd.p0.y) };
+    if (!bd.ghost) { bd.ghost = document.createElement('div'); bd.ghost.className = 'marquee'; $('#world').appendChild(bd.ghost); }
+    Object.assign(bd.ghost.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
+    const hit = boardOf().shapes.filter((s) => s.x < r.x + r.w && s.x + s.w > r.x && s.y < r.y + r.h && s.y + s.h > r.y).map((s) => s.id);
+    bd.hits = [...new Set([...bd.base, ...hit])];
+    $$('#world .shape').forEach((el) => el.classList.toggle('picked', bd.hits.includes(el.dataset.sid)));
   } else if (bd.mode === 'link') {
     bd.cur = toWorld(e.clientX, e.clientY);
     const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest('.shape, .card.on-canvas');
     const id = hit && (hit.dataset.sid || hit.dataset.id);
-    const fromId = bd.from.id;
     $$('.link-target').forEach((x) => x.classList.remove('link-target'));
-    if (id && id !== fromId) { hit.classList.add('link-target'); bd.target = { id }; } else bd.target = null;
+    if (id && id !== bd.from.id) { hit.classList.add('link-target'); bd.target = { id }; } else bd.target = null;
     if (bd.lid) bd.cur = bd.target || { x: bd.cur.x, y: bd.cur.y };
     drawLinks();
   }
@@ -2094,15 +2266,17 @@ async function boardUp(e) {
   document.body.classList.remove('board-dragging');
   $$('.link-target').forEach((x) => x.classList.remove('link-target'));
   d.ghost?.remove();
+  clearGuides(); hideSizeTip();
   if (e.type === 'pointercancel') { renderCanvas(); return true; }
   if (d.moved) { suppressClick = true; setTimeout(() => { suppressClick = false; }, 0); }
   const b = boardOf();
   if (d.mode === 'move' || d.mode === 'resize') {
-    if (d.moved) await saveBoard();
-    else if (d.mode === 'move' && d.was) startEdit(d.s.id); // 再点一下已选中的形状 → 编辑文字
-    else positionFmt();
+    if (d.moved) { record(d.snap); await saveBoard(); }
+    else if (d.mode === 'move' && d.was) startEdit(d.clicked); // 再点一下已选中的形状 → 编辑文字
+    else { decorateBoard(); positionFmt(); }
     return true;
   }
+  if (d.mode === 'marquee') { selectBoard(pickShapes(d.hits || d.base)); return true; }
   if (d.mode === 'create') {
     const box = d.moved && d.box && d.box.w > 12 && d.box.h > 12 ? d.box : null;
     const def = SH_DEF[d.t];
@@ -2111,41 +2285,121 @@ async function boardUp(e) {
     return true;
   }
   if (d.mode === 'link') {
-    const end = d.target || { x: Math.round(d.cur.x), y: Math.round(d.cur.y) };
     if (d.lid) {
       const l = linkById(d.lid);
-      if (l && d.moved) { l[d.end] = d.target || { x: Math.round(d.cur.x), y: Math.round(d.cur.y) }; await saveBoard(); }
+      if (l && d.moved) { record(d.snap); l[d.end] = d.target || { x: Math.round(d.cur.x), y: Math.round(d.cur.y) }; await saveBoard(); }
       else drawLinks();
       return true;
     }
-    if (!d.moved || (!d.target && !d.from.id && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 30)) { drawLinks(); return true; }
-    const l = { id: uid(), from: d.from, to: end, end: 'arrow' };
+    const dist = Math.hypot(e.clientX - d.sx, e.clientY - d.sy);
+    if (!d.moved || (!d.target && !d.from.id && dist < 30)) { drawLinks(); return true; }
+    // 从连接点拖到空白处：在松手的位置新建一个相连的同款形状，直接输入
+    if (!d.target && d.fromDot && d.from.id && dist > 40 && !e.altKey) {
+      const src = shapeById(d.from.id), t = src ? (src.t === 'text' ? 'rect' : src.t) : 'sticky';
+      const w = src && src.t !== 'text' ? src.w : SH_DEF[t].w, h = src && src.t !== 'text' ? src.h : SH_DEF[t].h;
+      await createShape(t, d.cur.x - w / 2, d.cur.y - h / 2, w, h, { like: src, linkFrom: d.from });
+      return true;
+    }
+    record(d.snap);
+    const l = { id: uid(), from: d.from, to: d.target || { x: Math.round(d.cur.x), y: Math.round(d.cur.y) }, end: 'arrow' };
     b.links.push(l);
     state.bsel = { type: 'link', id: l.id };
-    setTool('select');
+    afterCreateTool();
     await saveBoard();
     return true;
   }
   return true;
 }
 
-// ---- 删除 / 复制 / 层级 ----
+// ---- 删除 / 复制 / 粘贴 / 层级 / 对齐 ----
 async function deleteBoardSel() {
   const b = boardOf(), sel = state.bsel;
   if (!b || !sel) return;
-  const before = { shapes: [...b.shapes], links: [...b.links] };
-  if (sel.type === 'shape') { b.shapes = b.shapes.filter((s) => s.id !== sel.id); b.links = b.links.filter((l) => l.from.id !== sel.id && l.to.id !== sel.id); }
-  else b.links = b.links.filter((l) => l.id !== sel.id);
+  record();
+  let n = 1;
+  if (sel.type === 'shape') {
+    const ids = new Set(sel.ids); n = ids.size;
+    b.shapes = b.shapes.filter((s) => !ids.has(s.id));
+    b.links = b.links.filter((l) => !ids.has(l.from.id) && !ids.has(l.to.id));
+  } else b.links = b.links.filter((l) => l.id !== sel.id);
   state.bsel = null;
   await saveBoard();
-  toast(sel.type === 'shape' ? '已删除' : '已删除连线', { action: '撤销', onAction: async () => { Object.assign(b, before); await saveBoard(); } });
+  toast(sel.type === 'shape' ? `已删除${n > 1 ? ` ${n} 个形状` : ''}` : '已删除连线', { action: '撤销', onAction: () => undoBoard() });
 }
-async function duplicateShape(id) {
-  const b = boardOf(), s = shapeById(id);
-  if (!s) return;
-  const c = { ...s, id: uid(), x: s.x + 24, y: s.y + 24, z: topOrder(state.view) };
-  b.shapes.push(c);
-  state.bsel = { type: 'shape', id: c.id };
+// 复制一组形状（连同它们之间的连线），偏移 dx/dy 放下并选中
+async function cloneShapes(list, links, dx, dy) {
+  const b = boardOf();
+  if (!b || !list.length) return;
+  record();
+  const map = new Map(), top = topOrder(state.view);
+  const copies = list.map((s, i) => { const c = { ...s, id: uid(), x: Math.round(s.x + dx), y: Math.round(s.y + dy), z: top + i }; delete c._t; map.set(s.id, c.id); return c; });
+  b.shapes.push(...copies);
+  for (const l of links) if (map.has(l.from.id) && map.has(l.to.id)) b.links.push({ ...l, id: uid(), from: { id: map.get(l.from.id) }, to: { id: map.get(l.to.id) } });
+  state.bsel = pickShapes(copies.map((c) => c.id));
+  await saveBoard();
+}
+const innerLinks = (ids) => boardOf().links.filter((l) => ids.has(l.from.id) && ids.has(l.to.id));
+function duplicateSel() { const list = selShapes(); return cloneShapes(list, innerLinks(new Set(list.map((s) => s.id))), 24, 24); }
+const CLIP_MARK = '方寸白板:';
+function copySel() {
+  const list = selShapes();
+  if (!list.length) return false;
+  boardClip = { id: uid(), shapes: JSON.parse(JSON.stringify(list)), links: JSON.parse(JSON.stringify(innerLinks(new Set(list.map((s) => s.id))))) };
+  pasteN = 0;
+  return true;
+}
+async function pasteClip() {
+  if (!boardClip) return;
+  const ub = unionBox(boardClip.shapes), vr = $('#viewport').getBoundingClientRect();
+  let dx, dy;
+  const inside = lastPointer && lastPointer.x > vr.left && lastPointer.x < vr.right && lastPointer.y > vr.top && lastPointer.y < vr.bottom;
+  if (inside && pasteN === 0) { const p = toWorld(lastPointer.x, lastPointer.y); dx = p.x - ub.x - ub.w / 2; dy = p.y - ub.y - ub.h / 2; pasteN = 1; }
+  else { pasteN++; dx = dy = 24 * pasteN; }
+  await cloneShapes(boardClip.shapes, boardClip.links, dx, dy);
+}
+// 复制 / 剪切 / 粘贴走系统剪贴板事件：系统剪贴板里放一个标记，粘贴时认出来才粘贴形状，否则照常粘贴文件和文字
+// （个别环境按快捷键不触发剪贴板事件：键盘处理里留了 60ms 的兜底，事件来了就取消兜底）
+let clipTimer = 0, copiedAt = 0;
+const boardClipboardOK = (e) => isCanvas(state.view) && !editingShape && !isTypingTarget(e.target) && !$('#modal').open && !$('#viewer').open && !getSelection().toString();
+function doCopy(cut) {
+  if (!copySel()) return false;
+  copiedAt = Date.now();
+  if (cut) deleteBoardSel(); else toast(`已复制 ${boardClip.shapes.length} 个形状，Ctrl+V 粘贴`);
+  return true;
+}
+// 按键时已经复制好了；系统的 copy / cut 事件只负责把标记写进系统剪贴板（右键菜单复制时也走这里）
+function onCopyEvent(e, cut) {
+  if (!boardClipboardOK(e)) return;
+  if (!(Date.now() - copiedAt < 500 && boardClip) && !(selIds().length && doCopy(cut))) return;
+  e.preventDefault(); e.clipboardData.setData('text/plain', CLIP_MARK + boardClip.id);
+}
+document.addEventListener('copy', (e) => onCopyEvent(e, false), true);
+document.addEventListener('cut', (e) => onCopyEvent(e, true), true);
+window.addEventListener('paste', (e) => {
+  if (!isCanvas(state.view) || editingShape || isTypingTarget(e.target)) return;
+  clearTimeout(clipTimer); // 系统粘贴事件来了：只有剪贴板里是我们的标记才粘贴形状，否则交给原来的文件 / 文字粘贴
+  if (!boardClip || e.clipboardData?.getData('text/plain') !== CLIP_MARK + boardClip.id) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  pasteClip();
+}, true);
+async function alignSel(op) {
+  const list = selShapes();
+  if (list.length < 2) return;
+  record();
+  const ub = unionBox(list);
+  if (op === 'l') list.forEach((s) => { s.x = ub.x; });
+  if (op === 'r') list.forEach((s) => { s.x = ub.x + ub.w - s.w; });
+  if (op === 'ch') list.forEach((s) => { s.x = Math.round(ub.x + ub.w / 2 - s.w / 2); });
+  if (op === 't') list.forEach((s) => { s.y = ub.y; });
+  if (op === 'b') list.forEach((s) => { s.y = ub.y + ub.h - s.h; });
+  if (op === 'cv') list.forEach((s) => { s.y = Math.round(ub.y + ub.h / 2 - s.h / 2); });
+  if (op === 'dh' || op === 'dv') {
+    const k = op === 'dh' ? 'x' : 'y', sz = op === 'dh' ? 'w' : 'h';
+    const sorted = [...list].sort((a, b) => a[k] - b[k]);
+    const gap = (ub[sz] - sorted.reduce((t, s) => t + s[sz], 0)) / (sorted.length - 1);
+    let at = ub[k];
+    for (const s of sorted) { s[k] = Math.round(at); at += s[sz] + gap; }
+  }
   await saveBoard();
 }
 async function editLinkLabel(id) {
@@ -2153,7 +2407,8 @@ async function editLinkLabel(id) {
   if (!l) return;
   state.bsel = { type: 'link', id };
   const t = await prompt({ title: '连线上的文字', value: l.label || '', placeholder: '例如：然后、依赖、反馈', ok: '保存', optional: true });
-  if (t === null || t === undefined) return renderCanvas();
+  if (t === null || t === undefined || (t || '') === (l.label || '')) return renderCanvas();
+  record();
   if (t) l.label = t; else delete l.label;
   await saveBoard();
 }
@@ -2165,79 +2420,99 @@ const FI = {
   front: '<rect x="8" y="8" width="12" height="12" rx="1.5"/><path d="M4 16V5a1 1 0 0 1 1-1h11"/>', copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
   trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>', label: '<path d="M5 6V4h14v2M12 4v16M9 20h6"/>',
   dash: '<path d="M3 12h4M10 12h4M17 12h4"/>', curve: '<path d="M4 18C10 18 14 6 20 6"/>', swap: '<path d="M4 8h14l-3-3M20 16H6l3 3"/>',
+  chev: '<path d="m7 10 5 5 5-5"/>',
 };
-const fbtn = (act, icon, title, on) => `<button type="button" class="icon-btn${on ? ' on' : ''}" data-fmt="${act}" title="${title}" aria-label="${title}"${on != null ? ` aria-pressed="${!!on}"` : ''}><svg viewBox="0 0 24 24">${FI[icon]}</svg></button>`;
+const fbtn = (act, icon, tip, on) => `<button type="button" class="icon-btn${on ? ' on' : ''}" data-fmt="${act}" data-tip="${tip}" aria-label="${tip}"${on != null ? ` aria-pressed="${!!on}"` : ''}><svg viewBox="0 0 24 24">${FI[icon]}</svg></button>`;
 function positionFmt() {
   const bar = $('#fmtBar');
   if (!bar) return;
   const sel = state.bsel;
-  const item = sel && (sel.type === 'shape' ? shapeById(sel.id) : linkById(sel.id));
-  if (!item || !isCanvas(state.view) || bd?.moved) { bar.hidden = true; delete bar.dataset.for; return; }
-  const key = `${sel.type}:${sel.id}:${JSON.stringify(item)}`;
+  const items = !sel ? [] : sel.type === 'shape' ? selShapes() : [linkById(sel.id)].filter(Boolean);
+  if (!items.length || !isCanvas(state.view) || bd?.moved) { bar.hidden = true; delete bar.dataset.for; return; }
+  const key = `${sel.type}:${JSON.stringify(items, (k, v) => (k === '_t' ? undefined : v))}:${fmtPop}`;
   if (bar.dataset.for !== key) {
     bar.dataset.for = key;
     if (sel.type === 'shape') {
-      const s = item;
-      bar.innerHTML = `<select data-fmt="shape" aria-label="形状" title="形状">${Object.entries(SHAPE_NAMES).map(([k, n]) => `<option value="${k}" ${k === s.t ? 'selected' : ''}>${n}</option>`).join('')}</select>
+      const s = items[items.length - 1], many = items.length > 1, col = shColor(s);
+      const sameT = items.every((x) => x.t === s.t);
+      bar.innerHTML = `${many ? `<span class="fb-count">${items.length} 个</span>` : ''}
+        <select data-fmt="shape" aria-label="形状" data-tip="形状">${sameT ? '' : '<option value="" selected>混合</option>'}${Object.entries(SHAPE_NAMES).map(([k, n]) => `<option value="${k}" ${sameT && k === s.t ? 'selected' : ''}>${n}</option>`).join('')}</select>
         <span class="sep"></span>
-        <div class="fb-sw">${SH_COLORS.map((c, k) => `<button type="button" class="sw${s.fill === k ? ' on' : ''}" data-fmt="fill" data-v="${k}" style="--c:${c.bg};--d:${c.bd}" title="${c.n}" aria-label="颜色：${c.n}"></button>`).join('')}
-          <button type="button" class="sw none${shColor(s) ? '' : ' on'}" data-fmt="fill" data-v="none" title="无填充" aria-label="无填充"></button></div>
+        <button type="button" class="fb-chip${fmtPop === 'fill' ? ' open' : ''}" data-fmt="pop" data-v="fill" data-tip="填充颜色" aria-label="填充颜色" aria-expanded="${fmtPop === 'fill'}">
+          <i class="sw${col ? '' : ' none'}" style="--c:${col ? col.bg : 'transparent'};--d:${col ? col.bd : 'var(--border)'}"></i><svg viewBox="0 0 24 24">${FI.chev}</svg></button>
         <span class="sep"></span>
         ${fbtn('fs-', 'minus', '缩小字号')}
-        <select data-fmt="fs" aria-label="字号" title="字号">${[...new Set([...FONT_SIZES, s.fs])].sort((a, b) => a - b).map((n) => `<option value="${n}" ${n === s.fs ? 'selected' : ''}>${n}</option>`).join('')}</select>
+        <select data-fmt="fs" aria-label="字号" data-tip="字号">${[...new Set([...FONT_SIZES, s.fs])].sort((a, b) => a - b).map((n) => `<option value="${n}" ${n === s.fs ? 'selected' : ''}>${n}</option>`).join('')}</select>
         ${fbtn('fs+', 'plus', '放大字号')}
-        ${fbtn('bold', 'bold', '加粗', !!s.b)}${fbtn('align', s.al === 'left' ? 'left' : 'center', s.al === 'left' ? '左对齐（点一下居中）' : '居中（点一下左对齐）')}
+        ${fbtn('bold', 'bold', '加粗', items.every((x) => x.b))}${fbtn('align', s.al === 'left' ? 'left' : 'center', s.al === 'left' ? '左对齐' : '居中')}
+        ${many ? `<span class="sep"></span><select data-fmt="arrange" aria-label="对齐与分布" data-tip="对齐与分布"><option value="" selected>对齐…</option>${Object.entries(ALIGN_OPS).filter(([k]) => items.length > 2 || !k.startsWith('d')).map(([k, n]) => `<option value="${k}">${n}</option>`).join('')}</select>` : ''}
         <span class="sep"></span>
-        ${fbtn('front', 'front', '置于顶层')}${fbtn('dup', 'copy', '复制（Ctrl+D）')}${fbtn('del', 'trash', '删除（Delete）')}`;
+        ${fbtn('front', 'front', '置于顶层')}${fbtn('dup', 'copy', '复制一份 · Ctrl+D')}${fbtn('del', 'trash', '删除 · Delete')}
+        ${fmtPop === 'fill' ? `<div class="fb-pop" role="menu">${SH_COLORS.map((c, k) => `<button type="button" class="sw${col && s.fill === k ? ' on' : ''}" data-fmt="fill" data-v="${k}" style="--c:${c.bg};--d:${c.bd}" data-tip="${c.n}" aria-label="${c.n}"></button>`).join('')}<button type="button" class="sw none${col ? '' : ' on'}" data-fmt="fill" data-v="none" data-tip="无填充" aria-label="无填充"></button></div>` : ''}`;
     } else {
-      const l = item;
-      bar.innerHTML = `<select data-fmt="end" aria-label="箭头" title="箭头"><option value="arrow" ${!l.end || l.end === 'arrow' ? 'selected' : ''}>单向箭头 →</option><option value="both" ${l.end === 'both' ? 'selected' : ''}>双向箭头 ↔</option><option value="none" ${l.end === 'none' ? 'selected' : ''}>无箭头 —</option></select>
+      const l = items[0];
+      bar.innerHTML = `<select data-fmt="end" aria-label="箭头" data-tip="箭头"><option value="arrow" ${!l.end || l.end === 'arrow' ? 'selected' : ''}>→ 单向</option><option value="both" ${l.end === 'both' ? 'selected' : ''}>↔ 双向</option><option value="none" ${l.end === 'none' ? 'selected' : ''}>— 无箭头</option></select>
         ${fbtn('swap', 'swap', '反转方向')}${fbtn('dash', 'dash', '虚线', !!l.dash)}${fbtn('curve', 'curve', '曲线', !!l.curve)}
         <span class="sep"></span>
-        <div class="fb-sw">${LINK_COLORS.map((c, k) => `<button type="button" class="sw line${(l.color || null) === c ? ' on' : ''}" data-fmt="lcolor" data-v="${k}" style="--c:${c || 'var(--text-2)'}" aria-label="线条颜色"></button>`).join('')}</div>
+        <button type="button" class="fb-chip${fmtPop === 'line' ? ' open' : ''}" data-fmt="pop" data-v="line" data-tip="线条颜色" aria-label="线条颜色" aria-expanded="${fmtPop === 'line'}">
+          <i class="sw line" style="--c:${l.color || 'var(--text-2)'}"></i><svg viewBox="0 0 24 24">${FI.chev}</svg></button>
         <span class="sep"></span>
-        ${fbtn('label', 'label', '线上文字（双击连线也可以）')}${fbtn('del', 'trash', '删除（Delete）')}`;
+        ${fbtn('label', 'label', '线上文字 · 双击连线')}${fbtn('del', 'trash', '删除 · Delete')}
+        ${fmtPop === 'line' ? `<div class="fb-pop" role="menu">${LINK_COLORS.map((c, k) => `<button type="button" class="sw line${(l.color || null) === c ? ' on' : ''}" data-fmt="lcolor" data-v="${k}" style="--c:${c || 'var(--text-2)'}" aria-label="线条颜色 ${k + 1}"></button>`).join('')}</div>` : ''}`;
     }
   }
   // 位置：选中对象上方，放不下就放下方
   const c = cam(), vr = $('#viewport').getBoundingClientRect(), cv = $('#canvasView').getBoundingClientRect();
   let bx, by, bh;
-  if (sel.type === 'shape') { bx = item.x + item.w / 2; by = item.y; bh = item.h; }
-  else { const g = linkGeom(item); if (!g) { bar.hidden = true; return; } bx = g.mid.x; by = g.mid.y - 10; bh = 20; }
+  if (sel.type === 'shape') { const ub = unionBox(items); bx = ub.x + ub.w / 2; by = ub.y; bh = ub.h; }
+  else { const g = linkGeom(items[0]); if (!g) { bar.hidden = true; return; } bx = g.mid.x; by = g.mid.y - 10; bh = 20; }
   bar.hidden = false;
-  const sx = vr.left - cv.left + c.x + bx * c.z, top = vr.top - cv.top + c.y + by * c.z - bar.offsetHeight - 14;
-  const below = vr.top - cv.top + c.y + (by + bh) * c.z + 14;
+  const sx = vr.left - cv.left + c.x + bx * c.z, top = vr.top - cv.top + c.y + by * c.z - bar.offsetHeight - 16;
+  const below = vr.top - cv.top + c.y + (by + bh) * c.z + 16;
   bar.style.left = `${Math.min(cv.width - bar.offsetWidth / 2 - 8, Math.max(bar.offsetWidth / 2 + 8, sx))}px`;
-  bar.style.top = `${top < 8 ? Math.min(below, cv.height - bar.offsetHeight - 70) : top}px`;
+  const flip = top < 8;
+  bar.style.top = `${flip ? Math.min(below, cv.height - bar.offsetHeight - 70) : top}px`;
+  bar.classList.toggle('below', flip);
 }
 async function applyFmt(act, v) {
   const sel = state.bsel;
   if (!sel) return;
+  if (act === 'pop') { fmtPop = fmtPop === v ? null : v; return positionFmt(); }
   if (act === 'del') return deleteBoardSel();
+  if (act === 'dup') return duplicateSel();
+  if (act === 'arrange') return v && alignSel(v);
+  if (act === 'label') return editLinkLabel(sel.id);
+  if (act === 'shape' && !v) return;
+  record();
+  if (act === 'fill' || act === 'lcolor') fmtPop = null;
   if (sel.type === 'shape') {
-    const s = shapeById(sel.id);
-    if (!s) return;
-    if (act === 'dup') return duplicateShape(s.id);
-    if (act === 'shape') {
-      const was = s.t; s.t = v;
-      if (v === 'text' && was !== 'text') { s.fill = 'none'; s.al = 'left'; }
-      if (was === 'text' && v !== 'text' && !shColor(s)) s.fill = SH_DEF[v].fill;
-      if (v === 'ellipse' || v === 'sticky') { const m = Math.max(s.w, s.h); if (Math.abs(s.w - s.h) < m * 0.5) s.w = s.h = m; }
-    }
-    if (act === 'fill') s.fill = v === 'none' ? 'none' : +v;
-    if (act === 'fs') s.fs = +v;
-    if (act === 'fs-' || act === 'fs+') {
-      const cur = s.fs || 16, up = act === 'fs+';
-      s.fs = up ? FONT_SIZES.find((n) => n > cur) || cur : [...FONT_SIZES].reverse().find((n) => n < cur) || cur;
-    }
-    if (act === 'bold') s.b = !s.b;
-    if (act === 'align') s.al = s.al === 'left' ? 'center' : 'left';
-    if (act === 'front') s.z = topOrder(state.view);
+    const list = selShapes();
+    const top = topOrder(state.view), boldOn = !list.every((x) => x.b), al = list[list.length - 1].al === 'left' ? 'center' : 'left';
+    list.forEach((s, i) => {
+      if (act === 'shape') {
+        const was = s.t; s.t = v;
+        if (v === 'text' && was !== 'text') { s.fill = 'none'; s.al = 'left'; }
+        if (was === 'text' && v !== 'text' && !shColor(s)) { s.fill = SH_DEF[v].fill; s.al = 'center'; }
+        if (v === 'ellipse' || v === 'sticky') { const m = Math.max(s.w, s.h); if (Math.abs(s.w - s.h) < m * 0.5) s.w = s.h = m; }
+      }
+      if (act === 'fill') s.fill = v === 'none' ? 'none' : +v;
+      if (act === 'fs') s.fs = +v;
+      if (act === 'fs-' || act === 'fs+') {
+        const cur = s.fs || 16;
+        s.fs = act === 'fs+' ? FONT_SIZES.find((n) => n > cur) || cur : [...FONT_SIZES].reverse().find((n) => n < cur) || cur;
+      }
+      if (act === 'bold') { if (boldOn) s.b = true; else delete s.b; }
+      if (act === 'align') s.al = al;
+      if (act === 'front') s.z = top + i;
+    });
     if (['fs', 'fs-', 'fs+', 'bold', 'shape'].includes(act)) {
-      // 字变大后放不下：自动长高
+      // 字变大后放不下：自动长高（便签除外，便签会自动缩小字号）
       renderCanvas();
-      const el = $(`.shape[data-sid="${CSS.escape(s.id)}"]`), tx = el?.querySelector('.sh-tx');
-      if (tx) { const pad = s.t === 'text' ? 8 : s.t === 'diamond' ? s.h * 0.5 : s.t === 'ellipse' ? s.h * 0.3 : 24; s.h = Math.max(s.t === 'text' ? 24 : s.h, Math.ceil(tx.scrollHeight + pad)); }
+      for (const s of list) {
+        if (s.t === 'sticky') continue;
+        const tx = shEl(s.id)?.querySelector('.sh-tx');
+        if (tx) { const pad = s.t === 'text' ? 8 : s.t === 'diamond' ? s.h * 0.5 : s.t === 'ellipse' ? s.h * 0.3 : 28; s.h = Math.max(s.t === 'text' ? 24 : s.h, Math.ceil(tx.scrollHeight + pad)); }
+      }
     }
   } else {
     const l = linkById(sel.id);
@@ -2247,11 +2522,10 @@ async function applyFmt(act, v) {
     if (act === 'dash') l.dash = !l.dash;
     if (act === 'curve') l.curve = !l.curve;
     if (act === 'lcolor') { const c = LINK_COLORS[+v]; if (c) l.color = c; else delete l.color; }
-    if (act === 'label') return editLinkLabel(l.id);
   }
   await saveBoard();
 }
-$('#fmtBar').addEventListener('pointerdown', (e) => e.stopPropagation());
+$('#fmtBar').addEventListener('pointerdown', (e) => { e.stopPropagation(); if (e.target.closest('button')) e.preventDefault(); /* 不抢走正在编辑文字的焦点 */ });
 $('#fmtBar').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-fmt]');
   if (b) applyFmt(b.dataset.fmt, b.dataset.v);
@@ -2265,36 +2539,50 @@ $('#fmtBar').addEventListener('change', (e) => {
 document.addEventListener('keydown', (e) => {
   if (!isCanvas(state.view) || $('#modal').open || $('#viewer').open || ring) return;
   if (editingShape) {
-    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); $(`.shape[data-sid="${CSS.escape(editingShape)}"] .sh-tx`)?.blur(); }
+    if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); e.stopPropagation(); $(`.shape[data-sid="${CSS.escape(editingShape)}"] .sh-tx`)?.blur(); }
     return;
   }
   if (isTypingTarget(e.target) || e.altKey) return;
-  const k = e.key.toLowerCase(), sel = state.bsel;
-  if (!e.ctrlKey && !e.metaKey && TOOL_KEYS[k] && !e.target.closest?.('.card')) { e.preventDefault(); setTool(TOOL_KEYS[k]); return; }
+  const k = e.key.toLowerCase(), sel = state.bsel, mod = e.ctrlKey || e.metaKey;
+  const onCard = e.target.closest?.('.card, button, a');
+  if (e.key === ' ' && !onCard) { e.preventDefault(); if (!spaceDown) { spaceDown = true; vp.classList.add('space-pan'); hideDots(); } return; }
+  if (mod && k === 'z') { e.preventDefault(); undoBoard(e.shiftKey); return; }
+  if (mod && k === 'y') { e.preventDefault(); undoBoard(true); return; }
+  if (mod && (k === 'c' || k === 'x') && selIds().length && !getSelection().toString()) { doCopy(k === 'x'); return; }
+  if (mod && k === 'v' && boardClip) { clearTimeout(clipTimer); clipTimer = setTimeout(pasteClip, 60); return; }
+  if (mod && k === 'a' && !onCard) { e.preventDefault(); selectBoard(pickShapes(boardOf().shapes.map((s) => s.id))); return; }
+  if (!mod && TOOL_KEYS[k] && !onCard) { e.preventDefault(); setTool(TOOL_KEYS[k]); return; }
   if (e.key === 'Escape') {
     if (state.tool !== 'select') { setTool('select'); e.stopPropagation(); }
+    else if (fmtPop) { fmtPop = null; positionFmt(); e.stopPropagation(); }
     else if (sel) { selectBoard(null); e.stopPropagation(); }
     return;
   }
   if (!sel) return;
   if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteBoardSel(); return; }
   if (sel.type !== 'shape') return;
-  const s = shapeById(sel.id);
-  if (!s) return;
-  if ((e.ctrlKey || e.metaKey) && k === 'd') { e.preventDefault(); duplicateShape(s.id); return; }
-  if (e.key === 'Enter') { e.preventDefault(); startEdit(s.id); return; }
+  const list = selShapes();
+  if (!list.length) return;
+  if (mod && k === 'd') { e.preventDefault(); duplicateSel(); return; }
+  if (e.key === 'Enter' && list.length === 1) { e.preventDefault(); startEdit(list[0].id); return; }
   if (e.key.startsWith('Arrow')) {
     e.preventDefault();
+    if (mod && list.length === 1) { createConnected(list[0], e.key); return; }
     const st = e.shiftKey ? 40 : 10;
-    s.x += e.key === 'ArrowLeft' ? -st : e.key === 'ArrowRight' ? st : 0;
-    s.y += e.key === 'ArrowUp' ? -st : e.key === 'ArrowDown' ? st : 0;
-    const el = $(`.shape[data-sid="${CSS.escape(s.id)}"]`);
-    if (el) { el.style.left = `${s.x}px`; el.style.top = `${s.y}px`; }
-    drawLinks(); positionFmt();
-    clearTimeout(s._t);
-    s._t = setTimeout(() => { delete s._t; saveArea(boardOf()); }, 400);
+    if (!list[0]._t) record();
+    for (const s of list) {
+      s.x += e.key === 'ArrowLeft' ? -st : e.key === 'ArrowRight' ? st : 0;
+      s.y += e.key === 'ArrowUp' ? -st : e.key === 'ArrowDown' ? st : 0;
+      const el = shEl(s.id);
+      if (el) { el.style.left = `${s.x}px`; el.style.top = `${s.y}px`; }
+    }
+    drawLinks(); decorateBoard(); positionFmt();
+    clearTimeout(list[0]._t);
+    list[0]._t = setTimeout(() => { list.forEach((s) => delete s._t); saveArea(boardOf()); }, 400);
   }
 }, true);
+document.addEventListener('keyup', (e) => { if (e.key === ' ' && spaceDown) { spaceDown = false; vp.classList.remove('space-pan'); } });
+window.addEventListener('blur', () => { spaceDown = false; vp.classList.remove('space-pan'); });
 
 // ---------- 添加文件 ----------
 async function addFiles(files, areaId, index = null, pos = null, { quiet = false, extra = {} } = {}) {
