@@ -6,6 +6,8 @@ const BOARD = 'board';
 const ARCHIVE = 'archive';      // 「已完成项目」页面
 const PICK = 'archive-pick';    // 拖到「已完成项目」标签上 → 选择文件夹
 const WORKS = 'works';          // 「作品」页面
+const CANVASES = 'canvases';    // 「画布」工作区列表
+const CANVAS_PICK = 'canvas-pick';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
@@ -117,7 +119,7 @@ async function load() {
   state.cards = cards;
   const live = new Set(cards.map((c) => c.id));
   for (const [key, url] of state.urls) if (!live.has(key.replace(/^thumb:/, ''))) { URL.revokeObjectURL(url); state.urls.delete(key); }
-  if (state.view !== BOARD && state.view !== ARCHIVE && state.view !== WORKS && !isCanvas(state.view)) state.view = BOARD;
+  if (state.view !== BOARD && state.view !== ARCHIVE && state.view !== WORKS && state.view !== CANVASES && !isCanvas(state.view)) state.view = BOARD;
   if (state.folder && !area(state.folder)) state.folder = null;
   if (state.work && area(state.work)?.kind !== 'work') state.work = null;
   state.cats = await db.getMeta('categories', []).catch(() => []);
@@ -372,8 +374,18 @@ function render() {
   $('#board').hidden = !onBoard;
   $('#archiveView').hidden = !onArchive;
   $('#worksView').hidden = !onWorks;
-  $('#canvasView').hidden = onBoard || onArchive || onWorks;
-  if (onBoard) renderBoard(); else if (onArchive) renderArchive(); else if (onWorks) renderWorks(); else renderCanvas();
+  $('#canvasDirectory').hidden = state.view !== CANVASES;
+  $('#canvasWorkspace').hidden = !isCanvas(state.view);
+  if (onBoard) renderBoard();
+  else if (onArchive) renderArchive();
+  else if (onWorks) renderWorks();
+  else if (state.view === CANVASES) renderCanvasDirectory();
+  else if (isCanvas(state.view)) {
+    const title = area(state.view).title;
+    $('#canvasTitle').textContent = title;
+    $('#canvasTitle').title = title;
+    renderCanvas();
+  }
   renderZones();
   loadThumbs();
   playFlip(before);
@@ -478,6 +490,7 @@ function refreshCard(c) {
   loadThumbs();
   playFlip(before);
 }
+const CANVAS_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="2"/><circle cx="9" cy="9" r="1"/><circle cx="15" cy="15" r="1"/><circle cx="15" cy="9" r="1"/><circle cx="9" cy="15" r="1"/></svg>`;
 function renderViews() {
   const count = (id) => cardsIn(id, false).length;
   const boardCount = columns().reduce((n, c) => n + count(c.id), 0);
@@ -489,10 +502,25 @@ function renderViews() {
     <button role="tab" class="view-tab works-tab" data-view="${WORKS}" aria-selected="${state.view === WORKS}" title="个人作品：网站、设计、项目，含更新日志和在线预览">
       ${WORK_SVG}作品<b>${works().length}</b></button>
     <span class="view-sep" aria-hidden="true"></span>
-    ${canvases().map((cv) => `<button role="tab" class="view-tab" data-view="${cv.id}" data-drop="${cv.id}" aria-selected="${state.view === cv.id}">
-      <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="2"/><circle cx="9" cy="9" r="1"/><circle cx="15" cy="15" r="1"/><circle cx="15" cy="9" r="1"/><circle cx="9" cy="15" r="1"/></svg>${esc(cv.title)}<b>${count(cv.id)}</b>
-      ${state.view === cv.id ? `<span class="tab-more" data-action="canvas-menu" role="button" aria-label="画布设置">${DOTS}</span>` : ''}</button>`).join('')}
-    <button class="view-add" data-action="add-canvas" title="新建画布"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>画布</button>`;
+    <button role="tab" class="view-tab canvas-tab" data-view="${CANVASES}" data-drop="${CANVAS_PICK}" aria-selected="${state.view === CANVASES || isCanvas(state.view)}" aria-controls="${isCanvas(state.view) ? 'canvasWorkspace' : 'canvasDirectory'}" title="查看全部画布工作区">
+      ${CANVAS_SVG}画布<b>${canvases().length}</b></button>`;
+}
+function renderCanvasDirectory() {
+  const list = canvases();
+  $('#canvasDirectory').innerHTML = `<header class="canvas-directory-head">
+    <h2 id="canvasDirectoryTitle" tabindex="-1">画布工作区</h2>
+    <button type="button" class="btn" data-action="add-canvas"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>新建画布</button>
+    </header>
+    <ul class="canvas-directory-list">${list.map((cv) => `<li class="canvas-directory-item" data-drop="${esc(cv.id)}">
+      <button type="button" class="canvas-directory-open" data-view="${esc(cv.id)}" aria-label="打开画布 ${esc(cv.title)}">
+        <span class="canvas-directory-icon">${CANVAS_SVG}</span>
+        <span class="canvas-directory-info">
+          <strong>${esc(cv.title)}</strong>
+          <span>${cardsIn(cv.id, false).length} 张卡片${cv.shapes?.length ? ` · ${cv.shapes.length} 个白板对象` : ''}</span>
+        </span>
+      </button>
+      <button type="button" class="icon-btn" data-action="canvas-menu" data-id="${esc(cv.id)}" aria-label="管理画布 ${esc(cv.title)}" aria-haspopup="menu">${DOTS}</button>
+    </li>`).join('')}</ul>`;
 }
 function renderBoard() {
   const board = $('#board');
@@ -1746,6 +1774,12 @@ async function endPointer(e) {
     suppressClick = true; setTimeout(() => { suppressClick = false; }, 0);
     d.el.classList.remove('lifting');
     const zone = e.type === 'pointerup' ? zoneUnder(e.clientX, e.clientY, d.el) : null;
+    if (zone === CANVAS_PICK || zone === PICK) {
+      renderCanvas();
+      const id = zone === CANVAS_PICK ? await pickCanvas(d.card.columnId) : await pickFolder();
+      if (!id) return;
+      return zone === CANVAS_PICK ? moveCard(d.card.id, id) : archiveCards([d.card], id);
+    }
     if (zone) return moveCard(d.card.id, zone, 0);
     d.card.x = parseFloat(d.el.style.left); d.card.y = parseFloat(d.el.style.top);
     d.card.order = topOrder(state.view);
@@ -2588,7 +2622,10 @@ window.addEventListener('blur', () => { spaceDown = false; vp.classList.remove('
 async function addFiles(files, areaId, index = null, pos = null, { quiet = false, extra = {} } = {}) {
   files = files.filter((f) => f && f.name !== '.DS_Store');
   if (!files.length) return [];
-  if (!areaId || !area(areaId)) areaId = defaultTarget();
+  if (!areaId || !area(areaId)) {
+    areaId = state.view === CANVASES ? await pickCanvas() : defaultTarget();
+    if (!areaId) return [];
+  }
   const canvas = isCanvas(areaId);
   if (canvas && !pos) pos = state.view === areaId ? viewCenter() : { x: 0, y: 0 };
   if (index == null) index = cardsIn(areaId, false).length;
@@ -2726,14 +2763,15 @@ async function download(id) {
   document.body.appendChild(a); a.click(); a.remove();
 }
 async function newNote(areaId, pos) {
-  areaId = areaId || defaultTarget();
+  areaId = areaId || (state.view === CANVASES ? await pickCanvas() : defaultTarget());
+  if (!areaId) return;
   const res = await noteEditor({ name: '', text: '' });
   if (!res) return;
   const now = Date.now();
   const canvas = isCanvas(areaId);
   const card = { id: uid(), kind: 'note', name: res.name || '未命名便签', text: res.text, columnId: areaId,
     order: canvas ? topOrder(areaId) : orderAt(areaId, cardsIn(areaId, false).length), createdAt: now, updatedAt: now, enteredAt: now };
-  if (canvas) Object.assign(card, pos || viewCenter());
+  if (canvas) Object.assign(card, pos || (state.view === areaId ? viewCenter() : { x: 0, y: 0 }));
   await db.put('cards', card);
   state.cards.push(card);
   state.fresh.add(card.id);
@@ -2798,7 +2836,7 @@ async function deleteArea(a) {
   if (cards.length) await db.putMany('cards', cards);
   await db.del('columns', a.id);
   state.areas = state.areas.filter((x) => x !== a);
-  if (state.view === a.id) setView(BOARD);
+  if (state.view === a.id) setView(kind === 'canvas' ? CANVASES : BOARD);
   if (state.folder === a.id) { state.folder = a.parentId && area(a.parentId) ? a.parentId : null; ls.set('folder', state.folder); }
   if (state.work === a.id) { state.work = null; ls.set('work', null); }
   if (state.zone === a.id) { state.zone = target; ls.set('zone', target); }
@@ -2813,6 +2851,16 @@ async function setZoneTtl(z) {
   await changed();
   toast(n ? `放入超过 ${n} 天的卡片会自动移到回收站` : '已关闭自动清理');
   sweepExpired();
+}
+async function pickCanvas(exceptId) {
+  const options = canvases().filter((cv) => cv.id !== exceptId);
+  if (!options.length) { toast('没有其他可选画布'); return null; }
+  return dialog(`<h3>放到哪个画布？</h3>
+    <div class="pick-list">${options.map((cv, i) => `<label class="pick">
+      <input type="radio" name="canvas" value="${esc(cv.id)}" ${i === 0 ? 'checked' : ''}>
+      <span>${esc(cv.title)}</span><small>${cardsIn(cv.id, false).length} 张卡片</small>
+    </label>`).join('')}</div>${actions('放入画布')}`,
+    (f) => f.querySelector('[name="canvas"]:checked')?.value);
 }
 function setView(v) {
   state.view = v;
@@ -4338,8 +4386,16 @@ document.addEventListener('drop', async (e) => {
   const pos = onCanvas ? (() => { const p = toWorld(e.clientX, e.clientY); return { x: p.x - CARD_W / 2, y: p.y - 30 }; })() : null;
   if (fileDrag) {
     const files = await filesFromDataTransfer(e.dataTransfer);
-    if (target === PICK) target = await pickFolder();
-    if (!target || target === TRASH) target = defaultTarget();
+    if (target === PICK) {
+      target = await pickFolder();
+      if (!target) return;
+    }
+    if (target === CANVAS_PICK) {
+      if (!files.length) return;
+      target = await pickCanvas();
+      if (!target) return;
+    }
+    if (target === TRASH) target = defaultTarget();
     return addFiles(files, target, list ? realIndex(target, before) : null, pos);
   }
   // 拖动的是已选中的卡片 → 所有已选一起移动
@@ -4349,6 +4405,10 @@ document.addEventListener('drop', async (e) => {
     if (!fid) return;
     if (group) { clearSelection(); return archiveCards(group.map(findCard).filter(Boolean), fid); }
     return archiveCards([findCard(dragId)].filter(Boolean), fid);
+  }
+  if (target === CANVAS_PICK) {
+    target = await pickCanvas(group ? undefined : findCard(dragId)?.columnId);
+    if (!target) return;
   }
   if (group && target && target !== TRASH) return moveMany(group, target);
   if (group && target === TRASH) return trashMany(group);
@@ -4365,7 +4425,12 @@ document.addEventListener('click', async (e) => {
   if (viewTab && !btn) {
     if (viewTab.dataset.view === ARCHIVE && state.view === ARCHIVE) { state.folder = null; ls.set('folder', null); }
     if (viewTab.dataset.view === WORKS && state.view === WORKS) { state.work = null; ls.set('work', null); }
-    setView(viewTab.dataset.view); return render();
+    const next = viewTab.dataset.view;
+    setView(next);
+    render();
+    if (next === CANVASES) $('#canvasDirectoryTitle').focus();
+    else if (isCanvas(next)) $('#canvasTitle').focus();
+    return;
   }
   const wgo = e.target.closest('[data-wgoto]');
   if (wgo) { state.work = null; ls.set('work', null); if (wgo.dataset.wcat) { state.workCat = wgo.dataset.wcat; ls.set('workCat', state.workCat); } return render(); }
@@ -4410,7 +4475,7 @@ document.addEventListener('click', async (e) => {
     case 'card-menu': return menuAnchor === btn ? closeMenu() : cardMenu(btn, findCard(cardEl.dataset.id));
     case 'col-menu': return menuAnchor === btn ? closeMenu() : areaMenu(btn, col);
     case 'zone-menu': return menuAnchor === btn ? closeMenu() : areaMenu(btn, area(state.zone));
-    case 'canvas-menu': return menuAnchor === btn ? closeMenu() : areaMenu(btn, area(state.view));
+    case 'canvas-menu': return menuAnchor === btn ? closeMenu() : areaMenu(btn, area(btn.dataset.id || state.view));
     case 'rename-area': return renameArea(col);
     case 'add-col': return addArea('column');
     case 'add-zone': return addArea('zone');
@@ -4560,17 +4625,19 @@ document.addEventListener('contextmenu', (e) => {
   e.preventDefault();
   cardMenu($('.more', cardEl), findCard(cardEl.dataset.id));
 });
-document.addEventListener('paste', (e) => {
+document.addEventListener('paste', async (e) => {
   if (e.target.closest('input, textarea, dialog')) return;
   const files = [...(e.clipboardData?.files || [])];
   if (files.length) { e.preventDefault(); return addFiles(files.map((f) => f.name ? f : new File([f], `粘贴的图片-${Date.now()}.png`, { type: f.type }))); }
   const text = e.clipboardData?.getData('text/plain');
   if (text?.trim()) {
     e.preventDefault();
-    const areaId = defaultTarget(), now = Date.now();
+    const areaId = state.view === CANVASES ? await pickCanvas() : defaultTarget();
+    if (!areaId) return;
+    const now = Date.now();
     const card = { id: uid(), kind: 'note', name: text.trim().split('\n')[0].slice(0, 40), text, columnId: areaId,
       order: isCanvas(areaId) ? topOrder(areaId) : orderAt(areaId, cardsIn(areaId, false).length), createdAt: now, updatedAt: now, enteredAt: now };
-    if (isCanvas(areaId)) Object.assign(card, viewCenter());
+    if (isCanvas(areaId)) Object.assign(card, state.view === areaId ? viewCenter() : { x: 0, y: 0 });
     db.put('cards', card).then(() => { state.cards.push(card); state.fresh.add(card.id); toast('已粘贴为便签'); changed(); });
   }
 });

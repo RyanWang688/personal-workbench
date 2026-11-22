@@ -122,15 +122,11 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .viewbar { display: flex; align-items: center; gap: 12px; padding: 8px 20px; }
 .views { display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .views::-webkit-scrollbar { display: none; }
-.view-tab, .view-add { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 9px; border: 1px solid transparent; background: transparent; color: var(--text-2); font-weight: 550; white-space: nowrap; flex-shrink: 0; }
+.view-tab { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 9px; border: 1px solid transparent; background: transparent; color: var(--text-2); font-weight: 550; white-space: nowrap; flex-shrink: 0; }
 .view-tab:hover { background: var(--surface-3); color: var(--text); }
 .view-tab b { font-weight: 600; font-size: 12px; color: var(--text-3); }
 .view-tab[aria-selected="true"] { background: var(--surface); border-color: var(--border); color: var(--text); box-shadow: var(--shadow); }
 .view-tab.drop-active { background: var(--accent-soft); border-color: var(--accent); }
-.tab-more { display: inline-grid; place-items: center; width: 22px; height: 22px; margin-right: -6px; border-radius: 6px; color: var(--text-3); }
-.tab-more:hover { background: var(--surface-3); color: var(--text); }
-.view-add { color: var(--text-3); border-style: dashed; border-color: var(--border); }
-.view-add:hover { color: var(--accent); border-color: var(--accent); }
 .status { margin-left: auto; display: flex; gap: 6px; flex-shrink: 0; }
 
 /* ---------- 布局 ---------- */
@@ -249,6 +245,43 @@ body.dragging-folder .cat-chip[data-catdrop] { border-style: dashed; }
 .pick small { color: var(--text-3); }
 .pick input[type="radio"] { accent-color: var(--ok); }
 .pick.new input[type="text"] { flex: 1; border: 0; background: transparent; padding: 0; outline: none; }
+
+/* ---------- 画布工作区 ---------- */
+.canvas-directory-head, .canvas-workspace-head { display: flex; align-items: center; gap: 12px; }
+.canvas-directory-head { justify-content: space-between; max-width: 930px; margin-bottom: 16px; }
+.canvas-directory-head h2, .canvas-workspace-head h2 { min-width: 0; margin: 0; font-weight: 700; }
+.canvas-directory-head h2 { font-size: 20px; }
+.canvas-directory-head > .btn, .canvas-workspace-head > button { flex: none; }
+.canvas-directory-list {
+  list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  gap: 12px; max-width: 930px; margin: 0; padding: 0;
+}
+.canvas-directory-item {
+  display: flex; align-items: center; gap: 4px; min-width: 0; padding-right: 8px;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+}
+.canvas-directory-item:has(.canvas-directory-open:hover) { background: var(--surface-2); }
+.canvas-directory-item.drop-active { border-color: var(--accent); background: var(--accent-soft); }
+.canvas-directory-item > .icon-btn { flex: none; }
+.canvas-directory-open {
+  display: flex; flex: 1; min-width: 0; align-items: center; gap: 12px;
+  min-height: 78px; padding: 12px; border: 0; border-radius: 11px; text-align: left; background: transparent;
+}
+.canvas-directory-icon {
+  display: grid; flex: none; width: 36px; height: 36px; place-items: center;
+  border-radius: 8px; background: var(--accent-soft); color: var(--accent);
+}
+.canvas-directory-info { display: grid; min-width: 0; gap: 3px; }
+.canvas-directory-info strong { overflow-wrap: anywhere; font-size: 15px; }
+.canvas-directory-info > span { color: var(--text-2); font-size: 12px; }
+.canvas-workspace { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.canvas-workspace-head { margin: 4px 12px 4px 20px; }
+.canvas-workspace-head h2 { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
+.canvas-workspace-head .btn svg { width: 15px; height: 15px; }
+@media (max-width: 720px) {
+  .canvas-workspace-head { margin-inline: 16px; }
+  .canvas-directory-open { min-height: 66px; }
+}
 
 /* ---------- 无限画布 ---------- */
 .canvas-view { flex: 1; min-width: 0; position: relative; margin: 4px 0 0 20px; border: 1px solid var(--border); border-bottom: 0; border-radius: 14px 14px 0 0; overflow: hidden; background: var(--surface-2); }
@@ -674,6 +707,17 @@ body.file-over .drop-overlay { display: flex; }
   .column, .add-column { --col-w: calc(100vw - 48px); scroll-snap-align: start; }
   .more { opacity: 1; }
 }
+@media (max-width: 420px) {
+  .views { gap: 2px; }
+  .view-tab { gap: 4px; padding-inline: 6px; }
+  .view-tab svg { width: 15px; height: 15px; }
+  .views .view-sep { display: none; }
+}
+@media (max-width: 360px) {
+  .views .view-tab { padding-inline: 5px; }
+  .views .view-tab b { display: none; }
+}
+
 /* ---------- 智能关联 / 长按完成 / 打包动画 ---------- */
 .card { -webkit-touch-callout: none; -webkit-user-select: none; }
 .link-badge { display: inline-flex; align-items: center; gap: 2px; margin-left: 6px; padding: 0 6px 0 4px; height: 17px; border-radius: 9px; vertical-align: 1px;

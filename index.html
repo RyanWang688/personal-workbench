@@ -13,7 +13,7 @@
     // 尽早应用主题，避免刷新时闪一下
     try { var t = JSON.parse(localStorage.getItem('wb:theme') || '"auto"'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
   </script>
-  <link rel="stylesheet" href="style.css?v=28">
+  <link rel="stylesheet" href="style.css?v=29">
 </head>
 <body>
   <header class="topbar">
@@ -71,35 +71,44 @@
   <main class="layout">
     <section class="board" id="board" aria-label="看板"></section>
 
-    <section class="canvas-view" id="canvasView" aria-label="画布" hidden>
-      <div class="viewport" id="viewport" tabindex="-1">
-        <div class="world" id="world"></div>
-        <div class="canvas-empty" id="canvasEmpty">
-          <b>无限画布</b>
-          <span>把文件拖进来，随意摆放 · 双击空白处贴一张便签<br>左侧工具栏画形状、写文字、连箭头 · 空格 + 拖动平移 · Ctrl + 滚轮缩放</span>
+    <section class="archive-view canvas-directory" id="canvasDirectory" aria-labelledby="canvasDirectoryTitle" hidden></section>
+
+    <section class="canvas-workspace" id="canvasWorkspace" aria-labelledby="canvasTitle" hidden>
+      <header class="canvas-workspace-head">
+        <button type="button" class="btn" data-view="canvases" aria-label="返回所有画布"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>所有画布</button>
+        <h2 id="canvasTitle" tabindex="-1"></h2>
+        <button type="button" class="icon-btn" data-action="canvas-menu" aria-label="画布设置" aria-haspopup="menu"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
+      </header>
+      <div class="canvas-view" id="canvasView">
+        <div class="viewport" id="viewport" tabindex="-1">
+          <div class="world" id="world"></div>
+          <div class="canvas-empty" id="canvasEmpty">
+            <b>无限画布</b>
+            <span>把文件拖进来，随意摆放 · 双击空白处贴一张便签<br>左侧工具栏画形状、写文字、连箭头 · 空格 + 拖动平移 · Ctrl + 滚轮缩放</span>
+          </div>
         </div>
-      </div>
-      <div class="canvas-palette" id="canvasPalette" role="toolbar" aria-label="白板工具" aria-orientation="vertical">
-        <button class="icon-btn on" data-tool="select" data-tip="选择 · 拖空白处平移" data-key="V" aria-label="选择（V）"><svg viewBox="0 0 24 24"><path d="M5 3l14 8-6 1.6L10 19z"/></svg></button>
-        <button class="icon-btn" data-tool="sticky" data-tip="便签" data-key="N" aria-label="便签（N）"><svg viewBox="0 0 24 24"><path d="M4 4h16v10l-6 6H4z"/><path d="M14 20v-6h6"/></svg></button>
-        <button class="icon-btn" data-tool="text" data-tip="文字" data-key="T" aria-label="文字（T）"><svg viewBox="0 0 24 24"><path d="M5 6V4h14v2M12 4v16M9 20h6"/></svg></button>
-        <span class="sep"></span>
-        <button class="icon-btn" data-tool="rect" data-tip="矩形" data-key="R" aria-label="矩形（R）"><svg viewBox="0 0 24 24"><rect x="3.5" y="6" width="17" height="12" rx="1.5"/></svg></button>
-        <button class="icon-btn" data-tool="ellipse" data-tip="圆形" data-key="O" aria-label="圆形（O）"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></svg></button>
-        <button class="icon-btn" data-tool="diamond" data-tip="菱形" data-key="D" aria-label="菱形（D）"><svg viewBox="0 0 24 24"><path d="M12 3l9 9-9 9-9-9z"/></svg></button>
-        <span class="sep"></span>
-        <button class="icon-btn" data-tool="arrow" data-tip="箭头连线" data-key="L" aria-label="箭头连线（L）"><svg viewBox="0 0 24 24"><path d="M5 19L19 5M10 5h9v9"/></svg></button>
-      </div>
-      <div class="tool-hint" id="toolHint" hidden></div>
-      <div class="size-tip" id="sizeTip" hidden></div>
-      <div class="fmt-bar" id="fmtBar" role="toolbar" aria-label="格式" hidden></div>
-      <div class="canvas-tools" role="toolbar" aria-label="画布工具">
-        <button class="icon-btn" data-action="zoom-out" aria-label="缩小"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
-        <button class="zoom-label" data-action="zoom-reset" id="zoomLabel" title="重置为 100%">100%</button>
-        <button class="icon-btn" data-action="zoom-in" aria-label="放大"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
-        <span class="sep"></span>
-        <button class="icon-btn" data-action="zoom-fit" aria-label="显示全部" title="显示全部"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
-        <button class="icon-btn" data-action="tidy" aria-label="整理排列" title="整理排列"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg></button>
+        <div class="canvas-palette" id="canvasPalette" role="toolbar" aria-label="白板工具" aria-orientation="vertical">
+          <button class="icon-btn on" data-tool="select" data-tip="选择 · 拖空白处平移" data-key="V" aria-label="选择（V）"><svg viewBox="0 0 24 24"><path d="M5 3l14 8-6 1.6L10 19z"/></svg></button>
+          <button class="icon-btn" data-tool="sticky" data-tip="便签" data-key="N" aria-label="便签（N）"><svg viewBox="0 0 24 24"><path d="M4 4h16v10l-6 6H4z"/><path d="M14 20v-6h6"/></svg></button>
+          <button class="icon-btn" data-tool="text" data-tip="文字" data-key="T" aria-label="文字（T）"><svg viewBox="0 0 24 24"><path d="M5 6V4h14v2M12 4v16M9 20h6"/></svg></button>
+          <span class="sep"></span>
+          <button class="icon-btn" data-tool="rect" data-tip="矩形" data-key="R" aria-label="矩形（R）"><svg viewBox="0 0 24 24"><rect x="3.5" y="6" width="17" height="12" rx="1.5"/></svg></button>
+          <button class="icon-btn" data-tool="ellipse" data-tip="圆形" data-key="O" aria-label="圆形（O）"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></svg></button>
+          <button class="icon-btn" data-tool="diamond" data-tip="菱形" data-key="D" aria-label="菱形（D）"><svg viewBox="0 0 24 24"><path d="M12 3l9 9-9 9-9-9z"/></svg></button>
+          <span class="sep"></span>
+          <button class="icon-btn" data-tool="arrow" data-tip="箭头连线" data-key="L" aria-label="箭头连线（L）"><svg viewBox="0 0 24 24"><path d="M5 19L19 5M10 5h9v9"/></svg></button>
+        </div>
+        <div class="tool-hint" id="toolHint" hidden></div>
+        <div class="size-tip" id="sizeTip" hidden></div>
+        <div class="fmt-bar" id="fmtBar" role="toolbar" aria-label="格式" hidden></div>
+        <div class="canvas-tools" role="toolbar" aria-label="画布工具">
+          <button class="icon-btn" data-action="zoom-out" aria-label="缩小"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+          <button class="zoom-label" data-action="zoom-reset" id="zoomLabel" title="重置为 100%">100%</button>
+          <button class="icon-btn" data-action="zoom-in" aria-label="放大"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+          <span class="sep"></span>
+          <button class="icon-btn" data-action="zoom-fit" aria-label="显示全部" title="显示全部"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+          <button class="icon-btn" data-action="tidy" aria-label="整理排列" title="整理排列"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg></button>
+        </div>
       </div>
     </section>
 
@@ -133,6 +142,6 @@
   <input type="file" id="fileInput" multiple hidden>
   <input type="file" id="restoreInput" accept=".wbk" hidden>
   <noscript>此工作台需要启用 JavaScript。</noscript>
-  <script type="module" src="app.js?v=31"></script>
+  <script type="module" src="app.js?v=32"></script>
 </body>
 </html>
