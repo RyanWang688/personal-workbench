@@ -248,19 +248,32 @@ body.dragging-folder .cat-chip[data-catdrop] { border-style: dashed; }
 
 /* ---------- 画布工作区 ---------- */
 .canvas-directory-head, .canvas-workspace-head { display: flex; align-items: center; gap: 12px; }
-.canvas-directory-head { justify-content: space-between; max-width: 930px; margin-bottom: 16px; }
+.canvas-directory-head { justify-content: space-between; margin-bottom: 20px; }
 .canvas-directory-head h2, .canvas-workspace-head h2 { min-width: 0; margin: 0; font-weight: 700; }
 .canvas-directory-head h2 { font-size: 20px; }
 .canvas-directory-head > .btn, .canvas-workspace-head > button { flex: none; }
 .canvas-directory-list {
   list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
-  gap: 12px; max-width: 930px; margin: 0; padding: 0;
+  gap: 14px; margin: 0; padding: 0;
 }
 .canvas-directory-item {
   display: flex; align-items: center; gap: 4px; min-width: 0; padding-right: 8px;
   border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+  transition: border-color .15s, background .15s, transform .15s, box-shadow .15s;
 }
-.canvas-directory-item:has(.canvas-directory-open:hover) { background: var(--surface-2); }
+.canvas-directory-item:has(.canvas-directory-open:hover) { background: var(--surface-2); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); transform: translateY(-1px); box-shadow: var(--shadow); }
+.canvas-directory-item.canvas-directory-add {
+  border-style: dashed; background: transparent; padding-right: 0;
+}
+.canvas-directory-item.canvas-directory-add .canvas-directory-icon {
+  background: var(--surface-2); color: var(--text-2);
+}
+.canvas-directory-item.canvas-directory-add:has(.canvas-directory-open:hover) {
+  border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.canvas-directory-item.canvas-directory-add:has(.canvas-directory-open:hover) .canvas-directory-icon {
+  background: var(--accent-soft); color: var(--accent);
+}
 .canvas-directory-item.drop-active { border-color: var(--accent); background: var(--accent-soft); }
 .canvas-directory-item > .icon-btn { flex: none; }
 .canvas-directory-open {

@@ -564,9 +564,14 @@ function renderViews() {
 }
 function renderCanvasDirectory() {
   const list = canvases();
-  $('#canvasDirectory').innerHTML = `<header class="canvas-directory-head">
-    <h2 id="canvasDirectoryTitle" tabindex="-1">画布工作区</h2>
-    <button type="button" class="btn" data-action="add-canvas"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>新建画布</button>
+  const totalCards = list.reduce((n, cv) => n + cardsIn(cv.id, false).length, 0);
+  const totalShapes = list.reduce((n, cv) => n + (cv.shapes?.length || 0), 0);
+  $('#canvasDirectory').innerHTML = `<header class="archive-head canvas-directory-head">
+    <div class="ah-text">
+      <h2 id="canvasDirectoryTitle" tabindex="-1">画布工作区</h2>
+      <div class="meta">${list.length} 个画布 · ${totalCards} 张卡片${totalShapes ? ` · ${totalShapes} 个白板对象` : ''} · 把卡片或文件拖到画布上即可放入</div>
+    </div>
+    <button type="button" class="btn primary" data-action="add-canvas"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新建画布</span></button>
     </header>
     <ul class="canvas-directory-list">${list.map((cv) => `<li class="canvas-directory-item" data-drop="${esc(cv.id)}">
       <button type="button" class="canvas-directory-open" data-view="${esc(cv.id)}" aria-label="打开画布 ${esc(cv.title)}">
@@ -577,7 +582,16 @@ function renderCanvasDirectory() {
         </span>
       </button>
       <button type="button" class="icon-btn" data-action="canvas-menu" data-id="${esc(cv.id)}" aria-label="管理画布 ${esc(cv.title)}" aria-haspopup="menu">${DOTS}</button>
-    </li>`).join('')}</ul>`;
+    </li>`).join('')}
+    <li class="canvas-directory-item canvas-directory-add">
+      <button type="button" class="canvas-directory-open" data-action="add-canvas" aria-label="新建画布">
+        <span class="canvas-directory-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></span>
+        <span class="canvas-directory-info">
+          <strong>新建画布</strong>
+          <span>创建一个新的无限画布工作区</span>
+        </span>
+      </button>
+    </li></ul>`;
 }
 function renderBoard() {
   const board = $('#board');
