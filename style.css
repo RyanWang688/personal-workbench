@@ -299,21 +299,71 @@ body.dragging-folder .cat-chip[data-catdrop] { border-style: dashed; }
 .viewport.drop-active { box-shadow: inset 0 0 0 2px var(--accent); }
 .world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
 .card.on-canvas { position: absolute; width: 232px; cursor: grab; touch-action: none; }
-.card.on-canvas:not(.has-img) { padding-right: 64px; }
+.card.on-canvas:not(.has-img) { padding-right: 92px; }
 .card.on-canvas .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.card.on-canvas.has-img { width: 260px; }
-.card.on-canvas .thumb { height: auto; min-height: 120px; }
-.card.on-canvas .thumb-img { height: auto; max-height: 360px; object-fit: contain; }
-.card.on-canvas .thumb.fit-page .thumb-img { max-height: 340px; object-fit: cover; }
+.card.on-canvas.has-img { width: 260px; overflow: visible; }
+.card.on-canvas.has-img .body { padding-right: 92px; }
+.card.on-canvas.canvas-hd-card, .card.on-canvas.canvas-pdf-card { width: 360px; }
+.card.on-canvas .thumb { height: auto; min-height: 80px; border-radius: 9px 9px 0 0; overflow: hidden; }
+.card.on-canvas .thumb-img { width: 100%; height: auto; max-height: none; object-fit: contain; image-rendering: auto; }
+.card.on-canvas .thumb.fit-page .thumb-img { max-height: none; object-fit: contain; background: #fff; }
+.card.on-canvas.has-img:hover .thumb-img { transform: none; }
 .card.on-canvas .thumb.fit-wave { min-height: 0; }
 .card.on-canvas .thumb.skel { height: 180px; }
 .card.on-canvas.lifting { cursor: grabbing; box-shadow: var(--shadow-lg); transform: rotate(-1deg) scale(1.02); transition: box-shadow .15s, transform .15s; }
-.card.on-canvas:focus-visible { outline-offset: 3px; }
+.card.on-canvas.resizing { transition: none; box-shadow: var(--shadow-lg); }
+.card.on-canvas:focus-visible { outline: none; }
+/* 画布卡片选中框与八方向缩放手柄（Miro 风格） */
+.card.on-canvas > .sh-h, .card.on-canvas > .sh-edge { opacity: 0; pointer-events: none; transition: opacity .15s; }
+.viewport[data-tool="select"] .card.on-canvas:hover > .sh-h,
+.viewport[data-tool="select"] .card.on-canvas:hover > .sh-edge,
+.card.on-canvas.picked > .sh-h,
+.card.on-canvas.picked > .sh-edge,
+.card.on-canvas.resizing > .sh-h,
+.card.on-canvas.resizing > .sh-edge { opacity: 1; pointer-events: auto; }
+.card.on-canvas.picked::after,
+.card.on-canvas.resizing::after {
+  content: ''; position: absolute; inset: calc(-3px * var(--iz, 1));
+  border: calc(1.5px * var(--iz, 1)) solid var(--accent); border-radius: 12px; pointer-events: none; z-index: 2;
+}
+.viewport[data-tool="select"] .card.on-canvas:not(.picked):not(.resizing):hover::after {
+  content: ''; position: absolute; inset: calc(-2px * var(--iz, 1));
+  border: calc(1.5px * var(--iz, 1)) solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 11px; pointer-events: none; z-index: 2;
+}
 .card.dim { opacity: .25; }
-.export-handle { position: absolute; top: 6px; right: 34px; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 7px; color: var(--text-3); cursor: copy; opacity: 0; background: var(--surface); }
-.card:hover .export-handle { opacity: 1; }
-.export-handle:hover { background: var(--surface-3); color: var(--text); }
-.card.has-img .export-handle { top: auto; bottom: 6px; }
+.export-handle, .card-expand-btn { position: absolute; top: 6px; width: 28px; height: 28px; border: 0; padding: 0; display: grid; place-items: center; border-radius: 7px; color: var(--text-3); opacity: 0; background: var(--surface); }
+.export-handle { right: 34px; cursor: copy; }
+.card-expand-btn { right: 62px; cursor: pointer; }
+.card-expand-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.card:hover .export-handle, .card:hover .card-expand-btn, .card.picked .export-handle, .card.picked .card-expand-btn { opacity: 1; }
+.export-handle:hover, .card-expand-btn:hover { background: var(--surface-3); color: var(--text); }
+.card.has-img .export-handle, .card.has-img .card-expand-btn { top: auto; bottom: 6px; }
+/* 画布内嵌 PDF 高清预览与翻页控制栏 */
+.canvas-pdf-stage { position: relative; background: #fff; min-height: 180px; }
+.canvas-pdf-stage.pdf-loading::before {
+  content: ''; position: absolute; left: 0; right: 0; top: 0; height: 3px; z-index: 5;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent); background-size: 200% 100%; animation: shimmer 1.1s linear infinite;
+}
+.pdf-page-bar {
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 4;
+  display: inline-flex; align-items: center; gap: 2px; padding: 3px 5px; border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(8px);
+  border: 1px solid var(--border); box-shadow: var(--shadow-lg); color: var(--text);
+}
+.pdf-nav-btn {
+  width: 26px; height: 26px; border: 0; border-radius: 50%; background: transparent; color: var(--text);
+  display: grid; place-items: center; cursor: pointer; padding: 0; transition: background .15s, color .15s;
+}
+.pdf-nav-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; }
+.pdf-nav-btn:hover:not(:disabled) { background: var(--surface-3); color: var(--accent); }
+.pdf-nav-btn:disabled { opacity: .32; cursor: not-allowed; }
+.pdf-page-num {
+  display: inline-flex; align-items: center; gap: 3px; height: 26px; padding: 0 8px;
+  border: 0; border-radius: 999px; background: transparent; color: var(--text-2);
+  font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; cursor: pointer; white-space: nowrap;
+}
+.pdf-page-num b { color: var(--text); font-weight: 700; }
+.pdf-page-num:hover { background: var(--surface-3); color: var(--text); }
 .canvas-empty { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 6px; color: var(--text-3); pointer-events: none; line-height: 1.8; }
 .canvas-empty b { font-size: 18px; color: var(--text-2); }
 .canvas-tools { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; align-items: center; gap: 2px; padding: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg); z-index: 5; }
@@ -933,8 +983,8 @@ b.bump { display: inline-block; border-radius: 6px; padding: 0 3px; }
 .sel:hover { background: rgba(20,20,30,.5); }
 .card:not(.has-img) .sel:hover { background: var(--surface-3); }
 .card:not(.has-img):not(.on-canvas) { padding-right: 62px; }
-.card.on-canvas:not(.has-img) { padding-right: 90px; }
-.card.on-canvas:not(.has-img) .sel { right: 62px; }
+.card.on-canvas:not(.has-img) { padding-right: 118px; }
+.card.on-canvas:not(.has-img) .sel { right: 90px; }
 .card.selected .sel { background: var(--accent); border-color: var(--accent); color: #fff; }
 .thumb-badge { transition: left .15s; }
 .card.has-img:hover .thumb-badge, body.selecting .card.has-img .thumb-badge { left: 38px; }

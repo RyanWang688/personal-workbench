@@ -119,6 +119,7 @@ async function load() {
   state.cards = cards;
   const live = new Set(cards.map((c) => c.id));
   for (const [key, url] of state.urls) if (!live.has(key.replace(/^thumb:/, ''))) { URL.revokeObjectURL(url); state.urls.delete(key); }
+  for (const id of [...pdfDocs.keys()]) if (!live.has(id)) cleanupCanvasPdf(id);
   if (state.view !== BOARD && state.view !== ARCHIVE && state.view !== WORKS && state.view !== CANVASES && !isCanvas(state.view)) state.view = BOARD;
   if (state.folder && !area(state.folder)) state.folder = null;
   if (state.work && area(state.work)?.kind !== 'work') state.work = null;
@@ -328,12 +329,45 @@ async function setPrio(ids, level) {
   await changed();
   toast(level ? `已设为「${PRIO[level].label}」优先级${cards.length > 1 ? `（${cards.length} 个）` : ''}` : '已清除优先级');
 }
+const CARD_HANDLES = ['n', 'e', 's', 'w'].map((k) => `<i class="sh-edge se-${k}" data-card-handle="${k}"></i>`).join('')
+  + ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((k) => `<i class="sh-h h-${k}" data-card-handle="${k}"></i>`).join('');
+const EXPAND_BTN = (id) => `<button type="button" class="card-expand-btn" data-action="card-preview" data-id="${id}" title="弹窗预览与格式转换（或双击卡片）" aria-label="弹窗预览与格式转换"><svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button>`;
+const pdfDocs = new Map();
+const pdfPageUrls = new Map();
+const pdfPageWidths = new Map();
+const pdfRenderTokens = new Map();
+function cleanupCanvasPdf(id) {
+  const doc = pdfDocs.get(id);
+  if (doc) { Promise.resolve(doc).then((d) => d?.destroy?.()).catch(() => {}); pdfDocs.delete(id); }
+  pdfRenderTokens.delete(id);
+  for (const [k, url] of pdfPageUrls) {
+    if (k.startsWith(`${id}:`)) { URL.revokeObjectURL(url); pdfPageUrls.delete(k); pdfPageWidths.delete(k); }
+  }
+}
+function defaultCanvasCardW(c) {
+  if (c.kind === 'file') {
+    const fam = pv.family(c);
+    if (fam === 'image' || fam === 'pdf') return 360;
+    if (c.thumb === 'ok') return 260;
+  }
+  return CARD_W;
+}
+const canvasCardW = (c) => Math.max(120, Math.round(c.w || defaultCanvasCardW(c)));
+function pickCanvasCard(id) {
+  state.pickedCard = id || null;
+  $$('#world .card.on-canvas').forEach((el) => el.classList.toggle('picked', el.dataset.id === state.pickedCard));
+}
+
 function cardHTML(c, onCanvas = false) {
+  const fam = c.kind === 'file' ? pv.family(c) : 'note';
+  const isCanvasImg = onCanvas && fam === 'image';
+  const isCanvasPdf = onCanvas && fam === 'pdf';
+  const cw = onCanvas ? canvasCardW(c) : 0;
   const attrs = onCanvas
-    ? `draggable="false" style="left:${Math.round(c.x || 0)}px;top:${Math.round(c.y || 0)}px;z-index:${Math.max(1, Math.round(c.order) || 1)}"`
+    ? `draggable="false" style="left:${Math.round(c.x || 0)}px;top:${Math.round(c.y || 0)}px;width:${cw}px;z-index:${Math.max(1, Math.round(c.order) || 1)}"`
     : `draggable="${IS_TOUCH ? 'false' : 'true'}"`;
-  const cls = `card${onCanvas ? ' on-canvas' : ''}${onCanvas && !matches(c) ? ' dim' : ''}${state.selected.has(c.id) ? ' selected' : ''}${PRIO[c.prio] ? ` prio-${c.prio}` : ''}`;
-  const extra = (onCanvas ? HANDLE : '') + (c.columnId !== TRASH ? selBtn(c) : '');
+  const cls = `card${onCanvas ? ' on-canvas' : ''}${onCanvas && state.pickedCard === c.id ? ' picked' : ''}${isCanvasImg ? ' canvas-hd-card' : ''}${isCanvasPdf ? ' canvas-pdf-card' : ''}${onCanvas && !matches(c) ? ' dim' : ''}${state.selected.has(c.id) ? ' selected' : ''}${PRIO[c.prio] ? ` prio-${c.prio}` : ''}`;
+  const extra = (onCanvas ? HANDLE + EXPAND_BTN(c.id) + CARD_HANDLES : '') + (c.columnId !== TRASH ? selBtn(c) : '');
   if (c.kind === 'note') {
     return `<article class="${cls} note" ${attrs} tabindex="0" data-id="${c.id}" aria-label="便签 ${esc(c.name)}">
       <div class="body"><div class="name">${prioTag(c)}${highlight(c.name || '便签')}</div>
@@ -344,6 +378,29 @@ function cardHTML(c, onCanvas = false) {
   const meta = metaText(c, t) + linkBadge(c);
   const ext = extOf(c.name).slice(0, 5) || t.label;
   const name = `<div class="name" title="${esc(c.name)}&#10;添加于 ${fmtDate(c.createdAt)}">${prioTag(c)}${highlight(c.name)}</div>`;
+  if (isCanvasImg) {
+    const fullUrl = state.urls.get(c.id);
+    const tUrl = state.urls.get(`thumb:${c.id}`);
+    const src = fullUrl || tUrl || '';
+    const media = `<div class="thumb fit-cover canvas-img-stage"><img class="thumb-img canvas-hd-img${src ? ' loaded' : ''}" data-canvas-img="${c.id}" ${fullUrl ? 'data-hd-ready="1"' : ''} ${src ? `src="${src}"` : ''} alt="${esc(c.name)}" draggable="false"></div>`;
+    return `<article class="${cls} has-img" ${attrs} tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
+      ${media}<div class="body">${name}<div class="meta">${meta}</div></div>${extra}${MORE}</article>`;
+  }
+  if (isCanvasPdf) {
+    const doc = pdfDocs.get(c.id);
+    const total = c.info?.pages || (doc && typeof doc.numPages === 'number' ? doc.numPages : 0);
+    const page = Math.max(1, Math.min(c.pdfPage || 1, total || 9999));
+    const hdUrl = pdfPageUrls.get(`${c.id}:${page}`) || (page === 1 ? state.urls.get(`thumb:${c.id}`) : null);
+    const badge = `<span class="thumb-badge" style="--c:${t.c}">${esc(ext)}</span>`;
+    const nav = `<div class="pdf-page-bar" role="toolbar" aria-label="PDF 翻页">
+      <button type="button" class="pdf-nav-btn" data-action="pdf-prev" data-id="${c.id}" ${page <= 1 ? 'disabled' : ''} title="上一页" aria-label="上一页"><svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></button>
+      <button type="button" class="pdf-page-num" data-action="pdf-jump" data-id="${c.id}" title="点击输入页码跳转"><b class="pdf-cur">${page}</b><span>/</span><span class="pdf-tot">${total || '…'}</span></button>
+      <button type="button" class="pdf-nav-btn" data-action="pdf-next" data-id="${c.id}" ${total && page >= total ? 'disabled' : ''} title="下一页" aria-label="下一页"><svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+    </div>`;
+    const media = `<div class="thumb fit-page canvas-pdf-stage"><img class="thumb-img canvas-pdf-img${hdUrl ? ' loaded' : ''}" data-canvas-pdf="${c.id}" data-page="${page}" ${hdUrl ? `src="${hdUrl}"` : ''} alt="${esc(c.name)} 第 ${page} 页" draggable="false">${badge}${nav}</div>`;
+    return `<article class="${cls} has-img" ${attrs} tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
+      ${media}<div class="body">${name}<div class="meta">${meta}</div></div>${extra}${MORE}</article>`;
+  }
   const st = thumbStateOf(c);
   if (st !== 'none') {
     const badge = t.k === 'image' ? '' : `<span class="thumb-badge" style="--c:${t.c}">${esc(ext)}</span>`;
@@ -1707,6 +1764,160 @@ async function thumbUrl(id) {
   state.urls.set(key, url);
   return url;
 }
+async function getCanvasPdfDoc(id) {
+  if (pdfDocs.has(id)) return pdfDocs.get(id);
+  const p = (async () => {
+    const blob = await db.getBlob(id);
+    if (!blob) return null;
+    return pv.pdfDoc(blob);
+  })();
+  pdfDocs.set(id, p);
+  try {
+    const doc = await p;
+    if (!doc) pdfDocs.delete(id);
+    else pdfDocs.set(id, doc);
+    return doc;
+  } catch (e) {
+    pdfDocs.delete(id);
+    throw e;
+  }
+}
+function updatePdfNavDOM(cardEl, page, total) {
+  if (!cardEl) return;
+  const curEl = cardEl.querySelector('.pdf-cur');
+  const totEl = cardEl.querySelector('.pdf-tot');
+  const prevBtn = cardEl.querySelector('[data-action="pdf-prev"]');
+  const nextBtn = cardEl.querySelector('[data-action="pdf-next"]');
+  if (curEl) curEl.textContent = String(page);
+  if (totEl && total) totEl.textContent = String(total);
+  if (prevBtn) prevBtn.disabled = page <= 1;
+  if (nextBtn) nextBtn.disabled = total ? page >= total : false;
+}
+async function ensureCanvasPdf(img, force = false) {
+  const id = img.dataset.canvasPdf;
+  const card = findCard(id);
+  if (!card) return;
+  const cardEl = img.closest('.card');
+  const dpr = Math.min(3, window.devicePixelRatio || 1);
+  const zoom = Math.max(1, Math.min(2.5, cam().z || 1));
+  const cssW = card.w || cardEl?.offsetWidth || 360;
+  const targetW = Math.min(2800, Math.max(1200, Math.ceil((cssW * dpr * zoom) / 200) * 200));
+  const rawPage = Math.max(1, card.pdfPage || 1);
+  const key0 = `${id}:${rawPage}`;
+  if (!force && pdfPageUrls.has(key0) && (pdfPageWidths.get(key0) || 0) >= targetW * 0.85) {
+    const u = pdfPageUrls.get(key0);
+    if (img.getAttribute('src') !== u) img.src = u;
+    img.classList.add('loaded');
+    if (card.info?.pages) updatePdfNavDOM(cardEl, rawPage, card.info.pages);
+    return;
+  }
+  if (!img.getAttribute('src')) {
+    const fallback = pdfPageUrls.get(key0) || (rawPage === 1 ? state.urls.get(`thumb:${id}`) || await thumbUrl(id) : null);
+    if (fallback && img.isConnected && !img.getAttribute('src')) { img.src = fallback; img.classList.add('loaded'); }
+  }
+  const token = (pdfRenderTokens.get(id) || 0) + 1;
+  pdfRenderTokens.set(id, token);
+  const stage = img.closest('.canvas-pdf-stage');
+  stage?.classList.add('pdf-loading');
+  try {
+    const doc = await getCanvasPdfDoc(id);
+    if (!doc || pdfRenderTokens.get(id) !== token) { stage?.classList.remove('pdf-loading'); return; }
+    const total = doc.numPages || 1;
+    const page = Math.max(1, Math.min(rawPage, total));
+    const key = `${id}:${page}`;
+    if (card.info?.pages !== total || card.pdfPage !== page) {
+      card.info = { ...card.info, pages: total };
+      card.pdfPage = page;
+      db.put('cards', card);
+    }
+    updatePdfNavDOM(cardEl, page, total);
+    if (!force && pdfPageUrls.has(key) && (pdfPageWidths.get(key) || 0) >= targetW * 0.85) {
+      const u = pdfPageUrls.get(key);
+      $$(`img[data-canvas-pdf="${CSS.escape(id)}"]`).forEach((el) => {
+        el.dataset.page = String(page);
+        el.src = u;
+        el.classList.add('loaded');
+        el.closest('.canvas-pdf-stage')?.classList.remove('pdf-loading');
+        updatePdfNavDOM(el.closest('.card'), page, total);
+      });
+      return;
+    }
+    const cnv = await pv.renderPdfPage(doc, page, targetW);
+    if (pdfRenderTokens.get(id) !== token) return;
+    if (cnv.width && cnv.height && (card.info?.w !== cnv.width || card.info?.h !== cnv.height)) {
+      card.info = { ...card.info, pages: total, w: cnv.width, h: cnv.height };
+      db.put('cards', card);
+    }
+    const pageBlob = await new Promise((r) => cnv.toBlob(r, 'image/png'));
+    if (!pageBlob || pdfRenderTokens.get(id) !== token) return;
+    const nextUrl = URL.createObjectURL(pageBlob);
+    const oldUrl = pdfPageUrls.get(key);
+    pdfPageUrls.set(key, nextUrl);
+    pdfPageWidths.set(key, targetW);
+    $$(`img[data-canvas-pdf="${CSS.escape(id)}"]`).forEach((el) => {
+      el.dataset.page = String(page);
+      el.onload = () => {
+        el.classList.add('loaded');
+        el.closest('.canvas-pdf-stage')?.classList.remove('pdf-loading');
+        if (boardOf()?.links.length) drawLinks();
+        if (hoverRef === id) { const ce = el.closest('.card.on-canvas'); if (ce) showDots(ce); }
+      };
+      el.src = nextUrl;
+      updatePdfNavDOM(el.closest('.card'), page, total);
+    });
+    if (oldUrl && oldUrl !== nextUrl) setTimeout(() => URL.revokeObjectURL(oldUrl), 1000);
+  } catch (e) {
+    console.warn('画布 PDF 渲染失败', card.name, e);
+    stage?.classList.remove('pdf-loading');
+  }
+}
+async function setCanvasPdfPage(card, nextPage) {
+  if (!card) return;
+  const doc = await getCanvasPdfDoc(card.id).catch(() => null);
+  const total = card.info?.pages || doc?.numPages || 1;
+  const page = Math.max(1, Math.min(Math.round(nextPage) || 1, total));
+  card.pdfPage = page;
+  saveCard(card);
+  const cached = pdfPageUrls.get(`${card.id}:${page}`);
+  $$(`img[data-canvas-pdf="${CSS.escape(card.id)}"]`).forEach((img) => {
+    img.dataset.page = String(page);
+    updatePdfNavDOM(img.closest('.card'), page, total);
+    if (cached) { img.src = cached; img.classList.add('loaded'); }
+    ensureCanvasPdf(img);
+  });
+}
+function loadCanvasMedia() {
+  $$('img[data-canvas-img]').forEach(async (img) => {
+    if (img.dataset.hdReady === '1' && img.getAttribute('src')) return;
+    const id = img.dataset.canvasImg;
+    if (!img.getAttribute('src') && state.urls.has(`thumb:${id}`)) {
+      img.src = state.urls.get(`thumb:${id}`);
+      img.classList.add('loaded');
+    }
+    const fullUrl = await urlFor(id);
+    if (!fullUrl || !img.isConnected) return;
+    img.dataset.hdReady = '1';
+    img.onload = () => {
+      img.classList.add('loaded');
+      const c = findCard(id);
+      if (c && img.naturalWidth && (!c.info?.w || !c.info?.h)) {
+        c.info = { ...c.info, w: img.naturalWidth, h: img.naturalHeight };
+        db.put('cards', c);
+      }
+      if (boardOf()?.links.length) drawLinks();
+      if (hoverRef === id) { const el = img.closest('.card.on-canvas'); if (el) showDots(el); }
+    };
+    img.src = fullUrl;
+  });
+  $$('img[data-canvas-pdf]').forEach((img) => ensureCanvasPdf(img));
+}
+let pdfZoomTimer = 0;
+function scheduleCanvasPdfSharpen() {
+  clearTimeout(pdfZoomTimer);
+  pdfZoomTimer = setTimeout(() => {
+    if (isCanvas(state.view)) $$('#world img[data-canvas-pdf]').forEach((img) => ensureCanvasPdf(img));
+  }, 220);
+}
 function loadThumbs() {
   $$('img[data-thumb]:not([src])').forEach(async (img) => {
     const url = await thumbUrl(img.dataset.thumb);
@@ -1714,6 +1925,7 @@ function loadThumbs() {
     img.onload = () => img.classList.add('loaded');
     img.src = url;
   });
+  loadCanvasMedia();
 }
 
 // ---------- 无限画布 ----------
@@ -1729,6 +1941,7 @@ function applyCam() {
   $('#zoomLabel').textContent = `${Math.round(c.z * 100)}%`;
   $('#world').style.setProperty('--iz', (1 / c.z).toFixed(4)); // 选框、手柄不随缩放变粗变细
   positionFmt();
+  scheduleCanvasPdfSharpen();
 }
 function renderCanvas() {
   const list = cardsIn(state.view, false);
@@ -1818,11 +2031,12 @@ async function tidyCanvas() {
   const sb = unionBox(boardOf()?.shapes || []);
   const ox = sb ? Math.round(sb.x + sb.w + 120) : 0, oy = sb ? Math.round(sb.y) : 0;
   const cols = Math.max(1, Math.ceil(Math.sqrt(list.length * 1.6)));
+  const colW = Math.max(CARD_W, ...list.map((c) => $(`#world .card[data-id="${c.id}"]`)?.offsetWidth || canvasCardW(c)));
   const heights = new Array(cols).fill(0);
   for (const card of list) {
     const el = $(`#world .card[data-id="${card.id}"]`);
     const i = heights.indexOf(Math.min(...heights));
-    card.x = ox + i * (CARD_W + 52); card.y = oy + heights[i];
+    card.x = ox + i * (colW + 52); card.y = oy + heights[i];
     heights[i] += (el?.offsetHeight || 80) + 24;
   }
   await db.putMany('cards', list);
@@ -1865,11 +2079,42 @@ vp.addEventListener('pointerdown', (e) => {
   if (forcePan) e.preventDefault();
   // Ctrl/⌘ + 卡片交给转换圆环；Shift + 卡片：不拖动 = 多选，拖动 = 锁定水平/垂直移动
   if (!forcePan && (e.target.closest('.card .sel') || (e.ctrlKey || e.metaKey) && e.target.closest('.card'))) return;
+  const cardHandle = !forcePan && e.target.closest('[data-card-handle]');
+  if (cardHandle) {
+    const cardEl = cardHandle.closest('.card.on-canvas');
+    const card = cardEl && findCard(cardEl.dataset.id);
+    if (card) {
+      if (state.bsel) {
+        state.bsel = null;
+        $$('#world .shape.picked').forEach((x) => { x.classList.remove('picked'); x.querySelectorAll('.sh-h').forEach((h) => h.remove()); });
+        decorateBoard(); drawLinks(); positionFmt();
+      }
+      pickCanvasCard(card.id);
+      const thumbEl = cardEl.querySelector('.thumb'), imgEl = cardEl.querySelector('.thumb-img');
+      const ow = cardEl.offsetWidth, oh = cardEl.offsetHeight;
+      const mediaH = thumbEl ? thumbEl.offsetHeight : 0;
+      const bodyH = Math.max(0, oh - mediaH);
+      const ar = (imgEl?.naturalWidth && imgEl?.naturalHeight) ? (imgEl.naturalWidth / imgEl.naturalHeight)
+        : (card.info?.w && card.info?.h) ? (card.info.w / card.info.h)
+        : (mediaH > 20 ? ow / mediaH : null);
+      cardDrag = {
+        mode: 'resize', el: cardEl, card, k: cardHandle.dataset.cardHandle,
+        sx: e.clientX, sy: e.clientY,
+        o: { x: card.x || 0, y: card.y || 0, w: ow, h: oh, mediaH, bodyH, ar },
+        moved: false, id: e.pointerId, snapT: snapTargets(new Set(), card.id),
+      };
+      cardEl.classList.add('resizing');
+      try { cardEl.setPointerCapture(e.pointerId); } catch {}
+      e.preventDefault();
+      return;
+    }
+  }
   if (!forcePan && pointers.size === 0 && boardDown(e)) return; // 白板：形状、连线、工具
   const cardEl = forcePan ? null : e.target.closest('.card');
-  if (cardEl && !e.target.closest('.more, .export-handle')) {
+  if (cardEl && !e.target.closest('.more, .export-handle, .card-expand-btn, .pdf-page-bar, [data-card-handle]')) {
     const card = findCard(cardEl.dataset.id);
-    cardDrag = { el: cardEl, card, sx: e.clientX, sy: e.clientY, x: card.x || 0, y: card.y || 0, moved: false, id: e.pointerId, alt: e.altKey };
+    if (cardEl.classList.contains('on-canvas')) pickCanvasCard(card.id);
+    cardDrag = { mode: 'move', el: cardEl, card, sx: e.clientX, sy: e.clientY, x: card.x || 0, y: card.y || 0, moved: false, id: e.pointerId, alt: e.altKey };
     if (e.altKey) e.preventDefault();
     try { cardEl.setPointerCapture(e.pointerId); } catch {}
     return;
@@ -1895,6 +2140,54 @@ vp.addEventListener('contextmenu', (e) => {
 vp.addEventListener('pointermove', (e) => {
   if (boardMove(e)) return;
   if (cardDrag && e.pointerId === cardDrag.id) {
+    if (cardDrag.mode === 'resize') {
+      const z = cam().z, dx = (e.clientX - cardDrag.sx) / z, dy = (e.clientY - cardDrag.sy) / z;
+      if (!cardDrag.moved && Math.hypot(e.clientX - cardDrag.sx, e.clientY - cardDrag.sy) < 3) return;
+      if (!cardDrag.moved) {
+        cardDrag.moved = true;
+        hideDots();
+        cardDrag.el.style.zIndex = topOrder(state.view) + 1;
+        document.body.classList.add('is-dragging-card');
+      }
+      const { o, k } = cardDrag, minW = 140, maxW = 4800, tol = 6 / z, snapOn = !(e.ctrlKey || e.metaKey);
+      let x = o.x, y = o.y, w = o.w, h = o.h, gx = null, gy = null;
+      if (o.ar) {
+        if (k === 'e' || k === 'w') {
+          w = Math.min(maxW, Math.max(minW, k === 'e' ? o.w + dx : o.w - dx));
+          if (snapOn) {
+            gx = nearest([k === 'e' ? o.x + w : o.x + o.w - w], cardDrag.snapT.xs, tol);
+            if (gx) w = Math.min(maxW, Math.max(minW, k === 'e' ? w + gx.d : w - gx.d));
+          }
+          if (k === 'w') x = o.x + o.w - w;
+        } else if (k === 's' || k === 'n') {
+          const mh = Math.max(60, k === 's' ? o.mediaH + dy : o.mediaH - dy);
+          w = Math.min(maxW, Math.max(minW, mh * o.ar));
+          x = o.x + (o.w - w) / 2;
+        } else {
+          const sgnX = k.includes('e') ? 1 : -1, sgnY = k.includes('s') ? 1 : -1;
+          const dwX = sgnX * dx, dwY = sgnY * dy * o.ar;
+          const dw = Math.abs(dwX) >= Math.abs(dwY) ? dwX : dwY;
+          w = Math.min(maxW, Math.max(minW, o.w + dw));
+          if (k.includes('w')) x = o.x + o.w - w;
+        }
+        h = w / o.ar + o.bodyH;
+        if (k.includes('n')) y = o.y + o.h - h;
+      } else {
+        if (k.includes('e')) w = Math.min(maxW, Math.max(minW, o.w + dx));
+        if (k.includes('w')) { w = Math.min(maxW, Math.max(minW, o.w - dx)); x = o.x + o.w - w; }
+        if (k.includes('s')) h = Math.max(60, o.h + dy);
+        if (k.includes('n')) { h = Math.max(60, o.h - dy); y = o.y + o.h - h; }
+      }
+      if (e.altKey) { x = o.x + (o.w - w) / 2; y = o.y + (o.h - h) / 2; gx = gy = null; }
+      cardDrag.cur = { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
+      cardDrag.el.style.left = `${cardDrag.cur.x}px`;
+      cardDrag.el.style.top = `${cardDrag.cur.y}px`;
+      cardDrag.el.style.width = `${cardDrag.cur.w}px`;
+      showGuides(gx, gy, cardDrag.cur);
+      showSizeTip(e, cardDrag.cur.w, cardDrag.el.offsetHeight || cardDrag.cur.h);
+      drawLinks();
+      return;
+    }
     let dx = e.clientX - cardDrag.sx, dy = e.clientY - cardDrag.sy;
     if (!cardDrag.moved && Math.hypot(dx, dy) < 4) return;
     if (!cardDrag.moved) {
@@ -1957,6 +2250,19 @@ async function endPointer(e) {
     const d = cardDrag; cardDrag = null;
     document.body.classList.remove('is-dragging-card');
     clearDropUI();
+    if (d.mode === 'resize') {
+      d.el.classList.remove('resizing');
+      clearGuides(); hideSizeTip();
+      if (!d.moved || !d.cur) return;
+      suppressClick = true; setTimeout(() => { suppressClick = false; }, 0);
+      d.card.x = d.cur.x; d.card.y = d.cur.y; d.card.w = d.cur.w;
+      d.card.order = topOrder(state.view);
+      await saveCard(d.card);
+      const pdfImg = d.el.querySelector('img[data-canvas-pdf]');
+      if (pdfImg) ensureCanvasPdf(pdfImg);
+      await changed();
+      return;
+    }
     if (!d.moved) return;
     suppressClick = true; setTimeout(() => { suppressClick = false; }, 0);
     d.el.classList.remove('lifting', 'copying');
@@ -2028,6 +2334,11 @@ vp.addEventListener('dblclick', async (e) => {
   // 第一下点击会选中形状并重绘画布，原来被点的元素已被替换，事件目标可能变成画布背景；
   // 所以按鼠标位置重新找一次「真正点到的东西」，避免在已有便签上又新建一张
   const hit = document.elementFromPoint(e.clientX, e.clientY) || e.target;
+  const hitCard = hit.closest('.card.on-canvas') || e.target.closest('.card.on-canvas');
+  if (hitCard) {
+    if (hit.closest('.pdf-page-bar, [data-card-handle], .more, .sel, .export-handle, .card-expand-btn')) return;
+    return preview(hitCard.dataset.id);
+  }
   if (hit.closest('.card, .fmt-bar, .canvas-palette, .canvas-tools, .canvas-workspace-head') || e.target.closest('.card, .fmt-bar')) return;
   const sh = hit.closest('.shape') || e.target.closest('.shape');
   if (sh) return editingShape === sh.dataset.sid ? undefined : startEdit(sh.dataset.sid);
@@ -2232,6 +2543,7 @@ $('#canvasPalette').addEventListener('dblclick', (e) => {
 async function saveBoard() { const b = boardOf(); if (b) { await saveArea(b); await changed(); } }
 function selectBoard(sel) {
   state.bsel = sel;
+  if (sel) state.pickedCard = null;
   fmtPop = null;
   if (sel && state.selected.size) clearSelection();
   renderCanvas();
@@ -2366,10 +2678,10 @@ vp.addEventListener('pointerleave', () => { if (!bd) hideDots(); });
 vp.addEventListener('pointermove', (e) => { lastPointer = { x: e.clientX, y: e.clientY }; }, true);
 
 // ---- 对齐吸附 ----
-function snapTargets(exclude) {
+function snapTargets(exclude, excludeCardId = null) {
   const xs = [], ys = [], add = (b) => { xs.push(b.x, b.x + b.w / 2, b.x + b.w); ys.push(b.y, b.y + b.h / 2, b.y + b.h); };
   for (const s of boardOf().shapes) if (!exclude.has(s.id)) add(s);
-  for (const el of $$('#world .card.on-canvas')) add({ x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight });
+  for (const el of $$('#world .card.on-canvas')) if (el.dataset.id !== excludeCardId) add({ x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight });
   return { xs, ys };
 }
 function nearest(vals, cands, tol) {
@@ -2450,6 +2762,7 @@ function boardDown(e) {
       decorateBoard(); drawLinks(); positionFmt();
     } else selectBoard(null);
   }
+  if (!cardEl && state.pickedCard) pickCanvasCard(null);
   return false;
 }
 // Alt + 拖动开始时：在原位置生成副本（连同它们之间的连线），之后拖动的是副本，原形状留在原地
@@ -3160,16 +3473,17 @@ async function addFiles(files, areaId, index = null, pos = null, { quiet = false
   return added;
 }
 // 按真实高度瀑布流排列一组画布卡片，避免重叠
-const waitImgs = () => Promise.all($$('#world img[data-thumb]').map((img) => (img.complete && img.naturalWidth) ? 0
+const waitImgs = () => Promise.all($$('#world img[data-thumb], #world img[data-canvas-img], #world img[data-canvas-pdf]').map((img) => (img.complete && img.naturalWidth) ? 0
   : new Promise((r) => { img.addEventListener('load', r, { once: true }); img.addEventListener('error', r, { once: true }); setTimeout(r, 1500); })));
 async function masonry(list, pos) {
   await waitImgs();
   const cols = Math.min(4, Math.max(1, Math.ceil(Math.sqrt(list.length))));
+  const colW = Math.max(CARD_W, ...list.map((c) => $(`#world .card[data-id="${c.id}"]`)?.offsetWidth || canvasCardW(c)));
   const heights = new Array(cols).fill(0);
   for (const card of list) {
     const el = $(`#world .card[data-id="${card.id}"]`);
     const i = heights.indexOf(Math.min(...heights));
-    card.x = pos.x + i * (CARD_W + 52); card.y = pos.y + heights[i];
+    card.x = pos.x + i * (colW + 52); card.y = pos.y + heights[i];
     heights[i] += (el?.offsetHeight || 80) + 20;
     if (el) { el.style.left = `${card.x}px`; el.style.top = `${card.y}px`; }
   }
@@ -3244,6 +3558,7 @@ async function purgeCard(id, anim = true) {
     const url = state.urls.get(key);
     if (url) { URL.revokeObjectURL(url); state.urls.delete(key); }
   }
+  cleanupCanvasPdf(id);
   state.cards = state.cards.filter((c) => c.id !== id);
 }
 async function download(id) {
@@ -3422,7 +3737,7 @@ async function placeBeside(card, files) {
   const areaId = card.columnId === TRASH ? defaultTarget() : card.columnId;
   const canvas = isCanvas(areaId);
   const idx = canvas ? null : cardsIn(areaId, false).findIndex((c) => c.id === card.id) + 1;
-  const pos = canvas ? { x: (card.x || 0) + CARD_W + 60, y: card.y || 0 } : null;
+  const pos = canvas ? { x: (card.x || 0) + canvasCardW(card) + 60, y: card.y || 0 } : null;
   return addFiles(files, areaId, idx, pos, { quiet: true, extra: { sourceId: card.sourceId || card.id } });
 }
 const confirmPdfCompression = () => confirmBox({
@@ -3773,6 +4088,9 @@ function cardMenu(anchor, card) {
     { text: '重命名', run: async () => {
       const n = await prompt({ title: '重命名', value: card.name, ok: '保存' });
       if (n && n !== card.name) { card.name = n; await saveCard(card); await changed(); } } });
+  if (isCanvas(card.columnId) && card.w) {
+    items.push({ text: '重置画布卡片大小', run: async () => { delete card.w; await saveCard(card); await changed(); } });
+  }
   const dest = (list, label) => {
     const opts = list.filter((a) => a.id !== card.columnId);
     if (!opts.length) return;
@@ -4065,7 +4383,7 @@ document.addEventListener('pointerdown', (e) => {
   pressFired = false;
   if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
   const el = e.target.closest?.('.card');
-  if (!el || e.target.closest('.more, .export-handle, .sel, .suggest-badge')) return;
+  if (!el || e.target.closest('.more, .export-handle, .card-expand-btn, .sel, .suggest-badge, .pdf-page-bar, [data-card-handle]')) return;
   const card = findCard(el.dataset.id);
   if (!card || !isActive(card)) return;
   cancelPress();
@@ -4951,8 +5269,38 @@ document.addEventListener('click', async (e) => {
   // Shift 点击卡片或勾选按钮时，范围以当前列表中的卡片顺序为准。
   const rangeList = e.shiftKey ? cardEl?.closest('.list, #world') : null;
   if (cardEl && !btn && (e.ctrlKey || e.metaKey || e.shiftKey || state.selected.size)) return toggleSelect(cardEl.dataset.id, rangeList);
-  if (!btn) { if (cardEl) preview(cardEl.dataset.id); return; }
+  if (!btn) {
+    if (cardEl) {
+      if (cardEl.classList.contains('on-canvas')) {
+        pickCanvasCard(cardEl.dataset.id);
+        cardEl.focus({ preventScroll: true });
+        return;
+      }
+      preview(cardEl.dataset.id);
+    }
+    return;
+  }
   switch (btn.dataset.action) {
+    case 'card-preview': return preview(btn.dataset.id || cardEl?.dataset.id);
+    case 'pdf-prev': {
+      const c = findCard(btn.dataset.id || cardEl?.dataset.id);
+      if (c) setCanvasPdfPage(c, (c.pdfPage || 1) - 1);
+      return;
+    }
+    case 'pdf-next': {
+      const c = findCard(btn.dataset.id || cardEl?.dataset.id);
+      if (c) setCanvasPdfPage(c, (c.pdfPage || 1) + 1);
+      return;
+    }
+    case 'pdf-jump': {
+      const c = findCard(btn.dataset.id || cardEl?.dataset.id);
+      if (!c) return;
+      const doc = await getCanvasPdfDoc(c.id).catch(() => null);
+      const tot = c.info?.pages || doc?.numPages || 1;
+      const v = await prompt({ title: `跳转到页码（共 ${tot} 页）`, value: String(c.pdfPage || 1), placeholder: `1 - ${tot}`, ok: '跳转' });
+      if (v) setCanvasPdfPage(c, Number(v));
+      return;
+    }
     case 'accept-suggest': return acceptSuggestion(btn.dataset.id);
     case 'assoc-panel': return openAssocPanel();
     case 'select': return toggleSelect(cardEl.dataset.id, rangeList);
@@ -5062,13 +5410,21 @@ document.addEventListener('keydown', (e) => {
       setPrio(ids, +e.key);
     }
     if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) { e.preventDefault(); cardMenu($('.more', cardEl), card); }
-    // 画布上用方向键微调位置
+    // 画布上用方向键微调位置；PDF 卡片用 PageUp / PageDown 或 [ / ] 翻页
+    if (cardEl.classList.contains('on-canvas') && (e.key === 'PageUp' || e.key === 'PageDown' || e.key === '[' || e.key === ']')) {
+      if (pv.family(card) === 'pdf') {
+        e.preventDefault();
+        const delta = (e.key === 'PageUp' || e.key === '[') ? -1 : 1;
+        setCanvasPdfPage(card, (card.pdfPage || 1) + delta);
+      }
+    }
     if (cardEl.classList.contains('on-canvas') && e.key.startsWith('Arrow')) {
       e.preventDefault();
       const s = e.shiftKey ? 40 : 10;
       card.x = (card.x || 0) + (e.key === 'ArrowLeft' ? -s : e.key === 'ArrowRight' ? s : 0);
       card.y = (card.y || 0) + (e.key === 'ArrowUp' ? -s : e.key === 'ArrowDown' ? s : 0);
       cardEl.style.left = `${card.x}px`; cardEl.style.top = `${card.y}px`;
+      drawLinks();
       clearTimeout(cardEl._t); cardEl._t = setTimeout(() => saveCard(card), 300);
     }
   }
