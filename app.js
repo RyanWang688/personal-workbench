@@ -1741,6 +1741,7 @@ let pan = null, pinch = null, cardDrag = null, suppressClick = false;
 vp.addEventListener('pointerdown', (e) => {
   const mouse = e.pointerType === 'mouse';
   if (mouse && e.button > 2) return;
+  if (e.target.closest('.canvas-empty .btn')) return; // 空画布上的「从模板开始」按钮：别让画布抢走这次点击
   // 按住空格、鼠标中键或右键拖动：任何工具下都直接平移（右键不拖动仍然弹出菜单）
   const forcePan = spaceDown || (mouse && (e.button === 1 || e.button === 2));
   if (mouse && e.button === 2 && pointers.size) return;
@@ -1966,7 +1967,7 @@ function shapeHTML(s) {
   // 整条边都能拖（看不见的感应条），四个角另有放大的感应区；看得见的小方块只是提示
   const handles = single ? ['n', 'e', 's', 'w'].map((k) => `<i class="sh-edge se-${k}" data-handle="${k}"></i>`).join('')
     + ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((k) => `<i class="sh-h h-${k}" data-handle="${k}"></i>`).join('') : '';
-  return `<div class="shape st-${s.t}${col ? '' : ' nofill'}${sel ? ' picked' : ''}${s.b ? ' bold' : ''}" data-sid="${s.id}" style="${style}">${bg}<div class="sh-tx" data-ph="${s.t === 'text' ? '输入文字' : '双击输入'}">${esc(s.text || '')}</div>${handles}</div>`;
+  return `<div class="shape st-${s.t}${col ? '' : ' nofill'}${sel ? ' picked' : ''}${s.b ? ' bold' : ''}${s.frame ? ' frame' : ''}${s.va === 'top' ? ' va-top' : ''}" data-sid="${s.id}" style="${style}">${bg}<div class="sh-tx" data-ph="${s.t === 'text' ? '输入文字' : '双击输入'}">${esc(s.text || '')}</div>${handles}</div>`;
 }
 // 重绘后的装饰：便签字号自适应、多选外框
 function decorateBoard() {
@@ -2685,6 +2686,11 @@ $('#fmtBar').addEventListener('change', (e) => {
 });
 
 // ---- 缩放到选中 / 快捷键速查 ----
+function zoomToBox(box, maxZ = 2) {
+  const r = $('#viewport').getBoundingClientRect(), pad = 80;
+  const z = Math.min(maxZ, Math.max(0.15, Math.min((r.width - pad * 2) / Math.max(box.w, 1), (r.height - pad * 2) / Math.max(box.h, 1))));
+  tweenCam({ z, x: r.width / 2 - (box.x + box.w / 2) * z, y: r.height / 2 - (box.y + box.h / 2) * z });
+}
 function zoomToSelection() {
   const sel = state.bsel;
   let box = sel?.type === 'shape' ? unionBox(selShapes()) : null;
@@ -2694,9 +2700,188 @@ function zoomToSelection() {
       .map((el) => ({ x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight })));
   }
   if (!box) return zoomFit();
-  const r = $('#viewport').getBoundingClientRect(), pad = 80;
-  const z = Math.min(2, Math.max(0.15, Math.min((r.width - pad * 2) / Math.max(box.w, 1), (r.height - pad * 2) / Math.max(box.h, 1))));
-  tweenCam({ z, x: r.width / 2 - (box.x + box.w / 2) * z, y: r.height / 2 - (box.y + box.h / 2) * z });
+  zoomToBox(box);
+}
+
+// ---- 模板：一键插入一套预设的便签、形状和连线 ----
+// 用小工具函数描述模板：frame 分区框、note 便签、box 形状、text 文字、link 连线（坐标是模板内部的相对坐标）
+function tplBuilder() {
+  const shapes = [], links = [];
+  const add = (o) => {
+    const d = SH_DEF[o.t];
+    const s = { id: uid(), text: '', fill: d.fill, fs: d.fs, al: d.al, ...o };
+    if (!s.b) delete s.b;
+    shapes.push(s);
+    return shapes.length - 1;
+  };
+  return {
+    shapes, links,
+    frame: (x, y, w, h, title) => add({ t: 'rect', x, y, w, h, text: title, fill: 'none', fs: 18, b: true, al: 'left', va: 'top', frame: true }),
+    note: (x, y, text, fill = 0, w = 240, h = 110) => add({ t: 'sticky', x, y, w, h, text, fill, fs: 15, al: 'left' }),
+    box: (x, y, w, h, text, o = {}) => add({ t: 'round', x, y, w, h, text, fill: 4, fs: 15, al: 'center', ...o }),
+    wire: (x, y, w, h, text, fs = 13) => add({ t: 'rect', x, y, w, h, text, fill: 6, fs, al: 'center' }),
+    text: (x, y, w, text, fs = 20, b = false) => add({ t: 'text', x, y, w, h: Math.round(fs * 1.5 * (text.split('\n').length) + 10), text, fs, b, fill: 'none', al: 'left' }),
+    link: (a, b, o = {}) => { links.push({ id: uid(), from: { id: shapes[a].id }, to: { id: shapes[b].id }, end: 'arrow', ...o }); },
+  };
+}
+const TEMPLATES = [
+  {
+    id: 'poster', name: '海报设计', desc: '需求 → 灵感 → 草图 → 定稿检查 → 输出规格，附一张海报版式线框',
+    build(T) {
+      T.text(0, 0, 900, '海报设计 · 〔项目名称〕', 32, true);
+      const cols = [
+        ['① 需求 Brief', 0, ['目的：这张海报要达成什么？', '受众：给谁看？在哪里看到？', '核心信息：标题 / 时间 / 地点 / 行动号召', '截止日期 · 交付规格']],
+        ['② 灵感参考', 1, ['配色参考（把参考图拖进来）', '字体参考', '版式 / 构图参考', '关键词：氛围、风格、情绪']],
+        ['③ 草图方案', 4, ['方案 A', '方案 B', '方案 C', '选定方案 & 理由']],
+        ['④ 定稿检查', 5, ['☐ 文字校对：错别字、日期、电话', '☐ 品牌规范：Logo / 标准色 / 字体', '☐ 印刷：出血 3mm、CMYK、300dpi', '☐ 层级清晰：3 秒看懂主题']],
+        ['⑤ 输出规格', 3, ['印刷：A3 297×420mm · A4 210×297mm', '竖屏：1080×1920（手机、电梯屏）', '方图 1080×1080 · 小红书 1080×1440', '格式：PDF（印刷）· PNG / JPG（线上）']],
+      ];
+      const frames = cols.map(([title, fill, notes], i) => {
+        const x = i * 340, f = T.frame(x, 80, 300, 600, title);
+        notes.forEach((n, j) => T.note(x + 30, 140 + j * 130, n, fill));
+        return f;
+      });
+      frames.slice(1).forEach((f, i) => T.link(frames[i], f));
+      const lf = T.frame(0, 760, 440, 660, '版式线框（A 系列比例 1 : 1.414）');
+      T.wire(30, 820, 380, 76, '主标题', 22);
+      T.wire(30, 908, 380, 40, '副标题 / 一句话卖点');
+      T.wire(30, 960, 380, 270, '主视觉：插画 / 照片 / 图形', 16);
+      T.wire(30, 1242, 250, 90, '时间 · 地点 · 信息区');
+      T.wire(292, 1242, 118, 90, '二维码');
+      T.wire(30, 1344, 380, 44, 'Logo / 主办方 / 版权');
+      const tip = T.note(500, 820, '层级：标题 > 主视觉 > 信息 > Logo\n四周留白 ≥ 页面宽度的 5%', 0, 280, 130);
+      T.link(tip, lf, { end: 'none', dash: true });
+    },
+  },
+  {
+    id: 'web', name: '网页开发', desc: '目标 → 站点地图 → 首页线框 → 开发任务看板 → 上线检查',
+    build(T) {
+      T.text(0, 0, 900, '网页开发 · 〔站点名称〕', 32, true);
+      const f1 = T.frame(0, 80, 300, 600, '① 目标与受众');
+      ['网站要解决什么问题？', '目标用户是谁？他们从哪来？', '成功指标：访问量 / 转化 / 停留', '参考网站：…'].forEach((n, j) => T.note(30, 140 + j * 130, n, 0));
+      const f2 = T.frame(340, 80, 520, 600, '② 站点地图');
+      const home = T.box(510, 150, 180, 56, '首页', { b: true });
+      const kids = ['关于', '作品 / 产品', '博客', '联系'].map((n, i) => T.box(362 + i * 124, 290, 110, 52, n, { fill: 4, fs: 14 }));
+      kids.forEach((k) => T.link(home, k, { curve: true }));
+      T.link(kids[1], T.box(486, 420, 110, 52, '详情页', { fill: 7, fs: 14 }));
+      T.link(kids[2], T.box(610, 420, 110, 52, '文章页', { fill: 7, fs: 14 }));
+      T.note(370, 540, '每个页面写一句：用户来这里要做什么？', 0, 460, 100);
+      const f3 = T.frame(900, 80, 420, 600, '③ 首页线框');
+      T.wire(920, 140, 380, 44, 'Logo · 导航菜单 · 按钮');
+      T.wire(920, 196, 380, 150, 'Hero：大标题 + 一句话 + 行动按钮', 15);
+      [0, 1, 2].forEach((i) => T.wire(920 + i * 130, 358, 120, 110, `亮点 ${i + 1}`));
+      T.wire(920, 480, 380, 100, '内容区：作品 / 案例 / 评价');
+      T.wire(920, 592, 380, 60, '页脚：联系方式 · 社交链接');
+      const f4 = T.frame(1360, 80, 660, 600, '④ 开发任务');
+      [['待办', 0, ['搭建项目 & 目录结构', '响应式布局', 'SEO：标题 / 描述 / 分享图', '表单 / 联系方式']], ['进行中', 1, ['首页开发']], ['完成', 5, ['域名 & 代码仓库']]]
+        .forEach(([h, fill, notes], i) => {
+          T.text(1385 + i * 212, 130, 190, h, 17, true);
+          notes.forEach((n, j) => T.note(1385 + i * 212, 175 + j * 122, n, fill, 190, 104));
+        });
+      const f5 = T.frame(2060, 80, 300, 600, '⑤ 上线检查');
+      ['☐ 手机 / 平板适配', '☐ Lighthouse 性能 ≥ 90', '☐ 404 页面 & 死链检查', '☐ HTTPS · 统计分析 · 备份'].forEach((n, j) => T.note(2090, 140 + j * 130, n, 5));
+      [f1, f2, f3, f4, f5].slice(1).forEach((f, i) => T.link([f1, f2, f3, f4, f5][i], f));
+    },
+  },
+  {
+    id: 'feature', name: '功能开发', desc: '用户故事 → 验收标准 → 方案判断 → 任务拆分 → 测试 → 发布，带风险与复盘',
+    build(T) {
+      T.text(0, 0, 900, '功能开发 · 〔功能名称〕', 32, true);
+      const story = T.note(0, 90, '用户故事\n作为〔角色〕，我想要〔做什么〕，以便〔得到什么〕', 0, 300, 170);
+      const req = T.frame(360, 80, 300, 440, '需求与验收标准');
+      ['验收 1：…', '验收 2：…', '边界：空数据 / 出错 / 无网络'].forEach((n, j) => T.note(390, 140 + j * 125, n, 5, 240, 105));
+      const q = T.box(720, 110, 200, 140, '需要改后端？', { t: 'diamond', fill: 3, b: true });
+      const api = T.box(990, 30, 220, 110, '接口设计\n请求 / 返回 / 错误码', { fill: 4 });
+      const fe = T.box(990, 230, 220, 110, '前端实现\n组件 / 状态 / 交互', { fill: 4 });
+      const tasks = T.frame(1270, 30, 300, 520, '任务拆分');
+      ['UI 组件', '状态 / 数据流', '接口联调', '埋点 & 日志'].forEach((n, j) => T.note(1300, 90 + j * 112, n, 0, 240, 96));
+      const test = T.box(1630, 120, 200, 110, '测试\n单元 · 手动 · 回归', { fill: 5 });
+      const ship = T.box(1890, 120, 180, 110, '发布\n灰度 → 全量', { fill: 1, b: true });
+      const retro = T.note(1890, 300, '上线后复盘：数据怎么样？用户反馈？', 3, 200, 140);
+      T.note(360, 560, '风险 / 待确认', 2, 300, 120);
+      T.note(720, 330, '相关文档 / 设计稿链接', 7, 220, 110);
+      T.link(story, req); T.link(req, q);
+      T.link(q, api, { label: '是' }); T.link(q, fe, { label: '否' });
+      T.link(api, fe); T.link(fe, tasks); T.link(tasks, test); T.link(test, ship); T.link(ship, retro, { dash: true });
+    },
+  },
+  {
+    id: 'brainstorm', name: '头脑风暴', desc: '中心主题 + 六个方向，先求多再求好',
+    build(T) {
+      T.text(0, 0, 700, '头脑风暴：先求多，再求好', 28, true);
+      const c = T.box(380, 330, 240, 150, '中心主题', { t: 'ellipse', fill: 1, fs: 22, b: true });
+      const fills = [0, 4, 5, 2, 3, 0];
+      fills.forEach((fill, i) => {
+        const a = -Math.PI / 2 + i * (Math.PI / 3), x = 500 + Math.cos(a) * 380 - 100, y = 405 + Math.sin(a) * 280 - 75;
+        T.link(c, T.note(Math.round(x), Math.round(y), `想法 ${i + 1}`, fill, 200, 150), { end: 'none' });
+      });
+    },
+  },
+  {
+    id: 'retro', name: '项目复盘', desc: '做得好 / 待改进 / 行动项，开会时一起填',
+    build(T) {
+      T.text(0, 0, 700, '项目复盘 · 〔项目名称〕', 32, true);
+      [['做得好', 5, ['…', '…', '…']], ['待改进', 2, ['…', '…', '…']], ['行动项', 4, ['要做什么 · 负责人 · 截止日期', '…', '…']]]
+        .forEach(([title, fill, notes], i) => {
+          T.frame(i * 340, 80, 300, 500, title);
+          notes.forEach((n, j) => T.note(i * 340 + 30, 140 + j * 135, n, fill, 240, 115));
+        });
+    },
+  },
+];
+// 模板预览：按模板数据画一张缩略图
+function tplPreview(T) {
+  const ub = unionBox(T.shapes), pad = 30;
+  const vb = `${ub.x - pad} ${ub.y - pad} ${ub.w + pad * 2} ${ub.h + pad * 2}`;
+  const byId = new Map(T.shapes.map((s) => [s.id, s]));
+  const lines = T.links.map((l) => {
+    const a = byId.get(l.from.id), b = byId.get(l.to.id);
+    return a && b ? `<line x1="${a.x + a.w / 2}" y1="${a.y + a.h / 2}" x2="${b.x + b.w / 2}" y2="${b.y + b.h / 2}" class="tp-ln"/>` : '';
+  }).join('');
+  const shapes = T.shapes.map((s) => {
+    const col = shColor(s), fill = col ? col.bg : 'none';
+    if (s.t === 'text') return `<rect x="${s.x}" y="${s.y + s.h * 0.25}" width="${Math.min(s.w, s.text.length * s.fs * 0.9)}" height="${s.h * 0.5}" rx="6" class="tp-tx"/>`;
+    if (s.t === 'ellipse') return `<ellipse cx="${s.x + s.w / 2}" cy="${s.y + s.h / 2}" rx="${s.w / 2}" ry="${s.h / 2}" fill="${fill}"/>`;
+    if (s.t === 'diamond') return `<polygon points="${s.x + s.w / 2},${s.y} ${s.x + s.w},${s.y + s.h / 2} ${s.x + s.w / 2},${s.y + s.h} ${s.x},${s.y + s.h / 2}" fill="${fill}"/>`;
+    return `<rect x="${s.x}" y="${s.y}" width="${s.w}" height="${s.h}" rx="${s.frame ? 16 : s.t === 'round' ? 14 : 4}" fill="${fill}" class="${s.frame ? 'tp-fr' : ''}"/>`;
+  }).join('');
+  return `<svg viewBox="${vb}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">${lines}${shapes}</svg>`;
+}
+async function pickTemplate() {
+  if (!isCanvas(state.view)) return toast('先打开一张画布，再插入模板');
+  const m = $('#modal');
+  m.classList.add('wide', 'tpl-modal');
+  const p = dialog(`<h3>从模板开始</h3><p class="stor-note">插入后都是普通的便签和形状，双击就能改文字，可以随意增删；Ctrl+Z 可以整体撤销。</p>
+    <div class="tpl-grid">${TEMPLATES.map((t) => { const T = tplBuilder(); t.build(T); return `<button type="submit" value="ok" class="tpl-card" data-tpl="${t.id}">
+      <span class="tpl-prev">${tplPreview(T)}</span><b>${esc(t.name)}</b><small>${esc(t.desc)}</small></button>`; }).join('')}</div>
+    <div class="modal-actions"><button class="btn" value="cancel" formnovalidate>取消</button></div>`, (f) => f.dataset.pick);
+  delete $('#modalInner').dataset.pick;
+  const id = await p;
+  m.classList.remove('wide', 'tpl-modal');
+  if (id) insertTemplate(id);
+}
+// 点哪张模板卡片，就记下哪个（随后表单提交时读取）
+$('#modalInner').addEventListener('click', (e) => { const b = e.target.closest?.('[data-tpl]'); if (b) e.currentTarget.dataset.pick = b.dataset.tpl; });
+async function insertTemplate(id) {
+  const tpl = TEMPLATES.find((t) => t.id === id), b = boardOf();
+  if (!tpl || !b) return;
+  if (editingShape) await finishEdit();
+  const T = tplBuilder();
+  tpl.build(T);
+  record();
+  const ub = unionBox(T.shapes);
+  // 放在现有内容的右边，不和已有的东西重叠；空画布就放在原点
+  const existing = unionBox([...b.shapes, ...$$('#world .card.on-canvas').map((el) => ({ x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight }))]);
+  const ox = existing ? existing.x + existing.w + 240 - ub.x : -ub.x, oy = existing ? existing.y - ub.y : -ub.y;
+  const top = topOrder(state.view);
+  T.shapes.forEach((s, i) => { s.x = Math.round(s.x + ox); s.y = Math.round(s.y + oy); s.z = top + i; });
+  b.shapes.push(...T.shapes);
+  b.links.push(...T.links);
+  state.bsel = null;
+  setTool('select');
+  await saveBoard();
+  zoomToBox({ x: ub.x + ox, y: ub.y + oy, w: ub.w, h: ub.h }, 1);
+  toast(`已插入「${tpl.name}」模板，双击便签就能改文字`, { action: '撤销', onAction: () => undoBoard() });
 }
 const SHORTCUTS = [
   ['工具', [['V', '选择'], ['N', '便签'], ['T', '文字'], ['R', '矩形'], ['O', '圆形'], ['D', '菱形'], ['L', '箭头连线'], ['双击工具', '锁定工具，连续放置'], ['Esc', '退出工具 / 取消选中']]],
@@ -4686,6 +4871,7 @@ document.addEventListener('click', async (e) => {
     case 'zoom-fit': return zoomFit();
     case 'tidy': return tidyCanvas();
     case 'shortcuts': return showShortcuts();
+    case 'templates': return pickTemplate();
     case 'toggle-theme': return toggleTheme(btn);
     case 'toggle-drafts': {
       const open = document.body.classList.toggle('drafts-open');

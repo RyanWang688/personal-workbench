@@ -13,7 +13,7 @@
     // 尽早应用主题，避免刷新时闪一下
     try { var t = JSON.parse(localStorage.getItem('wb:theme') || '"auto"'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
   </script>
-  <link rel="stylesheet" href="style.css?v=31">
+  <link rel="stylesheet" href="style.css?v=32">
 </head>
 <body>
   <header class="topbar">
@@ -85,6 +85,7 @@
           <div class="canvas-empty" id="canvasEmpty">
             <b>无限画布</b>
             <span>把文件拖进来，随意摆放 · 双击空白处贴一张便签<br>左侧工具栏画形状、写文字、连箭头 · 空格 + 拖动平移 · Ctrl + 滚轮缩放</span>
+            <button class="btn primary" type="button" data-action="templates">从模板开始：海报 / 网页 / 功能开发…</button>
           </div>
         </div>
         <div class="canvas-palette" id="canvasPalette" role="toolbar" aria-label="白板工具" aria-orientation="vertical">
@@ -97,6 +98,8 @@
           <button class="icon-btn" data-tool="diamond" data-tip="菱形" data-key="D" aria-label="菱形（D）"><svg viewBox="0 0 24 24"><path d="M12 3l9 9-9 9-9-9z"/></svg></button>
           <span class="sep"></span>
           <button class="icon-btn" data-tool="arrow" data-tip="箭头连线" data-key="L" aria-label="箭头连线（L）"><svg viewBox="0 0 24 24"><path d="M5 19L19 5M10 5h9v9"/></svg></button>
+          <span class="sep"></span>
+          <button class="icon-btn" data-action="templates" data-tip="模板" data-key="" aria-label="插入模板"><svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><path d="M17 14v6M14 17h6"/></svg></button>
         </div>
         <div class="tool-hint" id="toolHint" hidden></div>
         <div class="size-tip" id="sizeTip" hidden></div>
@@ -144,6 +147,6 @@
   <input type="file" id="fileInput" multiple hidden>
   <input type="file" id="restoreInput" accept=".wbk" hidden>
   <noscript>此工作台需要启用 JavaScript。</noscript>
-  <script type="module" src="app.js?v=36"></script>
+  <script type="module" src="app.js?v=37"></script>
 </body>
 </html>
