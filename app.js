@@ -1709,8 +1709,10 @@ const pointers = new Map();
 let pan = null, pinch = null, cardDrag = null, suppressClick = false;
 vp.addEventListener('pointerdown', (e) => {
   const mouse = e.pointerType === 'mouse';
-  if (mouse && e.button !== 0 && e.button !== 1) return;
-  const forcePan = spaceDown || (mouse && e.button === 1); // 按住空格或鼠标中键：任何工具下都直接平移
+  if (mouse && e.button > 2) return;
+  // 按住空格、鼠标中键或右键拖动：任何工具下都直接平移（右键不拖动仍然弹出菜单）
+  const forcePan = spaceDown || (mouse && (e.button === 1 || e.button === 2));
+  if (mouse && e.button === 2 && pointers.size) return;
   if (forcePan) e.preventDefault();
   if (!forcePan && (e.target.closest('.card .sel') || (e.shiftKey || e.ctrlKey || e.metaKey) && e.target.closest('.card'))) return;
   if (!forcePan && pointers.size === 0 && boardDown(e)) return; // 白板：形状、连线、工具
@@ -1729,9 +1731,16 @@ vp.addEventListener('pointerdown', (e) => {
     pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) }; pan = null;
   } else {
     const c = cam();
-    pan = { sx: e.clientX, sy: e.clientY, x: c.x, y: c.y, moved: false };
+    pan = { sx: e.clientX, sy: e.clientY, x: c.x, y: c.y, moved: false, right: mouse && e.button === 2, target: e.target };
   }
 });
+// 右键拖动后不弹菜单；macOS 按下右键就会触发菜单，先压住，松手时没拖动再弹卡片菜单
+let rightPanAt = 0;
+vp.addEventListener('pointerup', () => { if (pan?.right) { pan.released = true; if (pan.moved) rightPanAt = Date.now(); } }, true);
+vp.addEventListener('contextmenu', (e) => {
+  if (pan?.right && !pan.released) { e.preventDefault(); e.stopImmediatePropagation(); pan.menuHeld = true; return; }
+  if (Date.now() - rightPanAt < 400) { e.preventDefault(); e.stopImmediatePropagation(); }
+}, true);
 vp.addEventListener('pointermove', (e) => {
   if (boardMove(e)) return;
   if (cardDrag && e.pointerId === cardDrag.id) {
@@ -1790,7 +1799,14 @@ async function endPointer(e) {
   if (!pointers.has(e.pointerId)) return;
   pointers.delete(e.pointerId);
   if (pointers.size < 2) pinch = null;
-  if (pan) { vp.classList.remove('panning'); saveCam(); }
+  if (pan) {
+    vp.classList.remove('panning'); saveCam();
+    if (pan.right && pan.moved) rightPanAt = Date.now();
+    else if (pan.right && pan.menuHeld && e.type === 'pointerup') {
+      const cardEl = pan.target?.closest?.('.card');
+      if (cardEl && findCard(cardEl.dataset.id)) cardMenu($('.more', cardEl), findCard(cardEl.dataset.id));
+    }
+  }
   if (!pointers.size) pan = null;
 }
 vp.addEventListener('pointerup', endPointer);
