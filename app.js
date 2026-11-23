@@ -2114,7 +2114,19 @@ vp.addEventListener('pointerdown', (e) => {
   if (cardEl && !e.target.closest('.more, .export-handle, .card-expand-btn, .pdf-page-bar, [data-card-handle]')) {
     const card = findCard(cardEl.dataset.id);
     if (cardEl.classList.contains('on-canvas')) pickCanvasCard(card.id);
-    cardDrag = { mode: 'move', el: cardEl, card, sx: e.clientX, sy: e.clientY, x: card.x || 0, y: card.y || 0, moved: false, id: e.pointerId, alt: e.altKey };
+    const groupCards = (cardEl.classList.contains('on-canvas') && !e.altKey && state.selected.has(card.id) && state.selected.size > 1)
+      ? [...state.selected].map(findCard).filter((c) => c && c.columnId === state.view)
+      : [card];
+    const items = groupCards.map((c) => {
+      const el = $(`#world .card[data-id="${CSS.escape(c.id)}"]`) || (c.id === card.id ? cardEl : null);
+      return el ? { card: c, el, x: c.x || 0, y: c.y || 0, w: el.offsetWidth || canvasCardW(c), h: el.offsetHeight || 120 } : null;
+    }).filter(Boolean);
+    cardDrag = {
+      mode: 'move', el: cardEl, card, items,
+      sx: e.clientX, sy: e.clientY, x: card.x || 0, y: card.y || 0,
+      w: cardEl.offsetWidth || canvasCardW(card), h: cardEl.offsetHeight || 120,
+      moved: false, id: e.pointerId, alt: e.altKey,
+    };
     if (e.altKey) e.preventDefault();
     try { cardEl.setPointerCapture(e.pointerId); } catch {}
     return;
@@ -2149,32 +2161,71 @@ vp.addEventListener('pointermove', (e) => {
         cardDrag.el.style.zIndex = topOrder(state.view) + 1;
         document.body.classList.add('is-dragging-card');
       }
-      const { o, k } = cardDrag, minW = 140, maxW = 4800, tol = 6 / z, snapOn = !(e.ctrlKey || e.metaKey);
-      let x = o.x, y = o.y, w = o.w, h = o.h, gx = null, gy = null;
+      const { o, k } = cardDrag, minW = 140, maxW = 4800, tol = 7 / z, snapOn = !(e.ctrlKey || e.metaKey);
+      let x = o.x, y = o.y, w = o.w, h = o.h, gx = null, gy = null, sizeTag = '';
       if (o.ar) {
         if (k === 'e' || k === 'w') {
           w = Math.min(maxW, Math.max(minW, k === 'e' ? o.w + dx : o.w - dx));
           if (snapOn) {
             gx = nearest([k === 'e' ? o.x + w : o.x + o.w - w], cardDrag.snapT.xs, tol);
             if (gx) w = Math.min(maxW, Math.max(minW, k === 'e' ? w + gx.d : w - gx.d));
+            else {
+              const sw = nearest([w], cardDrag.snapT.ws, tol);
+              if (sw) { w = Math.min(maxW, Math.max(minW, w + sw.d)); sizeTag = '等宽'; }
+            }
           }
           if (k === 'w') x = o.x + o.w - w;
         } else if (k === 's' || k === 'n') {
-          const mh = Math.max(60, k === 's' ? o.mediaH + dy : o.mediaH - dy);
+          let mh = Math.max(60, k === 's' ? o.mediaH + dy : o.mediaH - dy);
+          if (snapOn) {
+            const candY = k === 's' ? o.y + mh + o.bodyH : o.y + o.h - (mh + o.bodyH);
+            gy = nearest([candY], cardDrag.snapT.ys, tol);
+            if (gy) mh = Math.max(60, k === 's' ? mh + gy.d : mh - gy.d);
+          }
           w = Math.min(maxW, Math.max(minW, mh * o.ar));
+          if (snapOn && !gy) {
+            const sw = nearest([w], cardDrag.snapT.ws, tol);
+            if (sw) { w = Math.min(maxW, Math.max(minW, w + sw.d)); sizeTag = '等宽'; }
+          }
           x = o.x + (o.w - w) / 2;
         } else {
           const sgnX = k.includes('e') ? 1 : -1, sgnY = k.includes('s') ? 1 : -1;
           const dwX = sgnX * dx, dwY = sgnY * dy * o.ar;
           const dw = Math.abs(dwX) >= Math.abs(dwY) ? dwX : dwY;
           w = Math.min(maxW, Math.max(minW, o.w + dw));
+          if (snapOn) {
+            const edgeX = k.includes('e') ? o.x + w : o.x + o.w - w;
+            gx = nearest([edgeX], cardDrag.snapT.xs, tol);
+            if (gx) w = Math.min(maxW, Math.max(minW, k.includes('e') ? w + gx.d : w - gx.d));
+            else {
+              const candH = w / o.ar + o.bodyH;
+              const edgeY = k.includes('s') ? o.y + candH : o.y + o.h - candH;
+              gy = nearest([edgeY], cardDrag.snapT.ys, tol);
+              if (gy) {
+                const targetH = Math.max(60 + o.bodyH, k.includes('s') ? candH + gy.d : candH - gy.d);
+                w = Math.min(maxW, Math.max(minW, (targetH - o.bodyH) * o.ar));
+              } else {
+                const sw = nearest([w], cardDrag.snapT.ws, tol);
+                if (sw) { w = Math.min(maxW, Math.max(minW, w + sw.d)); sizeTag = '等宽'; }
+              }
+            }
+          }
           if (k.includes('w')) x = o.x + o.w - w;
         }
         h = w / o.ar + o.bodyH;
         if (k.includes('n')) y = o.y + o.h - h;
       } else {
-        if (k.includes('e')) w = Math.min(maxW, Math.max(minW, o.w + dx));
-        if (k.includes('w')) { w = Math.min(maxW, Math.max(minW, o.w - dx)); x = o.x + o.w - w; }
+        if (k.includes('e')) {
+          w = Math.min(maxW, Math.max(minW, o.w + dx));
+          if (snapOn && (gx = nearest([x + w], cardDrag.snapT.xs, tol))) w += gx.d;
+          else if (snapOn) { const sw = nearest([w], cardDrag.snapT.ws, tol); if (sw) { w += sw.d; sizeTag = '等宽'; } }
+        }
+        if (k.includes('w')) {
+          x = o.x + dx;
+          if (snapOn && (gx = nearest([x], cardDrag.snapT.xs, tol))) x += gx.d;
+          w = Math.min(maxW, Math.max(minW, o.x + o.w - x));
+          x = o.x + o.w - w;
+        }
         if (k.includes('s')) h = Math.max(60, o.h + dy);
         if (k.includes('n')) { h = Math.max(60, o.h - dy); y = o.y + o.h - h; }
       }
@@ -2184,7 +2235,7 @@ vp.addEventListener('pointermove', (e) => {
       cardDrag.el.style.top = `${cardDrag.cur.y}px`;
       cardDrag.el.style.width = `${cardDrag.cur.w}px`;
       showGuides(gx, gy, cardDrag.cur);
-      showSizeTip(e, cardDrag.cur.w, cardDrag.el.offsetHeight || cardDrag.cur.h);
+      showSizeTip(e, cardDrag.cur.w, cardDrag.el.offsetHeight || cardDrag.cur.h, sizeTag);
       drawLinks();
       return;
     }
@@ -2192,9 +2243,14 @@ vp.addEventListener('pointermove', (e) => {
     if (!cardDrag.moved && Math.hypot(dx, dy) < 4) return;
     if (!cardDrag.moved) {
       cardDrag.moved = true;
-      cardDrag.el.classList.add('lifting');
-      cardDrag.el.style.zIndex = topOrder(state.view) + 1;
+      hideDots();
+      const topZ = topOrder(state.view);
+      (cardDrag.items || [{ el: cardDrag.el }]).forEach((it, i) => {
+        it.el.classList.add('lifting');
+        it.el.style.zIndex = topZ + 1 + i;
+      });
       document.body.classList.add('is-dragging-card');
+      cardDrag.snapT = snapTargets(new Set(), new Set((cardDrag.items || [{ card: cardDrag.card }]).map((it) => it.card.id)));
       if (cardDrag.alt) {
         // Alt + 拖动：原卡片留在原地（半透明占位），拖走的是副本
         const ph = cardDrag.el.cloneNode(true);
@@ -2203,10 +2259,31 @@ vp.addEventListener('pointermove', (e) => {
         cardDrag.el.classList.add('copying');
       }
     }
-    if (e.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; } // Shift：只水平或只垂直
-    const z = cam().z;
-    cardDrag.el.style.left = `${cardDrag.x + dx / z}px`;
-    cardDrag.el.style.top = `${cardDrag.y + dy / z}px`;
+    const z = cam().z, tol = 7 / z, snapOn = !(e.ctrlKey || e.metaKey);
+    const lock = e.shiftKey ? (Math.abs(dx) > Math.abs(dy) ? 'x' : 'y') : null; // Shift：只水平或只垂直
+    let mx = lock === 'y' ? 0 : dx / z;
+    let my = lock === 'x' ? 0 : dy / z;
+    const list = cardDrag.items?.length ? cardDrag.items : [{ card: cardDrag.card, el: cardDrag.el, x: cardDrag.x, y: cardDrag.y, w: cardDrag.w || cardDrag.el.offsetWidth, h: cardDrag.h || cardDrag.el.offsetHeight }];
+    const ob = unionBox(list);
+    let gx = null, gy = null;
+    if (snapOn && cardDrag.snapT) {
+      const bx = ob.x + mx, by = ob.y + my;
+      if (lock !== 'y') {
+        gx = nearest([bx, bx + ob.w / 2, bx + ob.w], cardDrag.snapT.xs, tol)
+          || nearestGapX({ x: bx, y: by, w: ob.w, h: ob.h }, cardDrag.snapT.boxes, tol);
+      }
+      if (lock !== 'x') {
+        gy = nearest([by, by + ob.h / 2, by + ob.h], cardDrag.snapT.ys, tol)
+          || nearestGapY({ x: bx, y: by, w: ob.w, h: ob.h }, cardDrag.snapT.boxes, tol);
+      }
+      if (gx) mx += gx.d;
+      if (gy) my += gy.d;
+    }
+    for (const it of list) {
+      it.el.style.left = `${Math.round(it.x + mx)}px`;
+      it.el.style.top = `${Math.round(it.y + my)}px`;
+    }
+    showGuides(gx, gy, { x: Math.round(ob.x + mx), y: Math.round(ob.y + my), w: ob.w, h: ob.h });
     drawLinks();
     highlightZoneUnder(e.clientX, e.clientY, cardDrag.el);
     return;
@@ -2264,8 +2341,9 @@ async function endPointer(e) {
       return;
     }
     if (!d.moved) return;
+    clearGuides();
     suppressClick = true; setTimeout(() => { suppressClick = false; }, 0);
-    d.el.classList.remove('lifting', 'copying');
+    (d.items || [{ el: d.el }]).forEach((it) => it.el.classList.remove('lifting', 'copying'));
     d.ph?.remove();
     if (d.alt) {
       if (e.type !== 'pointerup') return renderCanvas();
@@ -2279,9 +2357,25 @@ async function endPointer(e) {
       renderCanvas();
       const id = zone === CANVAS_PICK ? await pickCanvas(d.card.columnId) : await pickFolder();
       if (!id) return;
-      return zone === CANVAS_PICK ? moveCard(d.card.id, id) : archiveCards([d.card], id);
+      const cards = d.items?.length > 1 ? d.items.map((it) => it.card) : [d.card];
+      return zone === CANVAS_PICK ? moveMany(cards.map((c) => c.id), id) : archiveCards(cards, id);
     }
-    if (zone) return moveCard(d.card.id, zone, 0);
+    if (zone) {
+      if (d.items?.length > 1) return moveMany(d.items.map((it) => it.card.id), zone);
+      return moveCard(d.card.id, zone, 0);
+    }
+    if (d.items?.length > 1) {
+      const topZ = topOrder(state.view);
+      d.items.forEach((it, i) => {
+        it.card.x = parseFloat(it.el.style.left);
+        it.card.y = parseFloat(it.el.style.top);
+        it.card.order = topZ + i;
+        it.card.updatedAt = Date.now();
+      });
+      await db.putMany('cards', d.items.map((it) => it.card));
+      await changed();
+      return;
+    }
     d.card.x = parseFloat(d.el.style.left); d.card.y = parseFloat(d.el.style.top);
     d.card.order = topOrder(state.view);
     await saveCard(d.card);
@@ -2370,7 +2464,7 @@ const TOOL_HINT = {
   sticky: '点击贴一张便签，或拖出大小', text: '点击放置文字框，然后直接输入', rect: '点击放置，或拖出大小（Shift 画正方形）',
   ellipse: '点击放置，或拖出大小（Shift 画正圆）', diamond: '点击放置，或拖出大小', arrow: '从一个对象拖到另一个对象',
 };
-const ALIGN_OPS = { l: '左对齐', ch: '水平居中', r: '右对齐', t: '顶部对齐', cv: '垂直居中', b: '底部对齐', dh: '横向均匀分布', dv: '纵向均匀分布' };
+const ALIGN_OPS = { smart: '✨ 智能对齐行列', l: '左对齐', ch: '水平居中', r: '右对齐', t: '顶部对齐', cv: '垂直居中', b: '底部对齐', dh: '横向均匀分布', dv: '纵向均匀分布', ew: '统一等宽' };
 state.tool = 'select';
 state.toolLock = false;
 state.bsel = null; // { type: 'shape', ids: [...] } | { type: 'link', id }
@@ -2677,12 +2771,19 @@ vp.addEventListener('pointerover', (e) => {
 vp.addEventListener('pointerleave', () => { if (!bd) hideDots(); });
 vp.addEventListener('pointermove', (e) => { lastPointer = { x: e.clientX, y: e.clientY }; }, true);
 
-// ---- 对齐吸附 ----
-function snapTargets(exclude, excludeCardId = null) {
-  const xs = [], ys = [], add = (b) => { xs.push(b.x, b.x + b.w / 2, b.x + b.w); ys.push(b.y, b.y + b.h / 2, b.y + b.h); };
-  for (const s of boardOf().shapes) if (!exclude.has(s.id)) add(s);
-  for (const el of $$('#world .card.on-canvas')) if (el.dataset.id !== excludeCardId) add({ x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight });
-  return { xs, ys };
+// ---- 对齐吸附（边缘、中心线、等距间距、等宽等高尺寸吸附） ----
+function snapTargets(exclude = new Set(), excludeCards = null) {
+  const exCards = excludeCards instanceof Set ? excludeCards : new Set(excludeCards ? [excludeCards] : []);
+  const xs = [], ys = [], ws = [], hs = [], boxes = [];
+  const add = (b) => {
+    xs.push(b.x, b.x + b.w / 2, b.x + b.w);
+    ys.push(b.y, b.y + b.h / 2, b.y + b.h);
+    ws.push(b.w); hs.push(b.h);
+    boxes.push({ x: b.x, y: b.y, w: b.w, h: b.h });
+  };
+  for (const s of boardOf()?.shapes || []) if (!exclude.has(s.id)) add(s);
+  for (const el of $$('#world .card.on-canvas')) if (!exCards.has(el.dataset.id)) add({ x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight });
+  return { xs, ys, ws, hs, boxes };
 }
 function nearest(vals, cands, tol) {
   let best = null;
@@ -2692,19 +2793,83 @@ function nearest(vals, cands, tol) {
   }
   return best;
 }
+function nearestGapX(box, boxes, tol) {
+  if (!boxes?.length) return null;
+  const row = boxes.filter((b) => Math.min(box.y + box.h, b.y + b.h) - Math.max(box.y, b.y) > -Math.min(box.h, b.h) * 0.8);
+  const lefts = row.filter((b) => b.x + b.w <= box.x + tol * 2).sort((a, b) => (b.x + b.w) - (a.x + a.w));
+  const rights = row.filter((b) => b.x >= box.x + box.w - tol * 2).sort((a, b) => a.x - b.x);
+  const L = lefts[0], LL = lefts[1], R = rights[0], RR = rights[1], cy = box.y + box.h / 2;
+  if (L && R) {
+    const g = ((R.x - (L.x + L.w)) - box.w) / 2, tx = L.x + L.w + g, d = tx - box.x;
+    if (g >= 4 && Math.abs(d) <= tol) {
+      return { d, gaps: [{ axis: 'x', p1: L.x + L.w, p2: tx, cross: cy, val: Math.round(g) }, { axis: 'x', p1: tx + box.w, p2: R.x, cross: cy, val: Math.round(g) }] };
+    }
+  }
+  if (L && LL) {
+    const g0 = L.x - (LL.x + LL.w), tx = L.x + L.w + g0, d = tx - box.x;
+    if (g0 >= 4 && g0 <= 480 && Math.abs(d) <= tol) {
+      return { d, gaps: [{ axis: 'x', p1: LL.x + LL.w, p2: L.x, cross: L.y + L.h / 2, val: Math.round(g0) }, { axis: 'x', p1: L.x + L.w, p2: tx, cross: cy, val: Math.round(g0) }] };
+    }
+  }
+  if (R && RR) {
+    const g0 = RR.x - (R.x + R.w), tx = R.x - g0 - box.w, d = tx - box.x;
+    if (g0 >= 4 && g0 <= 480 && Math.abs(d) <= tol) {
+      return { d, gaps: [{ axis: 'x', p1: tx + box.w, p2: R.x, cross: cy, val: Math.round(g0) }, { axis: 'x', p1: R.x + R.w, p2: RR.x, cross: R.y + R.h / 2, val: Math.round(g0) }] };
+    }
+  }
+  if (L) { const tx = L.x + L.w + 24, d = tx - box.x; if (Math.abs(d) <= tol * 0.7) return { d, gaps: [{ axis: 'x', p1: L.x + L.w, p2: tx, cross: cy, val: 24 }] }; }
+  if (R) { const tx = R.x - 24 - box.w, d = tx - box.x; if (Math.abs(d) <= tol * 0.7) return { d, gaps: [{ axis: 'x', p1: tx + box.w, p2: R.x, cross: cy, val: 24 }] }; }
+  return null;
+}
+function nearestGapY(box, boxes, tol) {
+  if (!boxes?.length) return null;
+  const col = boxes.filter((b) => Math.min(box.x + box.w, b.x + b.w) - Math.max(box.x, b.x) > -Math.min(box.w, b.w) * 0.8);
+  const tops = col.filter((b) => b.y + b.h <= box.y + tol * 2).sort((a, b) => (b.y + b.h) - (a.y + a.h));
+  const bots = col.filter((b) => b.y >= box.y + box.h - tol * 2).sort((a, b) => a.y - b.y);
+  const T = tops[0], TT = tops[1], B = bots[0], BB = bots[1], cx = box.x + box.w / 2;
+  if (T && B) {
+    const g = ((B.y - (T.y + T.h)) - box.h) / 2, ty = T.y + T.h + g, d = ty - box.y;
+    if (g >= 4 && Math.abs(d) <= tol) {
+      return { d, gaps: [{ axis: 'y', p1: T.y + T.h, p2: ty, cross: cx, val: Math.round(g) }, { axis: 'y', p1: ty + box.h, p2: B.y, cross: cx, val: Math.round(g) }] };
+    }
+  }
+  if (T && TT) {
+    const g0 = T.y - (TT.y + TT.h), ty = T.y + T.h + g0, d = ty - box.y;
+    if (g0 >= 4 && g0 <= 480 && Math.abs(d) <= tol) {
+      return { d, gaps: [{ axis: 'y', p1: TT.y + TT.h, p2: T.y, cross: T.x + T.w / 2, val: Math.round(g0) }, { axis: 'y', p1: T.y + T.h, p2: ty, cross: cx, val: Math.round(g0) }] };
+    }
+  }
+  if (B && BB) {
+    const g0 = BB.y - (B.y + B.h), ty = B.y - g0 - box.h, d = ty - box.y;
+    if (g0 >= 4 && g0 <= 480 && Math.abs(d) <= tol) {
+      return { d, gaps: [{ axis: 'y', p1: ty + box.h, p2: B.y, cross: cx, val: Math.round(g0) }, { axis: 'y', p1: B.y + B.h, p2: BB.y, cross: B.x + B.w / 2, val: Math.round(g0) }] };
+    }
+  }
+  if (T) { const ty = T.y + T.h + 24, d = ty - box.y; if (Math.abs(d) <= tol * 0.7) return { d, gaps: [{ axis: 'y', p1: T.y + T.h, p2: ty, cross: cx, val: 24 }] }; }
+  if (B) { const ty = B.y - 24 - box.h, d = ty - box.y; if (Math.abs(d) <= tol * 0.7) return { d, gaps: [{ axis: 'y', p1: ty + box.h, p2: B.y, cross: cx, val: 24 }] }; }
+  return null;
+}
 function showGuides(gx, gy, box) {
   const g = $('#guides');
   if (!g) return;
   const ext = 4000;
-  g.innerHTML = (gx ? `<i class="gl gx" style="left:${gx.at}px;top:${box.y - ext}px;height:${box.h + ext * 2}px"></i>` : '')
-    + (gy ? `<i class="gl gy" style="top:${gy.at}px;left:${box.x - ext}px;width:${box.w + ext * 2}px"></i>` : '');
+  let html = (gx?.at != null ? `<i class="gl gx" style="left:${gx.at}px;top:${box.y - ext}px;height:${box.h + ext * 2}px"></i>` : '')
+    + (gy?.at != null ? `<i class="gl gy" style="top:${gy.at}px;left:${box.x - ext}px;width:${box.w + ext * 2}px"></i>` : '');
+  for (const gp of [...(gx?.gaps || []), ...(gy?.gaps || [])]) {
+    const p1 = Math.min(gp.p1, gp.p2), len = Math.max(0, Math.abs(gp.p2 - gp.p1));
+    if (len < 4) continue;
+    html += gp.axis === 'x'
+      ? `<i class="gl-gap gap-x" style="left:${p1}px;top:${gp.cross}px;width:${len}px"><span>${gp.val}</span></i>`
+      : `<i class="gl-gap gap-y" style="top:${p1}px;left:${gp.cross}px;height:${len}px"><span>${gp.val}</span></i>`;
+  }
+  g.innerHTML = html;
 }
 const clearGuides = () => { const g = $('#guides'); if (g) g.innerHTML = ''; };
-function showSizeTip(e, w, h) {
+function showSizeTip(e, w, h, tag = '') {
   const tip = $('#sizeTip'), cv = $('#canvasView').getBoundingClientRect();
   if (!tip) return;
   tip.hidden = false;
-  tip.textContent = `${Math.round(w)} × ${Math.round(h)}`;
+  tip.textContent = `${Math.round(w)} × ${Math.round(h)}${tag ? ` · ${tag}` : ''}`;
   tip.style.left = `${e.clientX - cv.left + 14}px`; tip.style.top = `${e.clientY - cv.top + 16}px`;
 }
 const hideSizeTip = () => { const t = $('#sizeTip'); if (t) t.hidden = true; };
@@ -2750,8 +2915,8 @@ function boardDown(e) {
     capture(); return true;
   }
   if (e.shiftKey && state.tool === 'select' && !cardEl) {
-    // Shift + 拖动空白处：框选
-    bd = { ...base, mode: 'marquee', p0: p, base: [...selIds()] };
+    // Shift + 拖动空白处：框选形状与画布卡片
+    bd = { ...base, mode: 'marquee', p0: p, base: [...selIds()], baseCards: [...state.selected] };
     capture(); return true;
   }
   if (state.bsel) {
@@ -2800,8 +2965,8 @@ function boardMove(e) {
     if (lock === 'y') mx = 0;
     if (snapOn) {
       const bx = ob.x + mx, by = ob.y + my;
-      if (lock !== 'y') gx = nearest([bx, bx + ob.w / 2, bx + ob.w], bd.snapT.xs, tol);
-      if (lock !== 'x') gy = nearest([by, by + ob.h / 2, by + ob.h], bd.snapT.ys, tol);
+      if (lock !== 'y') gx = nearest([bx, bx + ob.w / 2, bx + ob.w], bd.snapT.xs, tol) || nearestGapX({ x: bx, y: by, w: ob.w, h: ob.h }, bd.snapT.boxes, tol);
+      if (lock !== 'x') gy = nearest([by, by + ob.h / 2, by + ob.h], bd.snapT.ys, tol) || nearestGapY({ x: bx, y: by, w: ob.w, h: ob.h }, bd.snapT.boxes, tol);
       if (gx) mx += gx.d;
       if (gy) my += gy.d;
     }
@@ -2852,6 +3017,12 @@ function boardMove(e) {
     const hit = boardOf().shapes.filter((s) => s.x < r.x + r.w && s.x + s.w > r.x && s.y < r.y + r.h && s.y + s.h > r.y).map((s) => s.id);
     bd.hits = [...new Set([...bd.base, ...hit])];
     $$('#world .shape').forEach((el) => el.classList.toggle('picked', bd.hits.includes(el.dataset.sid)));
+    const hitCards = $$('#world .card.on-canvas').filter((el) => {
+      const cx = el.offsetLeft, cy = el.offsetTop, cw = el.offsetWidth, ch = el.offsetHeight;
+      return cx < r.x + r.w && cx + cw > r.x && cy < r.y + r.h && cy + ch > r.y;
+    }).map((el) => el.dataset.id);
+    bd.cardHits = [...new Set([...(bd.baseCards || []), ...hitCards])];
+    $$('#world .card.on-canvas').forEach((el) => el.classList.toggle('selected', bd.cardHits.includes(el.dataset.id)));
   } else if (bd.mode === 'link') {
     bd.cur = toWorld(e.clientX, e.clientY);
     const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest('.shape, .card.on-canvas');
@@ -2880,7 +3051,18 @@ async function boardUp(e) {
     else { decorateBoard(); positionFmt(); }
     return true;
   }
-  if (d.mode === 'marquee') { selectBoard(pickShapes(d.hits || d.base)); return true; }
+  if (d.mode === 'marquee') {
+    const shHits = d.hits || d.base || [];
+    const cHits = d.cardHits || d.baseCards || [];
+    if (cHits.length) {
+      state.selected = new Set(cHits);
+      document.body.classList.toggle('selecting', state.selected.size > 0);
+      renderSelBar();
+    }
+    if (shHits.length && !cHits.length) selectBoard(pickShapes(shHits));
+    else renderCanvas();
+    return true;
+  }
   if (d.mode === 'create') {
     const box = d.moved && d.box && d.box.w > 12 && d.box.h > 12 ? d.box : null;
     const def = SH_DEF[d.t];
@@ -2996,10 +3178,69 @@ window.addEventListener('paste', (e) => {
   e.preventDefault(); e.stopImmediatePropagation();
   pasteClip();
 }, true);
+// 对一组通用画布框 { x, y, w, h } 进行原地智能对齐：自动吸附接近的行列、统一同列相近宽度、均分同列/同行间距
+function smartSnapBoxes(boxes, tol = 56) {
+  if (boxes.length < 2) return;
+  const cluster1D = (items, getVal) => {
+    const sorted = [...items].sort((a, b) => getVal(a) - getVal(b));
+    const groups = [];
+    for (const it of sorted) {
+      const v = getVal(it), last = groups[groups.length - 1];
+      if (last && Math.abs(v - last.avg) <= tol) {
+        last.list.push(it);
+        last.avg = last.list.reduce((s, x) => s + getVal(x), 0) / last.list.length;
+      } else groups.push({ list: [it], avg: v });
+    }
+    return groups.filter((g) => g.list.length > 1);
+  };
+  // 1) 同列吸附（按水平中心聚类）
+  for (const col of cluster1D(boxes, (b) => b.x + b.w / 2)) {
+    const ws = col.list.map((b) => b.w);
+    const minW = Math.min(...ws), maxW = Math.max(...ws);
+    if (maxW - minW > 0 && maxW - minW <= 72) {
+      const targetW = Math.round(ws.reduce((a, b) => a + b, 0) / ws.length);
+      col.list.forEach((b) => { b.w = targetW; b.wChanged = true; });
+    }
+    const leftSpread = Math.max(...col.list.map((b) => b.x)) - Math.min(...col.list.map((b) => b.x));
+    const centerSpread = Math.max(...col.list.map((b) => b.x + b.w / 2)) - Math.min(...col.list.map((b) => b.x + b.w / 2));
+    if (leftSpread <= centerSpread + 8) {
+      const targetX = Math.round(col.list.reduce((s, b) => s + b.x, 0) / col.list.length);
+      col.list.forEach((b) => { b.x = targetX; });
+    } else {
+      const cx = col.list.reduce((s, b) => s + b.x + b.w / 2, 0) / col.list.length;
+      col.list.forEach((b) => { b.x = Math.round(cx - b.w / 2); });
+    }
+    // 同列纵向等距整理（若纵向依次排列且间距不均或重叠）
+    const vSorted = [...col.list].sort((a, b) => a.y - b.y);
+    const gaps = [];
+    for (let i = 1; i < vSorted.length; i++) gaps.push(vSorted[i].y - (vSorted[i - 1].y + vSorted[i - 1].h));
+    if (gaps.length && gaps.every((g) => g >= -60 && g <= 160)) {
+      const avgGap = Math.max(20, Math.round((gaps.reduce((a, b) => a + b, 0) / gaps.length) / 4) * 4);
+      let curY = vSorted[0].y;
+      for (const b of vSorted) { b.y = Math.round(curY); curY += b.h + avgGap; }
+    }
+  }
+  // 2) 同行吸附（按顶部或垂直中心聚类）
+  for (const row of cluster1D(boxes, (b) => b.y + b.h / 2)) {
+    const topSpread = Math.max(...row.list.map((b) => b.y)) - Math.min(...row.list.map((b) => b.y));
+    const midSpread = Math.max(...row.list.map((b) => b.y + b.h / 2)) - Math.min(...row.list.map((b) => b.y + b.h / 2));
+    if (topSpread <= midSpread + 12) {
+      const targetY = Math.round(row.list.reduce((s, b) => s + b.y, 0) / row.list.length);
+      row.list.forEach((b) => { b.y = targetY; });
+    } else {
+      const cy = row.list.reduce((s, b) => s + b.y + b.h / 2, 0) / row.list.length;
+      row.list.forEach((b) => { b.y = Math.round(cy - b.h / 2); });
+    }
+  }
+}
 async function alignSel(op) {
   const list = selShapes();
   if (list.length < 2) return;
   record();
+  if (op === 'smart') {
+    smartSnapBoxes(list);
+    return saveBoard();
+  }
   const ub = unionBox(list);
   if (op === 'l') list.forEach((s) => { s.x = ub.x; });
   if (op === 'r') list.forEach((s) => { s.x = ub.x + ub.w - s.w; });
@@ -3007,14 +3248,115 @@ async function alignSel(op) {
   if (op === 't') list.forEach((s) => { s.y = ub.y; });
   if (op === 'b') list.forEach((s) => { s.y = ub.y + ub.h - s.h; });
   if (op === 'cv') list.forEach((s) => { s.y = Math.round(ub.y + ub.h / 2 - s.h / 2); });
+  if (op === 'ew') {
+    const tw = Math.round(list.reduce((sum, s) => sum + s.w, 0) / list.length);
+    list.forEach((s) => { s.w = tw; });
+  }
   if (op === 'dh' || op === 'dv') {
     const k = op === 'dh' ? 'x' : 'y', sz = op === 'dh' ? 'w' : 'h';
     const sorted = [...list].sort((a, b) => a[k] - b[k]);
-    const gap = (ub[sz] - sorted.reduce((t, s) => t + s[sz], 0)) / (sorted.length - 1);
+    const gap = Math.max(16, (ub[sz] - sorted.reduce((t, s) => t + s[sz], 0)) / Math.max(1, sorted.length - 1));
     let at = ub[k];
     for (const s of sorted) { s[k] = Math.round(at); at += s[sz] + gap; }
   }
   await saveBoard();
+}
+function selectedCanvasCards() {
+  return [...state.selected].map(findCard).filter((c) => c && c.columnId === state.view);
+}
+async function alignCanvasCards(op) {
+  const cards = selectedCanvasCards();
+  if (cards.length < 2) return toast('请先选择至少 2 张画布卡片');
+  const before = cards.map((c) => ({ c, x: c.x, y: c.y, w: c.w }));
+  const items = cards.map((c) => {
+    const el = $(`#world .card[data-id="${CSS.escape(c.id)}"]`);
+    const w = el?.offsetWidth || canvasCardW(c), h = el?.offsetHeight || 160;
+    return { c, x: c.x || 0, y: c.y || 0, w, h, ar: h > 40 ? w / h : 1 };
+  });
+  if (op === 'smart') {
+    smartSnapBoxes(items);
+  } else {
+    const ub = unionBox(items);
+    if (op === 'l') items.forEach((it) => { it.x = ub.x; });
+    if (op === 'r') items.forEach((it) => { it.x = ub.x + ub.w - it.w; });
+    if (op === 'ch') items.forEach((it) => { it.x = Math.round(ub.x + ub.w / 2 - it.w / 2); });
+    if (op === 't') items.forEach((it) => { it.y = ub.y; });
+    if (op === 'b') items.forEach((it) => { it.y = ub.y + ub.h - it.h; });
+    if (op === 'cv') items.forEach((it) => { it.y = Math.round(ub.y + ub.h / 2 - it.h / 2); });
+    if (op === 'ew') {
+      const tw = Math.round(items.reduce((s, it) => s + it.w, 0) / items.length);
+      items.forEach((it) => { it.w = tw; it.wChanged = true; });
+    }
+    if (op === 'dh' || op === 'dv') {
+      const k = op === 'dh' ? 'x' : 'y', sz = op === 'dh' ? 'w' : 'h';
+      const sorted = [...items].sort((a, b) => a[k] - b[k]);
+      const rawGap = (ub[sz] - sorted.reduce((t, it) => t + it[sz], 0)) / Math.max(1, sorted.length - 1);
+      const gap = Math.max(24, rawGap);
+      let at = ub[k];
+      for (const it of sorted) { it[k] = Math.round(at); at += it[sz] + gap; }
+    }
+  }
+  items.forEach((it) => {
+    it.c.x = Math.round(it.x);
+    it.c.y = Math.round(it.y);
+    if (it.wChanged) it.c.w = Math.round(it.w);
+    it.c.updatedAt = Date.now();
+  });
+  await db.putMany('cards', cards);
+  await changed();
+  toast(`已${ALIGN_OPS[op] || '对齐'} ${cards.length} 张卡片`, {
+    action: '撤销',
+    onAction: async () => {
+      before.forEach(({ c, x, y, w }) => { c.x = x; c.y = y; if (w === undefined) delete c.w; else c.w = w; });
+      await db.putMany('cards', cards);
+      await changed();
+    },
+  });
+}
+async function autoAlignCanvas() {
+  if (!isCanvas(state.view)) return;
+  const pickedShapes = selShapes();
+  const pickedCards = selectedCanvasCards();
+  if (pickedShapes.length >= 2 && !pickedCards.length) return alignSel('smart');
+  if (pickedCards.length >= 2 && !pickedShapes.length) return alignCanvasCards('smart');
+  const b = boardOf();
+  const allShapes = pickedShapes.length ? pickedShapes : (b?.shapes || []);
+  const allCards = pickedCards.length ? pickedCards : cardsIn(state.view, false);
+  if (allShapes.length + allCards.length < 2) return toast('画布上至少需要 2 个元素才能自动对齐');
+  await waitImgs();
+  const snap = snapBoard();
+  const cardBefore = allCards.map((c) => ({ c, x: c.x, y: c.y, w: c.w }));
+  const boxes = [
+    ...allShapes.map((s) => ({ kind: 'shape', ref: s, x: s.x, y: s.y, w: s.w, h: s.h })),
+    ...allCards.map((c) => {
+      const el = $(`#world .card[data-id="${CSS.escape(c.id)}"]`);
+      return { kind: 'card', ref: c, x: c.x || 0, y: c.y || 0, w: el?.offsetWidth || canvasCardW(c), h: el?.offsetHeight || 160 };
+    }),
+  ];
+  smartSnapBoxes(boxes);
+  for (const bx of boxes) {
+    bx.ref.x = Math.round(bx.x);
+    bx.ref.y = Math.round(bx.y);
+    if (bx.wChanged) bx.ref.w = Math.round(bx.w);
+  }
+  if (allShapes.length) { record(snap); await saveArea(b); }
+  if (allCards.length) await db.putMany('cards', allCards);
+  await changed();
+  toast(`已智能对齐 ${boxes.length} 个画布元素`, {
+    action: '撤销',
+    onAction: async () => {
+      if (allShapes.length) {
+        const prev = JSON.parse(snap);
+        b.shapes = prev.s; b.links = prev.l;
+        await saveArea(b);
+      }
+      if (allCards.length) {
+        cardBefore.forEach(({ c, x, y, w }) => { c.x = x; c.y = y; if (w === undefined) delete c.w; else c.w = w; });
+        await db.putMany('cards', allCards);
+      }
+      await changed();
+    },
+  });
 }
 async function editLinkLabel(id) {
   const l = linkById(id);
@@ -4954,9 +5296,11 @@ function renderSelBar() {
   const ids = [...state.selected].filter(findCard);
   if (!ids.length) { bar.classList.remove('show'); return; }
   const active = ids.filter((id) => isActive(findCard(id)));
+  const canvasSel = isCanvas(state.view) ? selectedCanvasCards() : [];
   bar.innerHTML = `<span class="sel-count">已选 <b>${ids.length}</b> 个</span>
     <button class="sel-btn" data-action="sel-clear" title="取消勾选（Esc）">取消勾选</button>
     <button class="sel-btn primary" data-action="sel-done" ${active.length ? '' : 'disabled'}>${CHECK_SVG}<span>一起完成并打包</span></button>
+    ${canvasSel.length >= 2 ? `<button class="sel-btn" data-action="sel-align" aria-haspopup="menu" title="对齐与分布选中的画布卡片"><svg viewBox="0 0 24 24"><path d="M4 4v16M8 7h12v4H8zM8 14h8v4H8z"/></svg><span>自动对齐…</span></button>` : ''}
     <button class="sel-btn" data-action="sel-link" ${active.length > 1 ? '' : 'disabled'} title="以后长按其中任意一个都会整组打包">${LINK_SVG}<span>关联为一个项目</span></button>
     <button class="sel-btn" data-action="sel-prio" aria-haspopup="menu" title="设置优先级（也可按 1 / 2 / 3，0 清除）"><span class="prio" style="--pc:#e03131">急</span><span>优先级</span></button>
     <button class="sel-btn" data-action="sel-move" aria-haspopup="menu"><svg viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></svg><span>移到…</span></button>
@@ -5305,6 +5649,11 @@ document.addEventListener('click', async (e) => {
     case 'assoc-panel': return openAssocPanel();
     case 'select': return toggleSelect(cardEl.dataset.id, rangeList);
     case 'sel-done': return completeCards([...state.selected]);
+    case 'sel-align': return menuAnchor === btn ? closeMenu() : openMenu(btn, [
+      { label: '画布对齐与分布' },
+      ...Object.entries(ALIGN_OPS).map(([k, text]) => ({ text, run: () => alignCanvasCards(k) })),
+    ]);
+    case 'auto-align': return autoAlignCanvas();
     case 'sel-link': return linkSelected();
     case 'sel-move': return menuAnchor === btn ? closeMenu() : moveMenu(btn);
     case 'sel-prio': return menuAnchor === btn ? closeMenu() : openMenu(btn, [

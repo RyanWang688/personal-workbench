@@ -481,6 +481,21 @@ body.board-dragging .group-box { display: none; }
 .guides .gl { position: absolute; background: #f2643b; }
 .guides .gx { width: calc(1px * var(--iz, 1)); }
 .guides .gy { height: calc(1px * var(--iz, 1)); }
+.guides .gl-gap { position: absolute; display: flex; align-items: center; justify-content: center; background: #f2643b; }
+.guides .gl-gap.gap-x { height: calc(1px * var(--iz, 1)); transform: translateY(-50%); }
+.guides .gl-gap.gap-y { width: calc(1px * var(--iz, 1)); transform: translateX(-50%); }
+.guides .gl-gap::before, .guides .gl-gap::after { content: ''; position: absolute; background: #f2643b; }
+.guides .gl-gap.gap-x::before, .guides .gl-gap.gap-x::after { width: calc(1.5px * var(--iz, 1)); height: calc(8px * var(--iz, 1)); top: 50%; transform: translateY(-50%); }
+.guides .gl-gap.gap-x::before { left: 0; }
+.guides .gl-gap.gap-x::after { right: 0; }
+.guides .gl-gap.gap-y::before, .guides .gl-gap.gap-y::after { height: calc(1.5px * var(--iz, 1)); width: calc(8px * var(--iz, 1)); left: 50%; transform: translateX(-50%); }
+.guides .gl-gap.gap-y::before { top: 0; }
+.guides .gl-gap.gap-y::after { bottom: 0; }
+.guides .gl-gap span {
+  padding: 1px 5px; border-radius: 4px; background: #f2643b; color: #fff;
+  font: 600 10px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+  transform: scale(var(--iz, 1)); white-space: nowrap;
+}
 .marquee { position: absolute; pointer-events: none; z-index: 99998; border: calc(1px * var(--iz, 1)) solid var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 2px; }
 .viewport.space-pan, .viewport.space-pan * { cursor: grab !important; }
 .viewport.space-pan.panning, .viewport.space-pan.panning * { cursor: grabbing !important; }
