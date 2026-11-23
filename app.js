@@ -2065,17 +2065,19 @@ async function tidyShapes(list) {
   toast(`已整理 ${list.length} 个形状`, { action: '撤销', onAction: () => undoBoard() });
 }
 
-// 画布交互：平移、缩放、拖动卡片
+// 画布交互：中键平移、滚轮缩放、左键框选与拖动卡片
 const vp = $('#viewport');
 const pointers = new Map();
 let pan = null, pinch = null, cardDrag = null, suppressClick = false;
+// 阻止 Windows 浏览器中键按下时触发原生自动滚屏图标，确保中键平滑拖拽画布
+vp.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
+vp.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
 vp.addEventListener('pointerdown', (e) => {
   const mouse = e.pointerType === 'mouse';
-  if (mouse && e.button > 2) return;
+  if (mouse && e.button > 1) return; // 右键仅用于菜单，不拖拽画布
   if (e.target.closest('.canvas-empty .btn')) return; // 空画布上的「从模板开始」按钮：别让画布抢走这次点击
-  // 按住空格、鼠标中键或右键拖动：任何工具下都直接平移（右键不拖动仍然弹出菜单）
-  const forcePan = spaceDown || (mouse && (e.button === 1 || e.button === 2));
-  if (mouse && e.button === 2 && pointers.size) return;
+  // 鼠标仅中键（e.button === 1）或按住空格可拖拽平移屏幕；左键在空白处用于拉框多选
+  const forcePan = (mouse && e.button === 1) || (spaceDown && (!mouse || e.button === 0));
   if (forcePan) e.preventDefault();
   // Ctrl/⌘ + 卡片交给转换圆环；Shift + 卡片：不拖动 = 多选，拖动 = 锁定水平/垂直移动
   if (!forcePan && (e.target.closest('.card .sel') || (e.ctrlKey || e.metaKey) && e.target.closest('.card'))) return;
@@ -2109,20 +2111,22 @@ vp.addEventListener('pointerdown', (e) => {
       return;
     }
   }
-  if (!forcePan && pointers.size === 0 && boardDown(e)) return; // 白板：形状、连线、工具
+  if (!forcePan && pointers.size === 0 && boardDown(e)) return; // 白板：形状、连线、工具、左键空白处框选
   const cardEl = forcePan ? null : e.target.closest('.card');
   if (cardEl && !e.target.closest('.more, .export-handle, .card-expand-btn, .pdf-page-bar, [data-card-handle]')) {
     const card = findCard(cardEl.dataset.id);
     if (cardEl.classList.contains('on-canvas')) pickCanvasCard(card.id);
-    const groupCards = (cardEl.classList.contains('on-canvas') && !e.altKey && state.selected.has(card.id) && state.selected.size > 1)
+    const isMulti = cardEl.classList.contains('on-canvas') && !e.altKey && state.selected.has(card.id) && (state.selected.size > 1 || selShapes().length > 0);
+    const groupCards = isMulti
       ? [...state.selected].map(findCard).filter((c) => c && c.columnId === state.view)
       : [card];
     const items = groupCards.map((c) => {
       const el = $(`#world .card[data-id="${CSS.escape(c.id)}"]`) || (c.id === card.id ? cardEl : null);
       return el ? { card: c, el, x: c.x || 0, y: c.y || 0, w: el.offsetWidth || canvasCardW(c), h: el.offsetHeight || 120 } : null;
     }).filter(Boolean);
+    const shapeItems = isMulti ? selShapes().map((s) => ({ s, el: shEl(s.id), x: s.x, y: s.y, w: s.w, h: s.h })) : [];
     cardDrag = {
-      mode: 'move', el: cardEl, card, items,
+      mode: 'move', el: cardEl, card, items, shapeItems,
       sx: e.clientX, sy: e.clientY, x: card.x || 0, y: card.y || 0,
       w: cardEl.offsetWidth || canvasCardW(card), h: cardEl.offsetHeight || 120,
       moved: false, id: e.pointerId, alt: e.altKey,
@@ -2132,6 +2136,8 @@ vp.addEventListener('pointerdown', (e) => {
     return;
   }
   if (cardEl) return;
+  // 鼠标左键不拖拽屏幕（仅中键或按住空格或触屏双指平移）
+  if (mouse && !forcePan) return;
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   try { vp.setPointerCapture(e.pointerId); } catch {}
   if (pointers.size === 2) {
@@ -2139,7 +2145,7 @@ vp.addEventListener('pointerdown', (e) => {
     pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) }; pan = null;
   } else {
     const c = cam();
-    pan = { sx: e.clientX, sy: e.clientY, x: c.x, y: c.y, moved: false, right: mouse && e.button === 2, target: e.target };
+    pan = { sx: e.clientX, sy: e.clientY, x: c.x, y: c.y, moved: false, right: false, target: e.target };
   }
 });
 // 右键拖动后不弹菜单；macOS 按下右键就会触发菜单，先压住，松手时没拖动再弹卡片菜单
@@ -2250,7 +2256,10 @@ vp.addEventListener('pointermove', (e) => {
         it.el.style.zIndex = topZ + 1 + i;
       });
       document.body.classList.add('is-dragging-card');
-      cardDrag.snapT = snapTargets(new Set(), new Set((cardDrag.items || [{ card: cardDrag.card }]).map((it) => it.card.id)));
+      cardDrag.snapT = snapTargets(
+        new Set((cardDrag.shapeItems || []).map((it) => it.s.id)),
+        new Set((cardDrag.items || [{ card: cardDrag.card }]).map((it) => it.card.id)),
+      );
       if (cardDrag.alt) {
         // Alt + 拖动：原卡片留在原地（半透明占位），拖走的是副本
         const ph = cardDrag.el.cloneNode(true);
@@ -2282,6 +2291,11 @@ vp.addEventListener('pointermove', (e) => {
     for (const it of list) {
       it.el.style.left = `${Math.round(it.x + mx)}px`;
       it.el.style.top = `${Math.round(it.y + my)}px`;
+    }
+    for (const sit of cardDrag.shapeItems || []) {
+      sit.s.x = Math.round(sit.x + mx);
+      sit.s.y = Math.round(sit.y + my);
+      if (sit.el) { sit.el.style.left = `${sit.s.x}px`; sit.el.style.top = `${sit.s.y}px`; }
     }
     showGuides(gx, gy, { x: Math.round(ob.x + mx), y: Math.round(ob.y + my), w: ob.w, h: ob.h });
     drawLinks();
@@ -2364,7 +2378,7 @@ async function endPointer(e) {
       if (d.items?.length > 1) return moveMany(d.items.map((it) => it.card.id), zone);
       return moveCard(d.card.id, zone, 0);
     }
-    if (d.items?.length > 1) {
+    if (d.items?.length > 1 || d.shapeItems?.length) {
       const topZ = topOrder(state.view);
       d.items.forEach((it, i) => {
         it.card.x = parseFloat(it.el.style.left);
@@ -2373,6 +2387,7 @@ async function endPointer(e) {
         it.card.updatedAt = Date.now();
       });
       await db.putMany('cards', d.items.map((it) => it.card));
+      if (d.shapeItems?.length) await saveArea(boardOf());
       await changed();
       return;
     }
@@ -2908,15 +2923,26 @@ function boardDown(e) {
     const id = shapeEl.dataset.sid;
     const was = isPicked(id);
     // Shift + 点击：加入 / 移出多选（已选中的在松手且没拖动时才移出，这样 Shift + 拖动可以锁定方向移动整组）
-    if (!was) selectBoard(pickShapes(e.shiftKey ? [...selIds(), id] : [id]));
+    if (!was) {
+      if (!e.shiftKey && state.selected.size) clearSelection();
+      state.bsel = pickShapes(e.shiftKey ? [...selIds(), id] : [id]);
+      fmtPop = null;
+      renderCanvas();
+    }
     const items = selShapes().map((s) => ({ s, o: { x: s.x, y: s.y } }));
-    bd = { ...base, mode: 'move', items, clicked: id, was: was && !e.shiftKey && selIds().length === 1, shiftToggle: e.shiftKey && was, alt: e.altKey };
+    const cardItems = (!e.altKey && state.selected.size)
+      ? selectedCanvasCards().map((c) => {
+        const el = $(`#world .card[data-id="${CSS.escape(c.id)}"]`);
+        return el ? { card: c, el, x: c.x || 0, y: c.y || 0, w: el.offsetWidth || canvasCardW(c), h: el.offsetHeight || 120 } : null;
+      }).filter(Boolean)
+      : [];
+    bd = { ...base, mode: 'move', items, cardItems, clicked: id, was: was && !e.shiftKey && selIds().length === 1 && !cardItems.length, shiftToggle: e.shiftKey && was, alt: e.altKey };
     if (e.altKey) e.preventDefault();
     capture(); return true;
   }
-  if (e.shiftKey && state.tool === 'select' && !cardEl) {
-    // Shift + 拖动空白处：框选形状与画布卡片
-    bd = { ...base, mode: 'marquee', p0: p, base: [...selIds()], baseCards: [...state.selected] };
+  if (e.button === 0 && state.tool === 'select' && !cardEl) {
+    // 左键在空白处按下并拖动：直接拉出多选框（Shift 可叠加多选）；若仅单击空白处则取消选中
+    bd = { ...base, mode: 'marquee', p0: p, add: e.shiftKey, base: e.shiftKey ? [...selIds()] : [], baseCards: e.shiftKey ? [...state.selected] : [] };
     capture(); return true;
   }
   if (state.bsel) {
@@ -2954,7 +2980,12 @@ function boardMove(e) {
   if (!bd.moved) {
     bd.moved = true; hideDots(); $('#fmtBar').hidden = true; document.body.classList.add('board-dragging');
     if (bd.mode === 'move' && bd.alt) makeDragCopies(bd); // Alt + 拖动：原形状留在原地，拖走的是副本
-    if (bd.mode === 'move' || bd.mode === 'resize') bd.snapT = snapTargets(new Set(bd.mode === 'move' ? bd.items.map((i) => i.s.id) : [bd.s.id]));
+    if (bd.mode === 'move' || bd.mode === 'resize') {
+      bd.snapT = snapTargets(
+        new Set(bd.mode === 'move' ? bd.items.map((i) => i.s.id) : [bd.s.id]),
+        new Set(bd.mode === 'move' ? (bd.cardItems || []).map((c) => c.card.id) : []),
+      );
+    }
   }
   const tol = 6 / z, snapOn = !(e.ctrlKey || e.metaKey); // 按住 Ctrl / ⌘ 暂时关闭吸附
   if (bd.mode === 'move') {
@@ -2974,6 +3005,12 @@ function boardMove(e) {
       it.s.x = Math.round(it.o.x + mx); it.s.y = Math.round(it.o.y + my);
       const el = shEl(it.s.id);
       if (el) { el.style.left = `${it.s.x}px`; el.style.top = `${it.s.y}px`; }
+    }
+    for (const cit of bd.cardItems || []) {
+      if (cit.el) {
+        cit.el.style.left = `${Math.round(cit.x + mx)}px`;
+        cit.el.style.top = `${Math.round(cit.y + my)}px`;
+      }
     }
     showGuides(gx, gy, { x: ob.x + mx, y: ob.y + my, w: ob.w, h: ob.h });
     drawLinks();
@@ -3045,22 +3082,44 @@ async function boardUp(e) {
   if (d.moved) { suppressClick = true; setTimeout(() => { suppressClick = false; }, 0); }
   const b = boardOf();
   if (d.mode === 'move' || d.mode === 'resize') {
-    if (d.moved) { record(d.snap); await saveBoard(); if (d.copied) toast(`已复制 ${d.items.length} 个形状`); }
+    if (d.moved) {
+      record(d.snap);
+      if (d.cardItems?.length) {
+        d.cardItems.forEach((cit) => {
+          if (cit.el) {
+            cit.card.x = parseFloat(cit.el.style.left);
+            cit.card.y = parseFloat(cit.el.style.top);
+            cit.card.updatedAt = Date.now();
+          }
+        });
+        await db.putMany('cards', d.cardItems.map((cit) => cit.card));
+      }
+      await saveBoard();
+      if (d.copied) toast(`已复制 ${d.items.length} 个形状`);
+    }
     else if (d.shiftToggle) selectBoard(pickShapes(selIds().filter((x) => x !== d.clicked))); // Shift + 点已选中的 → 移出多选
     else if (d.mode === 'move' && d.was) startEdit(d.clicked); // 再点一下已选中的形状 → 编辑文字
     else { decorateBoard(); positionFmt(); }
     return true;
   }
   if (d.mode === 'marquee') {
+    if (!d.moved) {
+      if (!d.add) {
+        if (state.selected.size) clearSelection();
+        if (state.pickedCard) pickCanvasCard(null);
+        if (state.bsel) selectBoard(null);
+      }
+      return true;
+    }
     const shHits = d.hits || d.base || [];
     const cHits = d.cardHits || d.baseCards || [];
-    if (cHits.length) {
-      state.selected = new Set(cHits);
-      document.body.classList.toggle('selecting', state.selected.size > 0);
-      renderSelBar();
-    }
-    if (shHits.length && !cHits.length) selectBoard(pickShapes(shHits));
-    else renderCanvas();
+    state.selected = new Set(cHits);
+    state.pickedCard = cHits.length === 1 && !shHits.length ? cHits[0] : null;
+    document.body.classList.toggle('selecting', state.selected.size > 0);
+    renderSelBar();
+    state.bsel = pickShapes(shHits);
+    fmtPop = null;
+    renderCanvas();
     return true;
   }
   if (d.mode === 'create') {
@@ -3695,9 +3754,9 @@ async function insertTemplate(id) {
 const SHORTCUTS = [
   ['工具', [['V', '选择'], ['N', '便签'], ['T', '文字'], ['R', '矩形'], ['O', '圆形'], ['D', '菱形'], ['L', '箭头连线'], ['双击工具', '锁定工具，连续放置'], ['Esc', '退出工具 / 取消选中']]],
   ['拖动', [['Shift + 拖动', '只水平或只垂直移动'], ['Alt + 拖动', '复制一份拖走（形状、文件卡片都可以）'], ['Ctrl + 拖动', '暂时关闭对齐吸附（文件卡片上是转换圆环）'], ['Shift + 拖角', '等比缩放'], ['Alt + 拖边 / 角', '以中心对称缩放'], ['Shift / Alt + 画形状', '画正方形 / 从中心向外画'], ['拖连接点到空白处', '新建一个相连的形状']]],
-  ['选择', [['Shift + 点击', '加选 / 减选'], ['Shift + 拖空白处', '框选'], ['Ctrl + A', '全选形状'], ['Enter / 双击', '编辑文字'], ['Esc / Ctrl + Enter', '结束编辑']]],
+  ['选择', [['左键拖空白处', '拉出多选框（框选卡片与形状）'], ['Shift + 点击', '加选 / 减选'], ['Ctrl + A', '全选画布内容'], ['Enter / 双击', '编辑文字 / 预览卡片'], ['Esc / Ctrl + Enter', '结束编辑']]],
   ['编辑', [['Ctrl + Z', '撤销'], ['Ctrl + Y / Ctrl + Shift + Z', '重做'], ['Ctrl + C / X / V', '复制 / 剪切 / 粘贴'], ['Ctrl + D', '原地复制'], ['Delete', '删除'], ['方向键', '微移（Shift 每次 40）'], ['Ctrl + 方向键', '在该方向新建相连形状'], ['Ctrl + ] / [', '置于顶层 / 底层'], ['Ctrl + B', '加粗'], ['Ctrl + Shift + . / ,', '放大 / 缩小字号']]],
-  ['视图', [['空格 / 右键 / 中键 + 拖动', '平移画布'], ['Ctrl + 滚轮', '缩放'], ['Shift + 1', '显示全部'], ['Shift + 2', '缩放到选中'], ['Shift + 0', '回到 100%'], ['?', '打开这张速查表']]],
+  ['视图', [['鼠标中键 + 拖动', '平移画布（或空格 + 拖动）'], ['Ctrl + 滚轮', '缩放'], ['Shift + 1', '显示全部'], ['Shift + 2', '缩放到选中'], ['Shift + 0', '回到 100%'], ['?', '打开这张速查表']]],
 ];
 function showShortcuts() {
   const m = $('#modal');
@@ -3723,7 +3782,16 @@ document.addEventListener('keydown', (e) => {
   if (mod && k === 'y') { e.preventDefault(); undoBoard(true); return; }
   if (mod && (k === 'c' || k === 'x') && selIds().length && !getSelection().toString()) { doCopy(k === 'x'); return; }
   if (mod && k === 'v' && boardClip) { clearTimeout(clipTimer); clipTimer = setTimeout(pasteClip, 60); return; }
-  if (mod && k === 'a' && !onCard) { e.preventDefault(); selectBoard(pickShapes(boardOf().shapes.map((s) => s.id))); return; }
+  if (mod && k === 'a') {
+    e.preventDefault();
+    const cIds = cardsIn(state.view, false).map((c) => c.id);
+    state.selected = new Set(cIds);
+    document.body.classList.toggle('selecting', state.selected.size > 0);
+    renderSelBar();
+    state.bsel = pickShapes(boardOf().shapes.map((s) => s.id));
+    renderCanvas();
+    return;
+  }
   // 视图：Shift+1 显示全部，Shift+2 缩放到选中，Shift+0 回到 100%；? 打开快捷键速查
   if (!mod && e.shiftKey && e.code === 'Digit1') { e.preventDefault(); zoomFit(); return; }
   if (!mod && e.shiftKey && e.code === 'Digit2') { e.preventDefault(); zoomToSelection(); return; }
