@@ -1748,7 +1748,12 @@ function renderCanvas() {
   decorateBoard();
   applyCam();
   drawLinks();
-  if (editing) { editingShape = null; startEdit(editing.id, { keep: true }); }
+  if (editing) {
+    editingShape = null;
+    // 只有它仍是唯一选中的形状时才接着编辑；选中别的了就结束编辑（文字已写回，后台保存）
+    if (isPicked(editing.id) && selIds().length === 1) startEdit(editing.id, { keep: true });
+    else { editSnap = null; if (b) saveArea(b); }
+  }
 }
 function toWorld(clientX, clientY) {
   const r = $('#viewport').getBoundingClientRect(), c = cam();
@@ -2257,10 +2262,29 @@ async function createConnected(s, dir) {
 }
 
 // ---- 编辑文字 ----
+// 结束另一个正在编辑的形状：把文字写回数据并保存，不重绘（避免和 startEdit 互相触发）
+function commitEditingText() {
+  const id = editingShape;
+  if (!id) return;
+  editingShape = null;
+  const s = shapeById(id), el = shEl(id), tx = el?.querySelector('.sh-tx');
+  if (s && tx) {
+    s.text = tx.innerText.replace(/\n$/, '').replace(/^\n+|\n+$/g, '');
+    tx.contentEditable = 'false';
+    el.classList.remove('editing');
+    if (editSnap && s.text !== editOrig) record(editSnap);
+  }
+  editSnap = null;
+  const b = boardOf();
+  if (b) saveArea(b);
+}
 function startEdit(id, opts = {}) {
+  if (!shapeById(id)) return;
+  if (editingShape && editingShape !== id) commitEditingText();
+  // 先确保它是唯一选中的（只重绘一次，不递归）
+  if (!(isPicked(id) && selIds().length === 1)) { state.bsel = pickShapes([id]); renderCanvas(); }
   const s = shapeById(id), el = shEl(id);
   if (!s || !el) return;
-  if (!(isPicked(id) && selIds().length === 1)) { state.bsel = pickShapes([id]); renderCanvas(); return startEdit(id, opts); }
   if (!opts.keep) { editSnap = opts.fresh ? null : snapBoard(); editOrig = s.text || ''; }
   const tx = el.querySelector('.sh-tx');
   editingShape = id;
