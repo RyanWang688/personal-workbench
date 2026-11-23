@@ -2667,6 +2667,16 @@ function onCopyEvent(e, cut) {
 document.addEventListener('copy', (e) => onCopyEvent(e, false), true);
 document.addEventListener('cut', (e) => onCopyEvent(e, true), true);
 window.addEventListener('paste', (e) => {
+  // 正在编辑便签 / 形状文字：一律按纯文本插入（去掉网页、Word 带来的格式），字多了照常自动缩字号或长高
+  const tx = editingShape && (e.target.closest?.('.sh-tx') || e.target.parentElement?.closest('.sh-tx'));
+  if (tx) {
+    e.preventDefault(); e.stopImmediatePropagation();
+    const text = (e.clipboardData?.getData('text/plain') || '').replace(/\r\n?/g, '\n');
+    if (text) document.execCommand('insertText', false, text);
+    const s = shapeById(editingShape), el = tx.closest('.shape');
+    if (s && el) fitShapeText(s, el);
+    return;
+  }
   if (!isCanvas(state.view) || editingShape || isTypingTarget(e.target)) return;
   clearTimeout(clipTimer); // 系统粘贴事件来了：只有剪贴板里是我们的标记才粘贴形状，否则交给原来的文件 / 文字粘贴
   if (!boardClip || e.clipboardData?.getData('text/plain') !== CLIP_MARK + boardClip.id) return;
@@ -5116,7 +5126,8 @@ document.addEventListener('contextmenu', (e) => {
   cardMenu($('.more', cardEl), findCard(cardEl.dataset.id));
 });
 document.addEventListener('paste', async (e) => {
-  if (e.target.closest('input, textarea, dialog')) return;
+  // 输入框、对话框、正在编辑的便签 / 形状文字：交给它们自己处理，别变成新卡片
+  if (e.target.closest?.('input, textarea, dialog') || e.target.isContentEditable || e.target.parentElement?.isContentEditable) return;
   const files = [...(e.clipboardData?.files || [])];
   if (files.length) { e.preventDefault(); return addFiles(files.map((f) => f.name ? f : new File([f], `粘贴的图片-${Date.now()}.png`, { type: f.type }))); }
   const text = e.clipboardData?.getData('text/plain');
