@@ -1575,7 +1575,119 @@ function renderZones() {
   $('#zoneMenuBtn').hidden = state.zone === TRASH;
   $('#draftsFoot').innerHTML = state.zone === TRASH && nt ? `<button class="btn" data-action="empty-trash">清空回收站</button>` : '';
   $('#zonesBadge').textContent = zs.reduce((n, z2) => n + cardsIn(z2.id, false).length, 0);
+  renderRail(zs, nt);
 }
+
+// ---------- 功能区：可收起成窄侧栏、拖左边缘调宽度、拖东西过来自动弹开 ----------
+const RAIL_W = 56, DW_MIN = 240, DW_MAX = 560;
+const ZONE_ICONS = {
+  materials: '<rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m5 18 5-5 3 3 2-2 4 4"/>',
+  drafts: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13 7 4 4"/>',
+  temp: '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>',
+  [TRASH]: '<path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/>',
+};
+const zoneIcon = (id) => ZONE_ICONS[id] || '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M4 10h16"/>';
+let lastZoneCounts = null, peekTimer = 0;
+const draftsCollapsed = () => document.body.classList.contains('drafts-collapsed');
+function renderRail(zs, nt) {
+  const counts = new Map([...zs.map((z) => [z.id, cardsIn(z.id, false).length]), [TRASH, nt]]);
+  const item = (id, title, n, i, extra = '') => `<button class="rail-btn${state.zone === id ? ' on' : ''}${extra}" data-rail-zone="${id}" data-drop="${id}" style="--i:${i}"
+      title="${esc(title)} · ${n} 个${id === TRASH ? '' : '（可以把文件拖到这里）'}" aria-label="${esc(title)}，${n} 个">
+      <svg viewBox="0 0 24 24" aria-hidden="true">${zoneIcon(id)}</svg><span class="rail-name">${esc(title.slice(0, 2))}</span>${n ? `<b class="rail-n">${n > 99 ? '99+' : n}</b>` : ''}</button>`;
+  $('#draftsRail').innerHTML = `<button class="rail-btn rail-expand" data-action="expand-drafts" style="--i:0" title="展开功能区（Ctrl+\\）" aria-label="展开功能区">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 6l-6 6 6 6M18 6l-6 6 6 6"/></svg></button>
+    <span class="rail-sep"></span>
+    ${zs.map((z, i) => item(z.id, z.title, counts.get(z.id), i + 1)).join('')}
+    <span class="rail-label">功能区</span>
+    ${item(TRASH, '回收站', nt, zs.length + 1, ' rail-trash')}`;
+  // 数量变多时，让数字跳一下（收起时在侧栏上跳，展开时在标签上跳）
+  if (lastZoneCounts) {
+    for (const [id, n] of counts) {
+      if (n > (lastZoneCounts.get(id) || 0)) {
+        const el = draftsCollapsed() ? $(`#draftsRail [data-rail-zone="${CSS.escape(id)}"]`) : $(`#zoneTabs [data-zone="${CSS.escape(id)}"] b`);
+        el?.classList.add('bump');
+      }
+    }
+  }
+  lastZoneCounts = counts;
+}
+function setDraftsCollapsed(v) {
+  document.body.classList.toggle('drafts-collapsed', v);
+  document.body.classList.remove('drafts-peek');
+  ls.set('draftsCollapsed', v);
+  $('#drafts').setAttribute('data-state', v ? 'collapsed' : 'open');
+  const btn = v ? $('#draftsRail .rail-expand') : $('#drafts .collapse-drafts');
+  setTimeout(() => { if (state.view && isCanvas(state.view)) positionFmt(); }, 450);
+  return btn;
+}
+// 拖东西靠近收起的功能区：临时弹开，放下后自动收回
+function peekDrafts(on) {
+  clearTimeout(peekTimer);
+  if (on) { if (draftsCollapsed()) document.body.classList.add('drafts-peek'); return; }
+  if (document.body.classList.contains('drafts-peek')) peekTimer = setTimeout(() => document.body.classList.remove('drafts-peek'), 650);
+}
+(function initDrafts() {
+  const w = Math.min(DW_MAX, Math.max(DW_MIN, +ls.get('draftsW', 320) || 320));
+  $('#drafts').style.setProperty('--dw', `${w}px`);
+  if (ls.get('draftsCollapsed', false)) { document.body.classList.add('drafts-collapsed', 'drafts-instant'); requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove('drafts-instant'))); }
+  // 拖左边缘调宽度；拖到很窄松手 = 收起；从收起状态往左拖 = 展开
+  const rz = $('#draftsResizer'), d = $('#drafts');
+  let rs = null;
+  rz.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    try { rz.setPointerCapture(e.pointerId); } catch {}
+    rs = { x: e.clientX, w: draftsCollapsed() ? RAIL_W : d.getBoundingClientRect().width, moved: false };
+    document.body.classList.add('drafts-resizing');
+  });
+  rz.addEventListener('pointermove', (e) => {
+    if (!rs) return;
+    const w = rs.w + (rs.x - e.clientX);
+    if (Math.abs(rs.x - e.clientX) > 3) rs.moved = true;
+    if (!rs.moved) return;
+    if (w < 170) { d.classList.add('will-collapse'); return; }
+    d.classList.remove('will-collapse');
+    if (draftsCollapsed()) setDraftsCollapsed(false);
+    rs.cur = Math.min(DW_MAX, Math.max(DW_MIN, w));
+    d.style.setProperty('--dw', `${rs.cur}px`);
+  });
+  const end = () => {
+    if (!rs) return;
+    document.body.classList.remove('drafts-resizing');
+    if (d.classList.contains('will-collapse')) {
+      // 拖窄到收起：宽度恢复成上次保存的值，下次展开还是原来的宽度
+      d.style.setProperty('--dw', `${Math.min(DW_MAX, Math.max(DW_MIN, +ls.get('draftsW', 320) || 320))}px`);
+      d.classList.remove('will-collapse'); setDraftsCollapsed(true);
+    }
+    else if (rs.cur) { ls.set('draftsW', Math.round(rs.cur)); if (isCanvas(state.view)) positionFmt(); }
+    rs = null;
+  };
+  rz.addEventListener('pointerup', end);
+  rz.addEventListener('pointercancel', end);
+  rz.addEventListener('dblclick', () => setDraftsCollapsed(!draftsCollapsed()));
+  // 侧栏上点某个功能区：展开并切到那个区
+  $('#draftsRail').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-rail-zone]');
+    if (!b) return;
+    state.zone = b.dataset.railZone; ls.set('zone', state.zone);
+    renderZones(); loadThumbs();
+    setDraftsCollapsed(false);
+  });
+  // 拖动文件 / 卡片经过收起的功能区：临时弹开
+  d.addEventListener('dragenter', (e) => { if (draftsCollapsed() && (state.dragId || isFileDrag(e))) peekDrafts(true); });
+  document.addEventListener('dragend', () => peekDrafts(false));
+  document.addEventListener('drop', () => peekDrafts(false));
+  document.addEventListener('dragleave', (e) => { if (!e.relatedTarget && document.body.classList.contains('drafts-peek')) peekDrafts(false); });
+  // 画布上拖卡片（指针拖动）经过功能区：同样弹开
+  document.addEventListener('pointermove', (e) => {
+    if (!cardDrag?.moved || !draftsCollapsed()) return;
+    const r = d.getBoundingClientRect();
+    if (e.clientX >= r.left - 24) peekDrafts(true);
+  }, true);
+  document.addEventListener('pointerup', () => { if (document.body.classList.contains('drafts-peek') && !state.dragId) peekDrafts(false); }, true);
+  // 数字跳动的动画放完就去掉，下次还能再跳
+  document.addEventListener('animationend', (e) => { if (e.animationName === 'zoneBump') e.target.closest('.bump')?.classList.remove('bump'); });
+})();
 async function urlFor(id) {
   if (state.urls.has(id)) return state.urls.get(id);
   const card = findCard(id);
@@ -1892,10 +2004,12 @@ function zoneUnder(x, y, el) {
 }
 function highlightZoneUnder(x, y, el) {
   clearDropUI();
-  const id = zoneUnder(x, y, el);
-  if (!id) return;
-  const t = id === state.zone ? $('#draftsList') : $(`[data-drop="${CSS.escape(id)}"]`);
-  t?.classList.add('drop-active');
+  // 高亮指针下面的那个放置目标（功能区标签、收起侧栏上的图标或列表）
+  el.style.pointerEvents = 'none';
+  const t = document.elementFromPoint(x, y)?.closest('#drafts [data-drop], #draftsList, .view-tab[data-drop]');
+  el.style.pointerEvents = '';
+  const id = t && (t.dataset.drop || t.dataset.col);
+  if (id && id !== state.view) t.classList.add('drop-active');
 }
 vp.addEventListener('wheel', (e) => {
   e.preventDefault();
@@ -4873,6 +4987,8 @@ document.addEventListener('click', async (e) => {
     case 'shortcuts': return showShortcuts();
     case 'templates': return pickTemplate();
     case 'toggle-theme': return toggleTheme(btn);
+    case 'collapse-drafts': return setDraftsCollapsed(true)?.focus({ preventScroll: true });
+    case 'expand-drafts': return setDraftsCollapsed(false)?.focus({ preventScroll: true });
     case 'toggle-drafts': {
       const open = document.body.classList.toggle('drafts-open');
       $('.drafts-toggle').setAttribute('aria-expanded', String(open));
@@ -4918,6 +5034,7 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.target.matches?.('[data-folder], [data-work]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); e.target.click(); }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#search').focus(); }
+  if ((e.ctrlKey || e.metaKey) && (e.key === '\\' || e.code === 'Backslash') && matchMedia('(min-width: 1001px)').matches) { e.preventDefault(); setDraftsCollapsed(!draftsCollapsed()); }
 });
 // ---------- 白天 / 黑夜模式 ----------
 const darkMQ = matchMedia('(prefers-color-scheme: dark)');

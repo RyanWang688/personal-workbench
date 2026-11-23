@@ -13,7 +13,7 @@
     // 尽早应用主题，避免刷新时闪一下
     try { var t = JSON.parse(localStorage.getItem('wb:theme') || '"auto"'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
   </script>
-  <link rel="stylesheet" href="style.css?v=32">
+  <link rel="stylesheet" href="style.css?v=35">
 </head>
 <body>
   <header class="topbar">
@@ -122,18 +122,26 @@
     <section class="archive-view works-view" id="worksView" aria-label="作品" hidden></section>
 
     <aside class="drafts" id="drafts" aria-label="功能区">
-      <div class="drafts-head">
-        <div class="zone-tabs" id="zoneTabs" role="tablist"></div>
-        <button class="icon-btn close-drafts" data-action="toggle-drafts" aria-label="关闭功能区">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
-        </button>
+      <div class="drafts-resizer" id="draftsResizer" role="separator" aria-orientation="vertical" aria-label="拖动调整功能区宽度，双击收起" title="拖动调整宽度 · 双击收起 / 展开"></div>
+      <!-- 收起后的窄侧栏：每个功能区一个图标 + 数量，点一下展开到那个区；拖文件上来可直接放入 -->
+      <nav class="drafts-rail" id="draftsRail" aria-label="功能区（已收起）"></nav>
+      <div class="drafts-main" id="draftsMain">
+        <div class="drafts-head">
+          <div class="zone-tabs" id="zoneTabs" role="tablist"></div>
+          <button class="icon-btn close-drafts" data-action="toggle-drafts" aria-label="关闭功能区">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <div class="zone-bar">
+          <p class="drafts-desc" id="draftsDesc"></p>
+          <button class="icon-btn" data-action="zone-menu" id="zoneMenuBtn" aria-label="功能区设置" aria-haspopup="menu"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
+          <button class="icon-btn collapse-drafts" data-action="collapse-drafts" aria-label="收起功能区" title="收起功能区（Ctrl+\）">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 6l6 6-6 6M6 6l6 6-6 6"/></svg>
+          </button>
+        </div>
+        <div class="list" id="draftsList"></div>
+        <div class="drafts-foot" id="draftsFoot"></div>
       </div>
-      <div class="zone-bar">
-        <p class="drafts-desc" id="draftsDesc"></p>
-        <button class="icon-btn" data-action="zone-menu" id="zoneMenuBtn" aria-label="功能区设置" aria-haspopup="menu"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
-      </div>
-      <div class="list" id="draftsList"></div>
-      <div class="drafts-foot" id="draftsFoot"></div>
     </aside>
   </main>
 
@@ -147,6 +155,6 @@
   <input type="file" id="fileInput" multiple hidden>
   <input type="file" id="restoreInput" accept=".wbk" hidden>
   <noscript>此工作台需要启用 JavaScript。</noscript>
-  <script type="module" src="app.js?v=37"></script>
+  <script type="module" src="app.js?v=39"></script>
 </body>
 </html>
