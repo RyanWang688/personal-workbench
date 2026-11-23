@@ -2025,12 +2025,18 @@ vp.addEventListener('wheel', (e) => {
   clearTimeout(vp._t); vp._t = setTimeout(saveCam, 200);
 }, { passive: false });
 vp.addEventListener('dblclick', async (e) => {
-  if (e.target.closest('.card, .fmt-bar')) return;
-  const sh = e.target.closest('.shape');
-  if (sh) return startEdit(sh.dataset.sid);
-  const ln = e.target.closest('[data-lid]');
+  // 第一下点击会选中形状并重绘画布，原来被点的元素已被替换，事件目标可能变成画布背景；
+  // 所以按鼠标位置重新找一次「真正点到的东西」，避免在已有便签上又新建一张
+  const hit = document.elementFromPoint(e.clientX, e.clientY) || e.target;
+  if (hit.closest('.card, .fmt-bar, .canvas-palette, .canvas-tools, .canvas-workspace-head') || e.target.closest('.card, .fmt-bar')) return;
+  const sh = hit.closest('.shape') || e.target.closest('.shape');
+  if (sh) return editingShape === sh.dataset.sid ? undefined : startEdit(sh.dataset.sid);
+  if (editingShape) return;
+  const ln = hit.closest('[data-lid]') || e.target.closest('[data-lid]');
   if (ln) return editLinkLabel(ln.dataset.lid);
   const p = toWorld(e.clientX, e.clientY);
+  // 双击点落在某个形状范围内（比如刚重绘过）也不新建
+  if (boardOf()?.shapes.some((s) => p.x >= s.x && p.x <= s.x + s.w && p.y >= s.y && p.y <= s.y + s.h)) return;
   await createShape('sticky', p.x - 100, p.y - 100);
 });
 
