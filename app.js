@@ -1926,7 +1926,9 @@ function shapeHTML(s) {
   const bg = s.t === 'diamond'
     ? '<svg class="sh-bg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1.5 98.5,50 50,98.5 1.5,50" vector-effect="non-scaling-stroke"/></svg>'
     : '<div class="sh-bg"></div>';
-  const handles = single ? ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((k) => `<i class="sh-h h-${k}" data-handle="${k}"></i>`).join('') : '';
+  // 整条边都能拖（看不见的感应条），四个角另有放大的感应区；看得见的小方块只是提示
+  const handles = single ? ['n', 'e', 's', 'w'].map((k) => `<i class="sh-edge se-${k}" data-handle="${k}"></i>`).join('')
+    + ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((k) => `<i class="sh-h h-${k}" data-handle="${k}"></i>`).join('') : '';
   return `<div class="shape st-${s.t}${col ? '' : ' nofill'}${sel ? ' picked' : ''}${s.b ? ' bold' : ''}" data-sid="${s.id}" style="${style}">${bg}<div class="sh-tx" data-ph="${s.t === 'text' ? '输入文字' : '双击输入'}">${esc(s.text || '')}</div>${handles}</div>`;
 }
 // 重绘后的装饰：便签字号自适应、多选外框

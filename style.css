@@ -363,6 +363,19 @@ svg.sh-bg polygon { fill: var(--sb); stroke: var(--sd); stroke-width: 1.5; strok
 .h-n { top: calc(-4px * var(--iz, 1)); } .h-s { top: calc(100% + 4px * var(--iz, 1)); }
 .h-w { left: calc(-4px * var(--iz, 1)); } .h-e { left: calc(100% + 4px * var(--iz, 1)); }
 .sh-h:hover { background: var(--accent); }
+/* 放大可点范围：角上的小方块外围有一圈看不见的感应区；四条边整条都是感应条（屏幕上约 14px 宽，不随缩放变化） */
+.sh-h::before { content: ''; position: absolute; inset: calc(-8px * var(--iz, 1)); border-radius: 50%; }
+.h-n::before, .h-s::before, .h-e::before, .h-w::before { inset: calc(-5px * var(--iz, 1)); }
+.h-nw, .h-ne, .h-se, .h-sw { z-index: 4; }
+.sh-edge { position: absolute; z-index: 3; }
+.se-n, .se-s { left: 0; right: 0; height: calc(14px * var(--iz, 1)); cursor: ns-resize; }
+.se-e, .se-w { top: 0; bottom: 0; width: calc(14px * var(--iz, 1)); cursor: ew-resize; }
+.se-n { top: calc(-11px * var(--iz, 1)); } .se-s { bottom: calc(-11px * var(--iz, 1)); }
+.se-w { left: calc(-11px * var(--iz, 1)); } .se-e { right: calc(-11px * var(--iz, 1)); }
+.shape.editing .sh-edge { display: none; }
+/* 悬停在感应条上时，那条边加粗高亮，提示可以拖 */
+.se-n:hover, .se-s:hover { background: linear-gradient(var(--accent), var(--accent)) center / 100% calc(2.5px * var(--iz, 1)) no-repeat; }
+.se-e:hover, .se-w:hover { background: linear-gradient(var(--accent), var(--accent)) center / calc(2.5px * var(--iz, 1)) 100% no-repeat; }
 /* 悬停提示：未选中的形状显示淡淡的外框 */
 .viewport[data-tool="select"] .shape:not(.picked):not(.editing):hover::after { content: ''; position: absolute; inset: calc(-3px * var(--iz, 1)); border: calc(1.5px * var(--iz, 1)) solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 5px; pointer-events: none; }
 .viewport[data-tool="select"] .st-ellipse:not(.picked):hover::after { border-radius: 50%; }
