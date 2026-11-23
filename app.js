@@ -1650,7 +1650,7 @@ function renderZones() {
 }
 
 // ---------- 功能区：可收起成窄侧栏、拖左边缘调宽度、拖东西过来自动弹开 ----------
-const RAIL_W = 56, DW_MIN = 240, DW_MAX = 560;
+const RAIL_W = 64, DW_MIN = 240, DW_MAX = 560;
 const ZONE_ICONS = {
   materials: '<rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m5 18 5-5 3 3 2-2 4 4"/>',
   drafts: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13 7 4 4"/>',
@@ -1669,7 +1669,7 @@ function renderRail(zs, nt) {
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 6l-6 6 6 6M18 6l-6 6 6 6"/></svg></button>
     <span class="rail-sep"></span>
     ${zs.map((z, i) => item(z.id, z.title, counts.get(z.id), i + 1)).join('')}
-    <span class="rail-label">功能区</span>
+    <span class="rail-sep rail-sep-bottom"></span>
     ${item(TRASH, '回收站', nt, zs.length + 1, ' rail-trash')}`;
   // 数量变多时，让数字跳一下（收起时在侧栏上跳，展开时在标签上跳）
   if (lastZoneCounts) {
