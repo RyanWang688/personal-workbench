@@ -1686,21 +1686,52 @@ function zoomFit() {
   const z = Math.min(1.2, Math.max(0.15, Math.min((r.width - pad * 2) / (x2 - x1), (r.height - pad * 2) / (y2 - y1))));
   tweenCam({ z, x: (r.width - (x2 - x1) * z) / 2 - x1 * z, y: (r.height - (y2 - y1) * z) / 2 - y1 * z });
 }
+// 整理排列：选中了多个形状 → 把这些形状排成整齐的网格；否则 → 把文件卡片排成瀑布流（放在白板形状右侧，不压住它们）
 async function tidyCanvas() {
+  const picked = selShapes();
+  if (picked.length > 1) return tidyShapes(picked);
   const list = cardsIn(state.view, false);
-  if (!list.length) return;
+  if (!list.length) {
+    return toast(boardOf()?.shapes.length
+      ? '「整理排列」会把文件卡片排整齐；要整理便签和形状，先选中它们（Shift + 拖动框选，或 Ctrl+A 全选）再点这里'
+      : '「整理排列」会把画布上的文件卡片排成整齐的网格，现在还没有文件卡片');
+  }
   await waitImgs();
+  const before = list.map((c) => ({ c, x: c.x, y: c.y }));
+  const sb = unionBox(boardOf()?.shapes || []);
+  const ox = sb ? Math.round(sb.x + sb.w + 120) : 0, oy = sb ? Math.round(sb.y) : 0;
   const cols = Math.max(1, Math.ceil(Math.sqrt(list.length * 1.6)));
   const heights = new Array(cols).fill(0);
   for (const card of list) {
     const el = $(`#world .card[data-id="${card.id}"]`);
     const i = heights.indexOf(Math.min(...heights));
-    card.x = i * (CARD_W + 52); card.y = heights[i];
+    card.x = ox + i * (CARD_W + 52); card.y = oy + heights[i];
     heights[i] += (el?.offsetHeight || 80) + 24;
   }
   await db.putMany('cards', list);
   await changed();
   zoomFit();
+  toast(`已整理 ${list.length} 张文件卡片`, { action: '撤销', onAction: async () => {
+    before.forEach(({ c, x, y }) => { c.x = x; c.y = y; });
+    await db.putMany('cards', list); await changed();
+  } });
+}
+async function tidyShapes(list) {
+  record();
+  const ub = unionBox(list);
+  // 按原来的位置从上到下、从左到右排序，保持大致顺序
+  const sorted = [...list].sort((a, b) => (Math.abs(a.y - b.y) > 60 ? a.y - b.y : a.x - b.x));
+  const cols = Math.max(1, Math.ceil(Math.sqrt(sorted.length)));
+  const gap = 40, cw = Math.max(...sorted.map((s) => s.w)), rows = [];
+  sorted.forEach((s, i) => { (rows[Math.floor(i / cols)] ||= []).push(s); });
+  let y = ub.y;
+  for (const row of rows) {
+    const rh = Math.max(...row.map((s) => s.h));
+    row.forEach((s, j) => { s.x = Math.round(ub.x + j * (cw + gap) + (cw - s.w) / 2); s.y = Math.round(y + (rh - s.h) / 2); });
+    y += rh + gap;
+  }
+  await saveBoard();
+  toast(`已整理 ${list.length} 个形状`, { action: '撤销', onAction: () => undoBoard() });
 }
 
 // 画布交互：平移、缩放、拖动卡片
