@@ -172,7 +172,12 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 }
 
 /* ---------- 页面切换栏 ---------- */
-.viewbar { position: relative; z-index: 20; display: flex; align-items: center; gap: 12px; padding: 8px 20px; }
+.viewbar {
+  position: relative; z-index: 20; display: flex; align-items: center; gap: 12px;
+  padding: 8px 20px;
+  background: color-mix(in srgb, var(--surface) 55%, var(--bg));
+  border-bottom: 1px solid var(--border);
+}
 .views { display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .views::-webkit-scrollbar { display: none; }
 .view-tab { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 9px; border: 1px solid transparent; background: transparent; color: var(--text-2); font-weight: 550; white-space: nowrap; flex-shrink: 0; }
@@ -185,7 +190,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 /* ---------- 布局 ---------- */
 .layout { flex: 1; min-height: 0; display: flex; gap: 0; }
 [hidden] { display: none !important; }
-.board { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 14px; padding: 4px 20px 20px; overflow-x: auto; overflow-y: hidden; }
+.board { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 14px; padding: 12px 20px 20px; overflow-x: auto; overflow-y: hidden; }
 
 /* ---------- 已完成项目 ---------- */
 .view-sep { width: 1px; height: 20px; background: var(--border); margin: 0 6px; flex-shrink: 0; }
@@ -358,7 +363,7 @@ body.dragging-folder .cat-chip[data-catdrop] { border-style: dashed; }
 }
 
 /* ---------- 无限画布 ---------- */
-.canvas-view { flex: 1; min-width: 0; position: relative; margin: 4px 0 0 10px; border: 1px solid var(--border); border-bottom: 0; border-radius: 14px 14px 0 0; overflow: hidden; background: var(--surface-2); transition: margin .32s cubic-bezier(.22, 1, .36, 1), border-radius .32s; }
+.canvas-view { flex: 1; min-width: 0; position: relative; margin: 8px 0 0 10px; border: 1px solid var(--border); border-bottom: 0; border-radius: 14px 14px 0 0; overflow: hidden; background: var(--surface-2); transition: margin .32s cubic-bezier(.22, 1, .36, 1), border-radius .32s; }
 .canvas-max-btn .ico-min { display: none; }
 .canvas-max-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 .canvas-max-btn[aria-pressed="true"] .ico-max { display: none; }
