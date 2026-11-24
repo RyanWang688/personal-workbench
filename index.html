@@ -13,7 +13,7 @@
     // 尽早应用主题，避免刷新时闪一下
     try { var t = JSON.parse(localStorage.getItem('wb:theme') || '"auto"'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
   </script>
-  <link rel="stylesheet" href="style.css?v=46">
+  <link rel="stylesheet" href="style.css?v=49">
 </head>
 <body>
   <header class="topbar">
@@ -78,9 +78,19 @@
       <header class="canvas-workspace-head">
         <button type="button" class="btn" data-view="canvases" aria-label="返回所有画布"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>所有画布</button>
         <h2 id="canvasTitle" tabindex="-1"></h2>
+        <div class="collab-head" id="collabHead">
+          <div class="collab-avatars" id="collabAvatars" aria-label="在线协作者"></div>
+          <button type="button" class="btn collab-btn" id="collabBtn" data-action="collab-panel" aria-expanded="false" aria-controls="collabPopover" title="开启或加入多人实时协作房间">
+            <span class="collab-dot" aria-hidden="true"></span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><circle cx="17.5" cy="9.5" r="2.5"/><path d="M15.5 19a4.5 4.5 0 0 1 5-4.2"/></svg>
+            <span id="collabBtnText">多人协作</span>
+          </button>
+        </div>
         <button type="button" class="icon-btn canvas-max-btn" data-action="canvas-max" aria-pressed="false" aria-label="最大化工作区（F）" title="最大化工作空间：隐藏顶栏，保留右侧功能区（快捷键 F）"><svg class="ico-max" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg><svg class="ico-min" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg></button>
         <button type="button" class="icon-btn" data-action="canvas-menu" aria-label="画布设置" aria-haspopup="menu"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
       </header>
+      <div class="collab-popover" id="collabPopover" role="dialog" aria-label="多人实时协作设置" hidden></div>
+      <div class="collab-follow-bar" id="collabFollowBar" hidden></div>
       <div class="canvas-view" id="canvasView">
         <div class="viewport" id="viewport" tabindex="-1">
           <div class="world" id="world"></div>
@@ -159,6 +169,6 @@
   <input type="file" id="fileInput" multiple hidden>
   <input type="file" id="restoreInput" accept=".wbk" hidden>
   <noscript>此工作台需要启用 JavaScript。</noscript>
-  <script type="module" src="app.js?v=49"></script>
+  <script type="module" src="app.js?v=52"></script>
 </body>
 </html>

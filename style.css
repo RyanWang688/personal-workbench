@@ -374,6 +374,316 @@ body.canvas-maximized .topbar,
 body.canvas-maximized .viewbar { display: none; }
 body.canvas-maximized .canvas-view { margin: 0; border: 0; border-radius: 0; }
 body.canvas-maximized .canvas-workspace-head { left: 16px; top: 14px; }
+body.canvas-maximized .collab-popover { left: 16px; }
+
+/* ---------- 多人实时协作（顶栏触发器、头像栈、悬浮面板、画布实时光标与选区） ---------- */
+.collab-head {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding-left: 6px; margin-left: 2px; border-left: 1px solid var(--border);
+}
+.collab-avatars {
+  display: inline-flex; align-items: center;
+}
+.collab-avatars:empty { display: none; }
+.collab-av {
+  position: relative; width: 26px; height: 26px; border-radius: 8px;
+  border: 2px solid var(--surface); background: var(--c, var(--accent)); color: #fff;
+  font: 700 11.5px/1 system-ui, -apple-system, sans-serif;
+  display: inline-grid; place-items: center; padding: 0;
+  margin-left: -6px; box-shadow: 0 2px 6px rgba(0, 0, 0, .18);
+  transition: transform .22s cubic-bezier(.22, 1.4, .36, 1), box-shadow .18s;
+}
+.collab-av:first-child { margin-left: 0; }
+.collab-av:hover { transform: translateY(-2px) scale(1.08); z-index: 3; }
+.collab-av.is-self { cursor: default; }
+.collab-av.is-following {
+  box-shadow: 0 0 0 2px var(--accent), 0 4px 12px rgba(0, 0, 0, .25);
+}
+.collab-av .av-dot {
+  position: absolute; right: -2px; bottom: -2px; width: 8px; height: 8px;
+  border-radius: 50%; background: #10b981; border: 1.5px solid var(--surface);
+}
+.collab-workspace-head .collab-btn,
+.canvas-workspace-head .collab-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 30px; padding: 0 10px; border-radius: 8px;
+  font-size: 12.5px; font-weight: 600; color: var(--text-2);
+  background: var(--surface-2); border: 1px solid transparent;
+  transition: background .18s, color .18s, border-color .18s, transform .18s;
+}
+.canvas-workspace-head .collab-btn:hover,
+.canvas-workspace-head .collab-btn[aria-expanded="true"] {
+  background: var(--surface-3); color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+.canvas-workspace-head .collab-btn .collab-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--text-3);
+  transition: background .2s, box-shadow .2s;
+}
+.canvas-workspace-head .collab-btn.live {
+  background: color-mix(in srgb, var(--ok) 14%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--ok) 40%, var(--border));
+  color: var(--text);
+}
+.canvas-workspace-head .collab-btn.live .collab-dot {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent);
+  animation: collabPulse 2s infinite;
+}
+.collab-room-tag {
+  font: 600 11px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+  padding: 2px 5px; border-radius: 5px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: var(--text-2);
+}
+@keyframes collabPulse {
+  0%, 100% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--ok) 28%, transparent); }
+  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--ok) 8%, transparent); }
+}
+
+/* 悬浮协作面板 */
+.collab-popover {
+  position: absolute; top: 54px; left: 32px; z-index: 30;
+  width: min(348px, calc(100vw - 28px));
+  max-height: calc(100% - 66px); overflow-y: auto;
+  padding: 12px 13px; border-radius: 14px;
+  background: var(--surface); border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  display: grid; gap: 10px;
+  animation: collabPopIn .22s cubic-bezier(.22, 1.35, .36, 1);
+}
+@keyframes collabPopIn {
+  from { opacity: 0; transform: translateY(-6px) scale(.97); }
+  to { opacity: 1; transform: none; }
+}
+.cp-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.cp-head h3 {
+  margin: 0; font-size: 14.5px; font-weight: 700; display: flex; align-items: center; gap: 7px;
+}
+.cp-badge {
+  font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 999px;
+  background: var(--ok-soft); color: var(--ok);
+}
+.cp-badge.idle {
+  background: var(--surface-2); color: var(--text-3);
+}
+.cp-sec {
+  display: grid; gap: 7px;
+  padding-top: 10px; border-top: 1px solid var(--border);
+}
+.cp-label {
+  font-size: 11.5px; font-weight: 600; color: var(--text-3);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.cp-profile-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.cp-my-av {
+  width: 32px; height: 32px; border-radius: 9px; flex-shrink: 0;
+  background: var(--c, var(--accent)); color: #fff;
+  font: 700 13px/1 system-ui, sans-serif;
+  display: grid; place-items: center;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.22);
+}
+.cp-name-input, .cp-join-input {
+  flex: 1; min-width: 0; height: 32px; padding: 0 10px;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--text); font-size: 13px;
+  outline: none; transition: border-color .15s, background .15s;
+}
+.cp-name-input:focus, .cp-join-input:focus {
+  border-color: var(--accent); background: var(--surface);
+}
+.cp-color-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding-top: 2px;
+}
+.cp-color-lbl {
+  font-size: 11.5px; color: var(--text-3); font-weight: 550; flex-shrink: 0;
+}
+.cp-swatches {
+  display: flex; align-items: center; gap: 5px; flex-wrap: nowrap;
+}
+.cp-swatch {
+  width: 19px; height: 19px; border-radius: 6px; padding: 0; flex-shrink: 0;
+  border: 2px solid transparent; background: var(--c);
+  transition: transform .15s, box-shadow .15s;
+}
+.cp-swatch:hover { transform: scale(1.12); }
+.cp-swatch[aria-pressed="true"] {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--c);
+  transform: scale(1.08);
+}
+.cp-room-box {
+  padding: 10px 12px; border-radius: 11px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  display: grid; gap: 9px;
+}
+.cp-room-top {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.cp-room-code {
+  font: 700 17px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+  letter-spacing: .06em; color: var(--text);
+}
+.cp-room-sub {
+  font-size: 11.5px; color: var(--text-3); line-height: 1.45; margin: 0;
+}
+.cp-room-actions {
+  display: flex; gap: 6px;
+}
+.cp-room-actions .btn {
+  flex: 1; justify-content: center; height: 32px; font-size: 12.5px;
+}
+.cp-start-btn {
+  width: 100%; justify-content: center; height: 36px; font-weight: 650;
+}
+.cp-join-row {
+  display: flex; gap: 6px;
+}
+.cp-peers {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; gap: 5px; max-height: 176px; overflow-y: auto;
+}
+.cp-peer {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 7px; border-radius: 9px;
+  background: color-mix(in srgb, var(--surface-2) 65%, transparent);
+}
+.cp-peer-av {
+  width: 24px; height: 24px; border-radius: 7px; flex-shrink: 0;
+  background: var(--c, var(--accent)); color: #fff;
+  font: 700 11px/1 system-ui, sans-serif;
+  display: grid; place-items: center;
+}
+.cp-peer-info {
+  flex: 1; min-width: 0; display: flex; flex-direction: column;
+}
+.cp-peer-name {
+  font-size: 12.5px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  display: flex; align-items: center; gap: 5px;
+}
+.cp-peer-role {
+  font-size: 10.5px; font-weight: 600; padding: 1px 5px; border-radius: 4px;
+  background: var(--surface-3); color: var(--text-2);
+}
+.cp-peer-act {
+  font-size: 11px; color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cp-peer-btns {
+  display: flex; gap: 4px; flex-shrink: 0;
+}
+.cp-mini-btn {
+  height: 24px; padding: 0 8px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-2); font-size: 11.5px; font-weight: 550;
+}
+.cp-mini-btn:hover { background: var(--surface-3); color: var(--text); }
+.cp-mini-btn.on {
+  background: var(--accent-soft); color: var(--accent); border-color: var(--accent);
+}
+.cp-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding-top: 8px; border-top: 1px solid var(--border);
+}
+.cp-foot .btn.danger-ghost {
+  color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
+  background: transparent; height: 30px; font-size: 12.5px; width: 100%; justify-content: center;
+}
+.cp-foot .btn.danger-ghost:hover {
+  background: var(--danger-soft);
+}
+
+/* 跟随视角右上角悬浮提示条（避开左上角画布标题栏，绝不遮挡按钮） */
+.collab-follow-bar {
+  position: absolute; top: 16px; right: 16px;
+  z-index: 18; display: inline-flex; align-items: center; gap: 10px;
+  padding: 6px 10px 6px 14px; border-radius: 999px;
+  background: var(--text); color: var(--bg);
+  font-size: 12.5px; font-weight: 600; box-shadow: var(--shadow-lg);
+  animation: collabPopIn .2s cubic-bezier(.22, 1.35, .36, 1);
+}
+.collab-follow-bar .follow-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--c, #10b981);
+}
+.collab-follow-bar button {
+  height: 22px; padding: 0 8px; border-radius: 999px; border: 0;
+  background: rgba(255,255,255,.18); color: inherit; font-size: 11.5px; font-weight: 600;
+}
+.collab-follow-bar button:hover { background: rgba(255,255,255,.28); }
+
+/* 画布内的远端光标、远端选区框与文件同步进度 */
+.collab-layer {
+  position: absolute; left: 0; top: 0; width: 0; height: 0;
+  overflow: visible; pointer-events: none; z-index: 99999;
+}
+.remote-cursor {
+  position: absolute; left: 0; top: 0; pointer-events: none;
+  transform: translate3d(var(--cx, 0px), var(--cy, 0px), 0) scale(var(--iz, 1));
+  transform-origin: 0 0;
+  transition: transform 55ms linear, opacity .3s ease;
+  will-change: transform;
+}
+.remote-cursor.idle { opacity: .45; }
+.remote-cursor svg {
+  width: 20px; height: 20px; display: block;
+  fill: var(--c, #2563eb); stroke: #fff; stroke-width: 1.8;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, .32));
+}
+.rc-tag {
+  position: absolute; left: 14px; top: 14px;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2.5px 8px; border-radius: 4px 10px 10px 10px;
+  background: var(--c, #2563eb); color: #fff;
+  font: 650 11.5px/1.35 system-ui, -apple-system, sans-serif;
+  white-space: nowrap;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .28), inset 0 0 0 1px rgba(255, 255, 255, .22);
+}
+.rc-act {
+  font-weight: 500; font-size: 10.5px; opacity: .9;
+  padding-left: 4px; border-left: 1px solid rgba(255, 255, 255, .3);
+}
+.remote-sel-box {
+  position: absolute; pointer-events: none;
+  border: calc(2px * var(--iz, 1)) solid var(--c, #2563eb);
+  border-radius: calc(10px * var(--iz, 1));
+  box-shadow: 0 0 0 calc(3px * var(--iz, 1)) color-mix(in srgb, var(--c, #2563eb) 20%, transparent);
+  transition: left 55ms linear, top 55ms linear, width 55ms linear, height 55ms linear;
+}
+.remote-sel-tag {
+  position: absolute; right: 0; bottom: 100%; margin-bottom: calc(4px * var(--iz, 1));
+  transform: scale(var(--iz, 1)); transform-origin: right bottom;
+  padding: 2px 7px; border-radius: 6px;
+  background: var(--c, #2563eb); color: #fff;
+  font: 600 10.5px/1.3 system-ui, sans-serif; white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .22);
+}
+.card-sync-pill {
+  position: absolute; left: 10px; bottom: 10px; z-index: 6;
+  padding: 3px 9px; border-radius: 999px;
+  background: rgba(15, 17, 21, .82); color: #fff;
+  font: 600 11px/1.35 system-ui, sans-serif;
+  backdrop-filter: blur(6px); pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .3);
+}
+.canvas-live-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px;
+  background: var(--ok-soft); color: var(--ok); margin-left: 6px; vertical-align: 1px;
+}
+.canvas-live-pill::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
+}
+@media (max-width: 720px) {
+  .collab-popover { left: 12px; top: 50px; width: min(344px, calc(100vw - 24px)); max-height: calc(100% - 60px); }
+  .collab-follow-bar { top: 54px; right: 12px; }
+  .collab-room-tag { display: none; }
+}
 .viewport { position: absolute; inset: 0; overflow: hidden; cursor: default; touch-action: none; outline: none;
   background-image: radial-gradient(circle, color-mix(in srgb, var(--text-3) 45%, transparent) 1px, transparent 1.2px); }
 .viewport.panning { cursor: grabbing; }
