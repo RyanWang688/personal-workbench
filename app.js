@@ -1,6 +1,6 @@
 import * as db from './db.js?v=6';
 import * as pv from './preview.js?v=7';
-import * as collab from './collab.js?v=2';
+import * as collab from './collab.js?v=5';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -128,23 +128,24 @@ async function load() {
   state.workCats = await db.getMeta('workCategories', []).catch(() => []);
   if (state.zone !== TRASH && !area(state.zone)) state.zone = fallbackZone() || TRASH;
 }
-let suppressCollabBroadcast = false;
+let suppressCollabDepth = 0;
+const isCollabSuppressed = () => suppressCollabDepth > 0;
 async function changed() {
   await db.setMeta('lastChange', Date.now());
-  if (!suppressCollabBroadcast && !collabSession) channel?.postMessage('changed');
+  if (!isCollabSuppressed() && !collabSession) channel?.postMessage('changed');
   render();
   refreshStatus();
-  if (!suppressCollabBroadcast) scheduleCollabSync();
+  if (!isCollabSuppressed()) scheduleCollabSync();
 }
 async function saveCard(card) {
   card.updatedAt = Date.now();
   await db.put('cards', card);
-  if (!suppressCollabBroadcast) scheduleCollabSync();
+  if (!isCollabSuppressed()) scheduleCollabSync();
 }
 async function saveArea(a) {
-  if (!suppressCollabBroadcast && a?.kind === 'canvas') stampCanvasMutations(a);
+  if (!isCollabSuppressed() && a?.kind === 'canvas') stampCanvasMutations(a);
   await db.put('columns', a);
-  if (!suppressCollabBroadcast && a?.kind === 'canvas') scheduleCollabSync();
+  if (!isCollabSuppressed() && a?.kind === 'canvas') scheduleCollabSync();
 }
 
 async function ensureDefaults() {
@@ -537,6 +538,7 @@ async function runThumbs() {
     if (!findCard(id)) continue;
     await db.put('cards', c);
     refreshCard(c);
+    if (!isCollabSuppressed() && isCanvas(c.columnId)) scheduleCollabSync();
   }
   thumbBusy = false;
 }
@@ -3960,6 +3962,7 @@ document.addEventListener('keydown', (e) => {
       if (el) { el.style.left = `${s.x}px`; el.style.top = `${s.y}px`; }
     }
     drawLinks(); decorateBoard(); positionFmt();
+    sendCollabShapeLive(list, '正在微调位置');
     clearTimeout(list[0]._t);
     list[0]._t = setTimeout(() => { list.forEach((s) => delete s._t); saveArea(boardOf()); }, 400);
   }
@@ -4217,6 +4220,7 @@ function setView(v) {
   if (!isCanvas(v) && document.body.classList.contains('canvas-maximized')) toggleCanvasMax(false);
   state.view = v;
   ls.set('view', v);
+  if (collabSession) setRoomUrlParam(v === collabSession.canvasId ? collabSession.roomId : '');
 }
 
 // ---------- 预览 ----------
@@ -5994,6 +5998,7 @@ document.addEventListener('keydown', (e) => {
       card.y = (card.y || 0) + (e.key === 'ArrowUp' ? -s : e.key === 'ArrowDown' ? s : 0);
       cardEl.style.left = `${card.x}px`; cardEl.style.top = `${card.y}px`;
       drawLinks();
+      sendCollabCardLive([card], '正在微调位置');
       clearTimeout(cardEl._t); cardEl._t = setTimeout(() => saveCard(card), 300);
     }
   }
@@ -6095,6 +6100,12 @@ const canvasKnownShapes = new Map(); // canvasId -> Map(shapeId -> json)
 const canvasKnownLinks = new Map();  // canvasId -> Map(linkId -> json)
 const canvasKnownCards = new Map();  // canvasId -> Set(cardId)
 const cardSyncProgress = new Map();  // cardId -> 0..100
+const orphanCollabBlobs = new Map(); // `${cardId}:${kind}` -> Blob（防元数据先于或晚于文件到达导致的丢包）
+let collabTaskChain = Promise.resolve();
+const enqueueCollabTask = (fn) => {
+  collabTaskChain = collabTaskChain.then(fn, fn);
+  return collabTaskChain;
+};
 const TAB_PEER_ID = uid();           // 每个页面实例唯一 ID（即使克隆标签页也绝不冲突）
 let tabCollabProfile = null;
 
@@ -6209,10 +6220,10 @@ function buildCanvasSnapshot(canvasId = collabSession?.canvasId) {
 }
 
 function scheduleCollabSync() {
-  if (!collabSession || suppressCollabBroadcast) return;
+  if (!collabSession || collabSession.joining || isCollabSuppressed()) return;
   clearTimeout(collabSyncTimer);
   collabSyncTimer = setTimeout(() => {
-    if (!collabSession || suppressCollabBroadcast) return;
+    if (!collabSession || collabSession.joining || isCollabSuppressed()) return;
     const snap = buildCanvasSnapshot(collabSession.canvasId);
     if (!snap) return;
     collabSession.send('board-sync', {
@@ -6223,14 +6234,14 @@ function scheduleCollabSync() {
 }
 
 function sendCollabCursor(wx, wy, act = '') {
-  if (!collabSession || !isCanvas(state.view) || state.view !== collabSession.canvasId) return;
+  if (!collabSession || collabSession.joining || !isCanvas(state.view) || state.view !== collabSession.canvasId) return;
   if (typeof wx === 'number') lastCollabCursor.x = wx;
   if (typeof wy === 'number') lastCollabCursor.y = wy;
   if (act !== undefined) lastCollabCursor.act = act;
   if (collabCursorTimer) return;
   collabCursorTimer = setTimeout(() => {
     collabCursorTimer = 0;
-    if (!collabSession) return;
+    if (!collabSession || collabSession.joining) return;
     const picked = [...selIds(), ...state.selected, ...(state.pickedCard ? [state.pickedCard] : [])];
     const r = $('#viewport')?.getBoundingClientRect();
     const c = cam();
@@ -6249,7 +6260,7 @@ function sendCollabCursor(wx, wy, act = '') {
 
 let pendingLiveShapes = null;
 function sendCollabShapeLive(shapes, act = '') {
-  if (!collabSession || suppressCollabBroadcast) return;
+  if (!collabSession || collabSession.joining || isCollabSuppressed()) return;
   const now = Date.now();
   pendingLiveShapes = shapes.map((s) => {
     s._u = now;
@@ -6259,7 +6270,7 @@ function sendCollabShapeLive(shapes, act = '') {
   if (collabShapeLiveTimer) return;
   collabShapeLiveTimer = setTimeout(() => {
     collabShapeLiveTimer = 0;
-    if (!collabSession || !pendingLiveShapes) return;
+    if (!collabSession || collabSession.joining || !pendingLiveShapes) return;
     const list = pendingLiveShapes;
     pendingLiveShapes = null;
     collabSession.send('shape-live', { canvasId: collabSession.canvasId, shapes: list });
@@ -6268,7 +6279,7 @@ function sendCollabShapeLive(shapes, act = '') {
 
 let pendingLiveCards = null;
 function sendCollabCardLive(cards, act = '') {
-  if (!collabSession || suppressCollabBroadcast) return;
+  if (!collabSession || collabSession.joining || isCollabSuppressed()) return;
   const now = Date.now();
   pendingLiveCards = cards.map((c) => ({
     id: c.id,
@@ -6283,7 +6294,7 @@ function sendCollabCardLive(cards, act = '') {
   if (collabCardLiveTimer) return;
   collabCardLiveTimer = setTimeout(() => {
     collabCardLiveTimer = 0;
-    if (!collabSession || !pendingLiveCards) return;
+    if (!collabSession || collabSession.joining || !pendingLiveCards) return;
     const list = pendingLiveCards;
     pendingLiveCards = null;
     collabSession.send('card-live', { canvasId: collabSession.canvasId, cards: list });
@@ -6396,7 +6407,7 @@ async function applyRemoteSnapshot(pkt, isWelcome = false) {
     deferredCollabPkts.push({ pkt, isWelcome });
     return;
   }
-  suppressCollabBroadcast = true;
+  suppressCollabDepth++;
   try {
     if (pkt.tombstones) {
       collabSession.tombstones = collab.mergeTombstones(collabSession.tombstones, pkt.tombstones);
@@ -6406,6 +6417,7 @@ async function applyRemoteSnapshot(pkt, isWelcome = false) {
     if (!collabSession.joining && targetId !== collabSession.canvasId) {
       return;
     }
+    const wasJoining = collabSession.joining;
     let cv = area(targetId);
     let createdNewCanvas = false;
     const wasEmpty = !cv || (!(cv.shapes?.length) && !cardsIn(cv.id, false).length);
@@ -6453,26 +6465,45 @@ async function applyRemoteSnapshot(pkt, isWelcome = false) {
 
     recordCanvasBaseline(cv);
 
-    // 检查是否有远端新增的文件卡片缺少本地二进制 Blob，自动请求 P2P 分片传输
+    // 检查是否有远端新增的文件卡片缺少本地二进制 Blob，优先消费预到达的缓冲分片，否则请求 P2P 分片传输
     for (const c of cardsIn(cv.id, false)) {
       if (c.kind === 'file') {
-        const hasMain = await db.getBlob(c.id).catch(() => null);
+        const orphanMain = orphanCollabBlobs.get(`${c.id}:main`);
+        if (orphanMain) {
+          orphanCollabBlobs.delete(`${c.id}:main`);
+          await db.addFile(c, orphanMain).catch(() => {});
+          cleanupCanvasPdf(c.id);
+        }
+        const hasMain = orphanMain ? true : await db.getBlob(c.id).catch(() => null);
         if (!hasMain) {
           cardSyncProgress.set(c.id, 1);
           collabSession.requestBlob(c.id, 'main');
         }
-        if (c.thumb === 'ok') {
+        const orphanThumb = orphanCollabBlobs.get(`${c.id}:thumb`);
+        if (orphanThumb) {
+          orphanCollabBlobs.delete(`${c.id}:thumb`);
+          await db.putThumb(c.id, orphanThumb).catch(() => {});
+          c.thumb = 'ok';
+          await db.put('cards', c).catch(() => {});
+        } else if (c.thumb === 'ok') {
           const hasThumb = await db.getThumb(c.id).catch(() => null);
           if (!hasThumb) collabSession.requestBlob(c.id, 'thumb');
         }
       }
     }
 
-    if (createdNewCanvas && state.view !== cv.id) {
+    const switchedView = (wasJoining || createdNewCanvas || isWelcome) && state.view !== cv.id;
+    if (switchedView) {
       setView(cv.id);
     }
 
-    if (state.view === cv.id) {
+    if (switchedView) {
+      render();
+      loadThumbs();
+      if (isWelcome && (cv.shapes.length || cardsIn(cv.id, false).length)) {
+        setTimeout(() => zoomFit(), 80);
+      }
+    } else if (state.view === cv.id) {
       $('#canvasTitle').textContent = cv.title;
       $('#canvasTitle').title = cv.title;
       renderCanvas();
@@ -6486,7 +6517,7 @@ async function applyRemoteSnapshot(pkt, isWelcome = false) {
     renderViews();
     renderCollabUI();
   } finally {
-    suppressCollabBroadcast = false;
+    suppressCollabDepth = Math.max(0, suppressCollabDepth - 1);
   }
 }
 
@@ -6494,7 +6525,7 @@ async function flushDeferredCollab() {
   if (!deferredCollabPkts.length || bd?.moved || cardDrag?.moved) return;
   const list = deferredCollabPkts.splice(0, deferredCollabPkts.length);
   for (const item of list) {
-    await applyRemoteSnapshot(item.pkt, item.isWelcome);
+    await enqueueCollabTask(() => applyRemoteSnapshot(item.pkt, item.isWelcome));
   }
 }
 
@@ -6517,24 +6548,30 @@ async function handleCollabBlobProgress(res) {
       card.thumb = 'ok';
       await db.put('cards', card);
       refreshCard(card);
+    } else {
+      if (orphanCollabBlobs.size > 50) orphanCollabBlobs.delete(orphanCollabBlobs.keys().next().value);
+      orphanCollabBlobs.set(`${res.cardId}:thumb`, blob);
     }
     return;
   }
   cardSyncProgress.delete(res.cardId);
   updateCardSyncPill(res.cardId, null);
-  if (card) {
-    suppressCollabBroadcast = true;
-    try {
-      await db.addFile(card, blob);
-      const oldU = state.urls.get(card.id);
-      if (oldU) { URL.revokeObjectURL(oldU); state.urls.delete(card.id); }
-      cleanupCanvasPdf(card.id);
-      if (!card.thumb) queueThumbs();
-      refreshCard(card);
-      loadCanvasMedia();
-    } finally {
-      suppressCollabBroadcast = false;
-    }
+  if (!card) {
+    if (orphanCollabBlobs.size > 50) orphanCollabBlobs.delete(orphanCollabBlobs.keys().next().value);
+    orphanCollabBlobs.set(`${res.cardId}:main`, blob);
+    return;
+  }
+  suppressCollabDepth++;
+  try {
+    await db.addFile(card, blob);
+    const oldU = state.urls.get(card.id);
+    if (oldU) { URL.revokeObjectURL(oldU); state.urls.delete(card.id); }
+    cleanupCanvasPdf(card.id);
+    if (!card.thumb) queueThumbs();
+    refreshCard(card);
+    loadCanvasMedia();
+  } finally {
+    suppressCollabDepth = Math.max(0, suppressCollabDepth - 1);
   }
 }
 
@@ -6823,15 +6860,16 @@ async function startCollabRoom(customRoomId = '', { autoCopy = true, quiet = fal
           if (actEl) actEl.textContent = detail.peer.action || '在线浏览中';
         }
       } else if (type === 'welcome') {
-        applyRemoteSnapshot(detail, true);
+        enqueueCollabTask(() => applyRemoteSnapshot(detail, true));
       } else if (type === 'board-sync' || type === 'cards-sync') {
-        applyRemoteSnapshot(detail, false);
+        enqueueCollabTask(() => applyRemoteSnapshot(detail, false));
       } else if (type === 'shape-live') {
         applyRemoteShapeLive(detail);
       } else if (type === 'card-live') {
         applyRemoteCardLive(detail);
       } else if (type === 'blob-progress') {
-        handleCollabBlobProgress(detail);
+        if (detail?.done) enqueueCollabTask(() => handleCollabBlobProgress(detail));
+        else handleCollabBlobProgress(detail);
       }
     },
   });
@@ -6856,6 +6894,8 @@ function leaveCollabRoom() {
   collabSession = null;
   followPeerId = null;
   cardSyncProgress.clear();
+  orphanCollabBlobs.clear();
+  deferredCollabPkts.length = 0;
   setRoomUrlParam('');
   renderCollabUI();
   renderCollabPopover();

@@ -623,7 +623,7 @@ body.canvas-maximized .collab-popover { left: 16px; }
   overflow: visible; pointer-events: none; z-index: 99999;
 }
 .remote-cursor {
-  position: absolute; left: 0; top: 0; pointer-events: none;
+  position: absolute; left: 0; top: 0; width: 20px; height: 20px; pointer-events: none;
   transform: translate3d(var(--cx, 0px), var(--cy, 0px), 0) scale(var(--iz, 1));
   transform-origin: 0 0;
   transition: transform 55ms linear, opacity .3s ease;

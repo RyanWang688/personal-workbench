@@ -328,10 +328,15 @@ export class CollabSession {
     this.pendingBlobReqs = new Set();
     this.rtcConns = new Map(); // peerId -> DataConnection
     this.rtcPeer = null;
+    this.peerClass = null;
+    this.hostPeerId = '';
     this.bc = null;
     this.closed = false;
     this.rtcStatus = 'connecting'; // 'connecting' | 'connected' | 'local-only'
     this.heartbeatTimer = 0;
+    this.joinFallbackTimer = 0;
+    this.connWatchdogTimer = 0;
+    this.failoverTimer = 0;
   }
 
   async start() {
@@ -345,18 +350,35 @@ export class CollabSession {
     this._announceHello(true);
     this.heartbeatTimer = setInterval(() => this._tickHeartbeat(), 2600);
     this.heartbeatTimer.unref?.();
+    if (this.joining) {
+      // 7 秒后若仍无任何同伴在线且无直连，降级结束加入等待状态以免永远卡死在只读状态
+      this.joinFallbackTimer = setTimeout(() => {
+        if (this.closed || !this.joining) return;
+        if (this.peers.size === 0 && this.rtcConns.size === 0) {
+          this.joining = false;
+          this.self.isHost = true;
+          this._emit('status', this.getStatus());
+        }
+      }, 7000);
+      this.joinFallbackTimer.unref?.();
+    }
     this._emit('status', this.getStatus());
     return this;
   }
 
   markSynced(canvasId) {
     this.joining = false;
+    clearTimeout(this.joinFallbackTimer);
+    this.joinFallbackTimer = 0;
     if (canvasId) this.canvasId = canvasId;
   }
 
   stop() {
     if (this.closed) return;
     clearInterval(this.heartbeatTimer);
+    clearTimeout(this.joinFallbackTimer);
+    clearTimeout(this.connWatchdogTimer);
+    clearTimeout(this.failoverTimer);
     try { this.send('bye', { peerId: this.self.id }); } catch {}
     this.closed = true;
     try { this.bc?.close?.(); } catch {}
@@ -468,16 +490,36 @@ export class CollabSession {
       this._emit('status', this.getStatus());
       return;
     }
-    const hostPeerId = `fangcun-wb-v1-${this.roomId}`;
+    this.peerClass = PeerClass;
+    this.hostPeerId = `fangcun-wb-v1-${this.roomId}`;
     // 新加入链接的访客优先以访客身份直连房主；房主优先注册房主信令 ID
-    this._tryClaimOrJoinRTC(PeerClass, hostPeerId, !this.joining);
+    this._tryClaimOrJoinRTC(PeerClass, this.hostPeerId, !this.joining);
   }
 
   _tryClaimOrJoinRTC(PeerClass, hostPeerId, tryAsHost) {
-    if (this.closed) return;
+    if (this.closed || !PeerClass) return;
+    clearTimeout(this.connWatchdogTimer);
+    this.connWatchdogTimer = 0;
+    clearTimeout(this.failoverTimer);
+    this.failoverTimer = 0;
+    const peerOpts = {
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun.cloudflare.com:3478' },
+          {
+            urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'],
+            username: 'peerjs',
+            credential: 'peerjsp',
+          },
+        ],
+        sdpSemantics: 'unified-plan',
+      },
+    };
     let peer;
     try {
-      peer = tryAsHost ? new PeerClass(hostPeerId) : new PeerClass();
+      peer = tryAsHost ? new PeerClass(hostPeerId, peerOpts) : new PeerClass(peerOpts);
     } catch {
       this.rtcStatus = 'local-only';
       this._emit('status', this.getStatus());
@@ -486,25 +528,44 @@ export class CollabSession {
     this.rtcPeer = peer;
 
     peer.on('open', () => {
-      if (this.closed) return;
+      if (this.closed || this.rtcPeer !== peer) return;
       this.self.isHost = tryAsHost;
-      if (tryAsHost) this.joining = false;
+      if (tryAsHost) this.markSynced();
       this.rtcStatus = 'connected';
       if (!tryAsHost) {
+        // 保持 PeerJS 默认 BinaryPack（支持 >16KB 自动分包，大快照与 48KB 文件分片不会触发 MessageToBig）
         const conn = peer.connect(hostPeerId, { reliable: true });
         this._bindRTCConn(conn);
+        // 6 秒建连看门狗：若房主信令僵尸残留或 ICE 卡住未 open，自动销毁重建并尝试接管房主 ID
+        this.connWatchdogTimer = setTimeout(() => {
+          if (this.closed || this.rtcPeer !== peer || conn.open || this.rtcConns.size > 0) return;
+          try { conn.close(); } catch {}
+          try { peer.destroy(); } catch {}
+          this._tryClaimOrJoinRTC(PeerClass, hostPeerId, true);
+        }, 6000);
+        this.connWatchdogTimer.unref?.();
       }
       this._announceHello(true);
       this._emit('status', this.getStatus());
     });
 
+    peer.on('disconnected', () => {
+      if (this.closed || this.rtcPeer !== peer || peer.destroyed) return;
+      // 保持与 0.peerjs.com 信令服务器心跳连通，以便后加入的同伴能随时找到本节点
+      setTimeout(() => {
+        if (!this.closed && this.rtcPeer === peer && !peer.destroyed && peer.disconnected) {
+          try { peer.reconnect(); } catch {}
+        }
+      }, 1000).unref?.();
+    });
+
     peer.on('connection', (conn) => {
-      if (this.closed) return;
+      if (this.closed || this.rtcPeer !== peer) return;
       this._bindRTCConn(conn);
     });
 
     peer.on('error', (err) => {
-      if (this.closed) return;
+      if (this.closed || this.rtcPeer !== peer) return;
       if (tryAsHost && (err?.type === 'unavailable-id' || /taken|unavailable/i.test(err?.message || ''))) {
         try { peer.destroy(); } catch {}
         this._tryClaimOrJoinRTC(PeerClass, hostPeerId, false);
@@ -513,7 +574,7 @@ export class CollabSession {
       if (!tryAsHost && err?.type === 'peer-unavailable') {
         // 原房主尚未在线：尝试接管房主信令 ID；若房主恰好先连上则会回退并保持 joining=true
         try { peer.destroy(); } catch {}
-        setTimeout(() => this._tryClaimOrJoinRTC(PeerClass, hostPeerId, true), 300);
+        setTimeout(() => this._tryClaimOrJoinRTC(PeerClass, hostPeerId, true), 300).unref?.();
         return;
       }
       this.rtcStatus = this.rtcConns.size ? 'connected' : 'local-only';
@@ -523,8 +584,10 @@ export class CollabSession {
 
   _bindRTCConn(conn) {
     if (!conn) return;
-    conn.on('open', () => {
+    const onOpen = () => {
       if (this.closed) return;
+      clearTimeout(this.connWatchdogTimer);
+      this.connWatchdogTimer = 0;
       this.rtcConns.set(conn.peer, conn);
       this.rtcStatus = 'connected';
       this._announceHello(true);
@@ -547,11 +610,24 @@ export class CollabSession {
         }
       }
       this._emit('status', this.getStatus());
-    });
+    };
+    if (conn.open) onOpen();
+    else conn.on('open', onOpen);
     conn.on('data', (pkt) => this._onPacket(pkt, conn.peer));
     const cleanup = () => {
-      this.rtcConns.delete(conn.peer);
-      this._emit('status', this.getStatus());
+      const had = this.rtcConns.delete(conn.peer);
+      if (had) this._emit('status', this.getStatus());
+      // 若原房主断线离开，已同步的访客抖动退避后自动接管房主信令 ID，保障后续新同伴仍可进入
+      if (!this.closed && !this.self.isHost && !this.joining && conn.peer === this.hostPeerId && this.peerClass && !this.failoverTimer) {
+        const delay = 250 + Math.floor(Math.random() * 450);
+        this.failoverTimer = setTimeout(() => {
+          this.failoverTimer = 0;
+          if (this.closed || this.self.isHost || this.rtcConns.size > 0) return;
+          try { this.rtcPeer?.destroy(); } catch {}
+          this._tryClaimOrJoinRTC(this.peerClass, this.hostPeerId, true);
+        }, delay);
+        this.failoverTimer.unref?.();
+      }
     };
     conn.on('close', cleanup);
     conn.on('error', cleanup);
@@ -584,7 +660,8 @@ export class CollabSession {
     if (this.closed) return;
     const before = this.peers.size;
     this.getPeers();
-    this.send('ping', {});
+    if (this.joining) this._announceHello(true);
+    else this.send('ping', {});
     if (this.peers.size !== before) {
       this._emit('peers', this.getPeers());
       this._emit('status', this.getStatus());

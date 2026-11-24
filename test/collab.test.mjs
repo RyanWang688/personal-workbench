@@ -331,3 +331,221 @@ test('joining guest with its own empty default canvas does NOT overwrite host ca
   host.stop();
   guest.stop();
 });
+
+test('simultaneous multi-guest join does not overwrite host canvas and converges all 3 peers', async () => {
+  const buses = new Map();
+  const makeTransport = (chName, onMsg) => {
+    let subs = buses.get(chName);
+    if (!subs) buses.set(chName, (subs = new Set()));
+    const fn = (pkt) => queueMicrotask(() => onMsg(structuredClone(pkt)));
+    subs.add(fn);
+    return {
+      postMessage(pkt) {
+        for (const s of subs) if (s !== fn) s(pkt);
+      },
+      close() {
+        subs.delete(fn);
+      },
+    };
+  };
+
+  let hostBoard = {
+    canvasId: 'cv-shared',
+    title: '并发加入主画布',
+    _u: 1000,
+    shapes: [{ id: 's1', t: 'sticky', x: 40, y: 50, w: 200, h: 200, text: '房主核心便签', _u: 1000 }],
+    links: [],
+    cards: [{ id: 'c1', kind: 'note', name: '重要笔记', columnId: 'cv-shared', x: 280, y: 50, updatedAt: 1000 }],
+  };
+  let guest1Board = { canvasId: 'cv-empty-1', title: '画布', _u: 100, shapes: [], links: [], cards: [] };
+  let guest2Board = { canvasId: 'cv-empty-2', title: '画布', _u: 100, shapes: [], links: [], cards: [] };
+
+  const host = new CollabSession({
+    roomId: 'race88',
+    canvasId: 'cv-shared',
+    joining: false,
+    user: { id: 'u-h', name: 'Host', color: '#2563eb' },
+    enableWebRTC: false,
+    transportFactory: makeTransport,
+    getSnapshot: () => hostBoard,
+    onEvent: (type, detail) => {
+      if ((type === 'board-sync' || type === 'welcome') && detail.snapshot?.canvasId === 'cv-shared') {
+        hostBoard = { ...hostBoard, ...mergeBoardState(hostBoard, detail.snapshot, detail.tombstones) };
+      } else if (type === 'welcome' || type === 'board-sync') {
+        assert.fail(`Host received unexpected foreign canvas snapshot: ${detail.snapshot?.canvasId}`);
+      }
+    },
+  });
+
+  const makeGuest = (id, name, getB, setB) => {
+    const s = new CollabSession({
+      roomId: 'race88',
+      canvasId: getB().canvasId,
+      joining: true,
+      user: { id, name, color: '#e11d48' },
+      enableWebRTC: false,
+      transportFactory: makeTransport,
+      getSnapshot: () => (s.joining ? null : getB()),
+      onEvent: (type, detail) => {
+        if ((type === 'welcome' || type === 'board-sync') && detail.snapshot) {
+          setB(structuredClone(detail.snapshot));
+          s.markSynced(detail.snapshot.canvasId);
+        }
+      },
+    });
+    return s;
+  };
+
+  const g1 = makeGuest('u-g1', 'Guest1', () => guest1Board, (b) => { guest1Board = b; });
+  const g2 = makeGuest('u-g2', 'Guest2', () => guest2Board, (b) => { guest2Board = b; });
+
+  await host.start();
+  await Promise.all([g1.start(), g2.start()]);
+  await new Promise((r) => setTimeout(r, 50));
+
+  assert.equal(host.getStatus().totalOnline, 3);
+  assert.equal(guest1Board.canvasId, 'cv-shared');
+  assert.equal(guest2Board.canvasId, 'cv-shared');
+  assert.equal(guest1Board.shapes[0].text, '房主核心便签');
+  assert.equal(guest2Board.shapes[0].text, '房主核心便签');
+  assert.equal(g1.joining, false);
+  assert.equal(g2.joining, false);
+
+  host.stop();
+  g1.stop();
+  g2.stop();
+});
+
+test('star-topology WebRTC relay forwards cursors, tombstones, and blob chunks between remote guests via Host', async () => {
+  // 创建纯虚拟双工 PeerJS DataConnection（两个访客仅连接房主，不共享本地 BroadcastChannel）
+  function makeMockRtcPair(hostSession, hostPeerLabel, guestSession, guestPeerLabel) {
+    const hostConn = {
+      peer: guestPeerLabel,
+      open: true,
+      handlers: {},
+      on(ev, fn) { (this.handlers[ev] ||= []).push(fn); },
+      send(pkt) { queueMicrotask(() => guestConn._emit('data', structuredClone(pkt))); },
+      close() { this.open = false; this._emit('close'); },
+      _emit(ev, arg) { (this.handlers[ev] || []).forEach((f) => f(arg)); },
+    };
+    const guestConn = {
+      peer: hostPeerLabel,
+      open: true,
+      handlers: {},
+      on(ev, fn) { (this.handlers[ev] ||= []).push(fn); },
+      send(pkt) { queueMicrotask(() => hostConn._emit('data', structuredClone(pkt))); },
+      close() { this.open = false; this._emit('close'); },
+      _emit(ev, arg) { (this.handlers[ev] || []).forEach((f) => f(arg)); },
+    };
+    hostSession._bindRTCConn(hostConn);
+    guestSession._bindRTCConn(guestConn);
+  }
+
+  let hostBoard = {
+    canvasId: 'cv-rtc',
+    title: 'WebRTC 星型中继画布',
+    _u: 100,
+    shapes: [
+      { id: 'sh-del', t: 'rect', x: 10, y: 10, w: 120, h: 80, text: '待删形状', _u: 100 },
+    ],
+    links: [],
+    cards: [{ id: 'card-pdf', kind: 'file', name: 'chart.pdf', type: 'application/pdf', size: 12000, columnId: 'cv-rtc', updatedAt: 100 }],
+  };
+  const guestBFile = new Uint8Array(12000);
+  for (let i = 0; i < guestBFile.length; i++) guestBFile[i] = (i * 13 + 7) & 0xff;
+
+  let guestCReceivedCursor = null;
+  let guestCReceivedBoard = null;
+  let guestCReceivedBlob = null;
+
+  const isolatedNullTransport = () => ({ postMessage() {}, close() {} });
+
+  const host = new CollabSession({
+    roomId: 'star77',
+    canvasId: 'cv-rtc',
+    joining: false,
+    user: { id: 'h-1', name: 'HostA', color: '#2563eb' },
+    enableWebRTC: false,
+    transportFactory: isolatedNullTransport,
+    getSnapshot: () => hostBoard,
+    getBlobById: async () => null,
+    onEvent: (type, detail) => {
+      if (type === 'board-sync' && detail.snapshot?.canvasId === 'cv-rtc') {
+        hostBoard = { ...hostBoard, ...mergeBoardState(hostBoard, detail.snapshot, detail.tombstones) };
+      }
+    },
+  });
+
+  const guestB = new CollabSession({
+    roomId: 'star77',
+    canvasId: 'cv-b-tmp',
+    joining: true,
+    user: { id: 'g-b', name: 'RemoteB', color: '#e11d48' },
+    enableWebRTC: false,
+    transportFactory: isolatedNullTransport,
+    getSnapshot: () => null,
+    getBlobById: async (id) => (id === 'card-pdf' ? new Blob([guestBFile], { type: 'application/pdf' }) : null),
+    onEvent: (type, detail) => {
+      if (type === 'welcome') guestB.markSynced(detail.snapshot.canvasId);
+    },
+  });
+
+  const guestC = new CollabSession({
+    roomId: 'star77',
+    canvasId: 'cv-c-tmp',
+    joining: true,
+    user: { id: 'g-c', name: 'RemoteC', color: '#059669' },
+    enableWebRTC: false,
+    transportFactory: isolatedNullTransport,
+    getSnapshot: () => null,
+    onEvent: (type, detail) => {
+      if (type === 'welcome' || type === 'board-sync') {
+        guestCReceivedBoard = mergeBoardState(guestCReceivedBoard || {}, detail.snapshot, detail.tombstones);
+        guestC.markSynced(detail.snapshot.canvasId);
+      }
+      if (type === 'cursor' && detail.peer?.id === 'g-b') guestCReceivedCursor = detail.peer;
+      if (type === 'blob-progress' && detail.done) guestCReceivedBlob = detail;
+    },
+  });
+
+  await host.start();
+  await guestB.start();
+  await guestC.start();
+
+  // 将 RemoteB 和 RemoteC 分别连接到 HostA（彼此无直连）
+  makeMockRtcPair(host, 'fangcun-wb-v1-star77', guestB, 'rtc-b');
+  makeMockRtcPair(host, 'fangcun-wb-v1-star77', guestC, 'rtc-c');
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert.equal(guestB.joining, false);
+  assert.equal(guestC.joining, false);
+  assert.equal(guestCReceivedBoard.shapes.length, 1);
+
+  // RemoteB 发送光标 -> 经 HostA 中继到 RemoteC
+  guestB.send('cursor', { x: 420, y: 260, tool: 'sticky', selIds: [], action: '正在画便签' });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.ok(guestCReceivedCursor);
+  assert.equal(guestCReceivedCursor.x, 420);
+  assert.equal(guestCReceivedCursor.action, '正在画便签');
+
+  // RemoteB 删除 sh-del 并携带墓碑同步 -> HostA 与 RemoteC 都不再存在 sh-del
+  guestB.recordTombstones(['sh-del'], 500);
+  guestB.send('board-sync', {
+    snapshot: { canvasId: 'cv-rtc', title: hostBoard.title, _u: 500, shapes: [], links: [], cards: [] },
+    tombstones: guestB.tombstones,
+  });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(hostBoard.shapes.length, 0);
+  assert.equal(guestCReceivedBoard.shapes.length, 0);
+
+  // RemoteC 向拥有文件缓存的 RemoteB 请求二进制文件分片 -> 经 HostA 中继完整重组
+  guestC.requestBlob('card-pdf', 'main');
+  await new Promise((r) => setTimeout(r, 60));
+  assert.ok(guestCReceivedBlob);
+  assert.equal(guestCReceivedBlob.cardId, 'card-pdf');
+  assert.deepEqual(guestCReceivedBlob.bytes, guestBFile);
+
+  host.stop();
+  guestB.stop();
+  guestC.stop();
+});
