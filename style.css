@@ -145,7 +145,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 }
 
 /* ---------- 页面切换栏 ---------- */
-.viewbar { display: flex; align-items: center; gap: 12px; padding: 8px 20px; }
+.viewbar { position: relative; z-index: 20; display: flex; align-items: center; gap: 12px; padding: 8px 20px; }
 .views { display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .views::-webkit-scrollbar { display: none; }
 .view-tab { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 9px; border: 1px solid transparent; background: transparent; color: var(--text-2); font-weight: 550; white-space: nowrap; flex-shrink: 0; }
@@ -337,16 +337,11 @@ body.dragging-folder .cat-chip[data-catdrop] { border-style: dashed; }
 .canvas-max-btn[aria-pressed="true"] .ico-max { display: none; }
 .canvas-max-btn[aria-pressed="true"] .ico-min { display: block; }
 .sidebar-toggle-chip.active-panel { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-/* 最大化工作空间（沉浸模式）：隐藏顶栏、切换栏与右侧功能区，画布铺满全屏 */
+/* 最大化工作空间（沉浸模式）：隐藏顶栏与切换栏，保留右侧功能区（含临时文件区） */
 body.canvas-maximized .topbar,
 body.canvas-maximized .viewbar { display: none; }
 body.canvas-maximized .canvas-view { margin: 0; border: 0; border-radius: 0; }
 body.canvas-maximized .canvas-workspace-head { left: 16px; top: 14px; }
-body.canvas-maximized:not(.drafts-peek) .drafts { width: 0 !important; min-width: 0 !important; border-left-width: 0 !important; }
-body.canvas-maximized.drafts-peek .drafts {
-  position: fixed; right: 0; top: 0; bottom: 0; z-index: 35;
-  width: var(--dw, 320px); box-shadow: -18px 0 40px -12px rgba(0, 0, 0, .45); border-left: 1.5px solid var(--accent);
-}
 .viewport { position: absolute; inset: 0; overflow: hidden; cursor: default; touch-action: none; outline: none;
   background-image: radial-gradient(circle, color-mix(in srgb, var(--text-3) 45%, transparent) 1px, transparent 1.2px); }
 .viewport.panning { cursor: grabbing; }
