@@ -1,6 +1,6 @@
 import * as db from './db.js?v=6';
 import * as pv from './preview.js?v=7';
-import * as collab from './collab.js?v=1';
+import * as collab from './collab.js?v=2';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -586,7 +586,7 @@ function renderCanvasDirectory() {
       <button type="button" class="canvas-directory-open" data-view="${esc(cv.id)}" aria-label="打开画布 ${esc(cv.title)}">
         <span class="canvas-directory-icon">${CANVAS_SVG}</span>
         <span class="canvas-directory-info">
-          <strong>${esc(cv.title)}${collabSession?.canvasId === cv.id ? `<span class="canvas-live-pill">协作中 · #${esc(collabSession.roomId)}</span>` : ''}</strong>
+          <strong>${esc(cv.title)}${collabSession?.canvasId === cv.id ? '<span class="canvas-live-pill">多人协作中</span>' : ''}</strong>
           <span>${cardsIn(cv.id, false).length} 张卡片${cv.shapes?.length ? ` · ${cv.shapes.length} 个白板对象` : ''}</span>
         </span>
       </button>
@@ -6402,6 +6402,10 @@ async function applyRemoteSnapshot(pkt, isWelcome = false) {
       collabSession.tombstones = collab.mergeTombstones(collabSession.tombstones, pkt.tombstones);
     }
     const targetId = snap.canvasId || collabSession.canvasId;
+    // 房主或已完成同步的协作者，绝不被新访客本地默认画布或无关画布的快照覆盖/切走视角
+    if (!collabSession.joining && targetId !== collabSession.canvasId) {
+      return;
+    }
     let cv = area(targetId);
     let createdNewCanvas = false;
     const wasEmpty = !cv || (!(cv.shapes?.length) && !cardsIn(cv.id, false).length);
@@ -6419,7 +6423,7 @@ async function applyRemoteSnapshot(pkt, isWelcome = false) {
       state.areas.push(cv);
       createdNewCanvas = true;
     }
-    collabSession.canvasId = cv.id;
+    collabSession.markSynced(cv.id);
 
     // 若本地正处于某个便签/形状的文字编辑状态，保留该形状正在编辑的本地副本
     const activeEditObj = editingShape ? shapeById(editingShape) : null;
@@ -6600,7 +6604,7 @@ function renderCollabUI() {
   const st = collabSession.getStatus();
   const peers = st.peers;
   btn.classList.add('live');
-  txt.innerHTML = `协作 · ${st.totalOnline}人 <span class="collab-room-tag">#${esc(st.roomId)}</span>`;
+  txt.textContent = `协作中 · ${st.totalOnline}人`;
 
   const selfInit = collabInitial(st.self.name || '我');
   const avList = [
@@ -6657,7 +6661,7 @@ function renderCollabPopover() {
   const st = active ? collabSession.getStatus() : null;
 
   // 若用户正在输入框内打字，仅局部更新状态与成员列表，不重建输入框 DOM（防止焦点丢失）
-  const focusedInput = pop.contains(document.activeElement) && document.activeElement.matches?.('#cpNameInput, #cpJoinInput');
+  const focusedInput = pop.contains(document.activeElement) && document.activeElement.matches?.('#cpNameInput');
   if (focusedInput && Boolean(pop.querySelector('.cp-room-box')) === Boolean(active)) {
     const av = $('#cpMyAv', pop);
     if (av) { av.style.setProperty('--c', prof.color); av.textContent = collabInitial(prof.name); }
@@ -6696,18 +6700,11 @@ function renderCollabPopover() {
       </div>
       ${profileSec}
       <div class="cp-sec">
-        <p class="cp-room-sub">无需注册或配置服务器：基于 WebRTC 点对点直连 + 同机多窗口极速通道，支持多人实时光标、便签、形状、连线及超高清图片/PDF 同步编辑。</p>
+        <p class="cp-room-sub">无需房间号或配置服务器：点击下方按钮开启后，直接复制当前网址发给同伴，对方打开网页即可看到你的画布并实时一起编辑。</p>
         <button type="button" class="btn primary cp-start-btn" data-collab-act="start">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-          <span>开启当前画布多人协作</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>
+          <span>开启多人协作并复制网址</span>
         </button>
-      </div>
-      <div class="cp-sec">
-        <div class="cp-label"><span>加入同伴的房间</span></div>
-        <div class="cp-join-row">
-          <input type="text" class="cp-join-input" id="cpJoinInput" placeholder="输入 6 位房间号或粘贴邀请链接…" aria-label="房间号或邀请链接">
-          <button type="button" class="btn" data-collab-act="join">加入</button>
-        </div>
       </div>`;
     return;
   }
@@ -6719,18 +6716,11 @@ function renderCollabPopover() {
       <span class="cp-badge">● 在线 ${st.totalOnline} 人</span>
     </div>
     <div class="cp-room-box">
-      <div class="cp-room-top">
-        <div>
-          <div class="cp-label">房间号</div>
-          <div class="cp-room-code">#${esc(st.roomId)}</div>
-        </div>
-        <button type="button" class="btn" data-collab-act="copy-code" title="复制 6 位房间号">复制房间号</button>
-      </div>
-      <p class="cp-room-sub">把邀请链接或房间号发给同伴，对方打开即可实时看到彼此的光标并共同编辑画布。</p>
+      <p class="cp-room-sub">协作已开启 · 直接复制浏览器网址或点击下方按钮分享给同伴，对方打开网页即可实时同步当前画布内容与光标。</p>
       <div class="cp-room-actions">
         <button type="button" class="btn primary" data-collab-act="copy-link">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>
-          <span>复制邀请链接</span>
+          <span>复制协作网址</span>
         </button>
       </div>
     </div>
@@ -6740,7 +6730,7 @@ function renderCollabPopover() {
       <ul class="cp-peers">${peersHTML}</ul>
     </div>
     <div class="cp-foot">
-      <button type="button" class="btn danger-ghost" data-collab-act="leave">退出当前协作房间</button>
+      <button type="button" class="btn danger-ghost" data-collab-act="leave">结束多人协作</button>
     </div>`;
 }
 
@@ -6787,7 +6777,7 @@ async function copyTextWithToast(text, msg) {
   }
 }
 
-async function startCollabRoom(customRoomId = '', { autoCopy = true, quiet = false } = {}) {
+async function startCollabRoom(customRoomId = '', { autoCopy = true, quiet = false, isJoining = false } = {}) {
   let cvId = isCanvas(state.view) ? state.view : canvases()[0]?.id;
   if (!cvId) {
     const a = { id: uid(), kind: 'canvas', title: '协作画布', order: 0, shapes: [], links: [] };
@@ -6807,12 +6797,16 @@ async function startCollabRoom(customRoomId = '', { autoCopy = true, quiet = fal
   followPeerId = null;
   recordCanvasBaseline(area(cvId));
   const prof = getCollabProfile();
+  if (!isJoining) {
+    try { sessionStorage.setItem('wb:collabHostRoom', roomId); } catch {}
+  }
 
   collabSession = new collab.CollabSession({
     roomId,
     canvasId: cvId,
+    joining: isJoining,
     user: prof,
-    getSnapshot: () => buildCanvasSnapshot(collabSession?.canvasId || cvId),
+    getSnapshot: () => (collabSession?.joining ? null : buildCanvasSnapshot(collabSession?.canvasId || cvId)),
     getBlobById: async (cardId, kind) => (kind === 'thumb' ? db.getThumb(cardId) : db.getBlob(cardId)),
     onEvent: (type, detail) => {
       if (type === 'status' || type === 'peers') {
@@ -6849,15 +6843,15 @@ async function startCollabRoom(customRoomId = '', { autoCopy = true, quiet = fal
   renderCollabOverlay();
 
   if (autoCopy) {
-    await copyTextWithToast(getInviteUrl(collabSession.roomId), `已开启协作房间 #${collabSession.roomId}，邀请链接已复制`);
+    await copyTextWithToast(getInviteUrl(collabSession.roomId), '已开启多人协作并复制网址，发给同伴打开即可一起编辑');
   } else if (!quiet) {
-    toast(`已加入多人协作房间 #${collabSession.roomId}`);
+    toast('已加入多人实时协作');
   }
 }
 
 function leaveCollabRoom() {
   if (!collabSession) return;
-  const oldRoom = collabSession.roomId;
+  try { sessionStorage.removeItem('wb:collabHostRoom'); } catch {}
   collabSession.stop();
   collabSession = null;
   followPeerId = null;
@@ -6867,7 +6861,7 @@ function leaveCollabRoom() {
   renderCollabPopover();
   renderCollabOverlay();
   if (state.view === CANVASES) renderCanvasDirectory();
-  toast(`已退出协作房间 #${oldRoom}`);
+  toast('已结束多人协作');
 }
 
 function locateCollabPeer(peerId) {
@@ -6945,16 +6939,9 @@ $('#canvasWorkspace').addEventListener('click', async (e) => {
   if (!actBtn) return;
   const act = actBtn.dataset.collabAct;
   if (act === 'start') {
-    await startCollabRoom('', { autoCopy: true });
-  } else if (act === 'join') {
-    const inp = $('#cpJoinInput');
-    const code = collab.normalizeRoomId(inp?.value || '');
-    if (!code) return toast('请输入有效的房间号（3~32 位字母或数字）或邀请链接', { error: true });
-    await startCollabRoom(code, { autoCopy: false });
+    await startCollabRoom('', { autoCopy: true, isJoining: false });
   } else if (act === 'copy-link' && collabSession) {
-    await copyTextWithToast(getInviteUrl(collabSession.roomId), '✓ 邀请链接已复制到剪贴板');
-  } else if (act === 'copy-code' && collabSession) {
-    await copyTextWithToast(collabSession.roomId, `✓ 房间号 #${collabSession.roomId} 已复制`);
+    await copyTextWithToast(getInviteUrl(collabSession.roomId), '✓ 协作网址已复制，发给同伴打开即可进入画布');
   } else if (act === 'leave') {
     leaveCollabRoom();
   }
@@ -6984,10 +6971,7 @@ $('#collabPopover').addEventListener('input', (e) => {
 window.addEventListener('pagehide', () => collabSession?.stop());
 
 $('#collabPopover').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && e.target.id === 'cpJoinInput') {
-    e.preventDefault();
-    $('#collabPopover [data-collab-act="join"]')?.click();
-  } else if (e.key === 'Escape') {
+  if (e.key === 'Escape') {
     e.stopPropagation();
     toggleCollabPopover(false);
   }
@@ -7015,7 +6999,9 @@ vp.addEventListener('wheel', () => {
 async function initCollabFromUrl() {
   const room = collab.normalizeRoomId(new URLSearchParams(location.search).get('room') || '');
   if (!room) return;
-  await startCollabRoom(room, { autoCopy: false, quiet: false });
+  let wasHost = false;
+  try { wasHost = sessionStorage.getItem('wb:collabHostRoom') === room; } catch {}
+  await startCollabRoom(room, { autoCopy: false, quiet: false, isJoining: !wasHost });
 }
 
 // ---------- 启动 ----------

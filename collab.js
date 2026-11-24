@@ -298,6 +298,7 @@ export class CollabSession {
   constructor({
     roomId,
     canvasId,
+    joining = false,
     user = {},
     onEvent = () => {},
     getSnapshot = () => null,
@@ -307,11 +308,12 @@ export class CollabSession {
   }) {
     this.roomId = normalizeRoomId(roomId) || generateRoomId();
     this.canvasId = canvasId;
+    this.joining = Boolean(joining);
     this.self = {
       id: user.id || uid(),
       name: (user.name || '').trim() || `协作者 ${Math.floor(100 + Math.random() * 900)}`,
       color: user.color || COLLAB_COLORS[0].hex,
-      isHost: false,
+      isHost: !joining,
     };
     this.onEvent = onEvent;
     this.getSnapshot = getSnapshot;
@@ -337,7 +339,7 @@ export class CollabSession {
     if (this.enableWebRTC && typeof window !== 'undefined') {
       this._initWebRTC();
     } else {
-      this.self.isHost = true;
+      this.self.isHost = !this.joining;
       this.rtcStatus = 'local-only';
     }
     this._announceHello(true);
@@ -345,6 +347,11 @@ export class CollabSession {
     this.heartbeatTimer.unref?.();
     this._emit('status', this.getStatus());
     return this;
+  }
+
+  markSynced(canvasId) {
+    this.joining = false;
+    if (canvasId) this.canvasId = canvasId;
   }
 
   stop() {
@@ -456,13 +463,14 @@ export class CollabSession {
   async _initWebRTC() {
     const PeerClass = await loadPeerJS();
     if (!PeerClass || this.closed) {
-      this.self.isHost = true;
+      this.self.isHost = !this.joining;
       this.rtcStatus = 'local-only';
       this._emit('status', this.getStatus());
       return;
     }
     const hostPeerId = `fangcun-wb-v1-${this.roomId}`;
-    this._tryClaimOrJoinRTC(PeerClass, hostPeerId, true);
+    // 新加入链接的访客优先以访客身份直连房主；房主优先注册房主信令 ID
+    this._tryClaimOrJoinRTC(PeerClass, hostPeerId, !this.joining);
   }
 
   _tryClaimOrJoinRTC(PeerClass, hostPeerId, tryAsHost) {
@@ -480,6 +488,7 @@ export class CollabSession {
     peer.on('open', () => {
       if (this.closed) return;
       this.self.isHost = tryAsHost;
+      if (tryAsHost) this.joining = false;
       this.rtcStatus = 'connected';
       if (!tryAsHost) {
         const conn = peer.connect(hostPeerId, { reliable: true });
@@ -502,7 +511,7 @@ export class CollabSession {
         return;
       }
       if (!tryAsHost && err?.type === 'peer-unavailable') {
-        // 原房主已离线：当前节点自动接管房主信令 ID
+        // 原房主尚未在线：尝试接管房主信令 ID；若房主恰好先连上则会回退并保持 joining=true
         try { peer.destroy(); } catch {}
         setTimeout(() => this._tryClaimOrJoinRTC(PeerClass, hostPeerId, true), 300);
         return;
@@ -519,20 +528,23 @@ export class CollabSession {
       this.rtcConns.set(conn.peer, conn);
       this.rtcStatus = 'connected';
       this._announceHello(true);
-      const snap = this.getSnapshot();
-      if (snap) {
-        try {
-          conn.send({
-            msgId: uid(),
-            roomId: this.roomId,
-            senderId: this.self.id,
-            sender: { ...this.self },
-            ts: Date.now(),
-            type: 'welcome',
-            snapshot: snap,
-            tombstones: this.tombstones,
-          });
-        } catch {}
+      // 仅房主或已完成画布同步的节点可下发 welcome 快照；正在加入的新访客绝不发送自己的本地空画布覆盖房主！
+      if (!this.joining) {
+        const snap = this.getSnapshot();
+        if (snap) {
+          try {
+            conn.send({
+              msgId: uid(),
+              roomId: this.roomId,
+              senderId: this.self.id,
+              sender: { ...this.self },
+              ts: Date.now(),
+              type: 'welcome',
+              snapshot: snap,
+              tombstones: this.tombstones,
+            });
+          } catch {}
+        }
       }
       this._emit('status', this.getStatus());
     });
@@ -628,7 +640,7 @@ export class CollabSession {
 
     switch (pkt.type) {
       case 'hello': {
-        if (pkt.requestSync) {
+        if (pkt.requestSync && !this.joining) {
           const snap = this.getSnapshot();
           if (snap) {
             this.send('welcome', { snapshot: snap, tombstones: this.tombstones });

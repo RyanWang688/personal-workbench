@@ -229,3 +229,105 @@ test('CollabSession syncs welcome snapshot, live cursors, live shapes, PDF pages
   host.stop();
   guestB.stop();
 });
+
+test('joining guest with its own empty default canvas does NOT overwrite host canvas', async () => {
+  const buses = new Map();
+  const makeTransport = (chName, onMsg) => {
+    let subs = buses.get(chName);
+    if (!subs) buses.set(chName, (subs = new Set()));
+    const fn = (pkt) => queueMicrotask(() => onMsg(structuredClone(pkt)));
+    subs.add(fn);
+    return {
+      postMessage(pkt) {
+        for (const s of subs) if (s !== fn) s(pkt);
+      },
+      close() {
+        subs.delete(fn);
+      },
+    };
+  };
+
+  let hostBoard = {
+    canvasId: 'cv-host',
+    title: '房主原有画布',
+    _u: 500,
+    shapes: [{ id: 's-host-1', t: 'sticky', x: 50, y: 60, w: 200, h: 200, text: '房主的重要内容', _u: 500 }],
+    links: [],
+    cards: [{ id: 'c-host-1', kind: 'note', name: '设计规范', columnId: 'cv-host', x: 300, y: 60, updatedAt: 500 }],
+  };
+
+  let guestBoard = {
+    canvasId: 'cv-guest-default-empty',
+    title: '画布',
+    _u: 100,
+    shapes: [],
+    links: [],
+    cards: [],
+  };
+
+  let hostReceivedUnexpectedWelcome = false;
+  let guestReceivedHostWelcome = null;
+
+  const host = new CollabSession({
+    roomId: 'share1',
+    canvasId: 'cv-host',
+    joining: false,
+    user: { id: 'u-host', name: '房主', color: '#2563eb' },
+    enableWebRTC: false,
+    transportFactory: makeTransport,
+    getSnapshot: () => hostBoard,
+    onEvent: (type, detail) => {
+      if (type === 'welcome' || (type === 'board-sync' && detail.snapshot?.canvasId !== 'cv-host')) {
+        hostReceivedUnexpectedWelcome = true;
+      }
+      if (type === 'board-sync' && detail.snapshot?.canvasId === 'cv-host') {
+        hostBoard = detail.snapshot;
+      }
+    },
+  });
+
+  const guest = new CollabSession({
+    roomId: 'share1',
+    canvasId: 'cv-guest-default-empty',
+    joining: true,
+    user: { id: 'u-guest', name: '新访客', color: '#e11d48' },
+    enableWebRTC: false,
+    transportFactory: makeTransport,
+    getSnapshot: () => (guest.joining ? null : guestBoard),
+    onEvent: (type, detail) => {
+      if (type === 'welcome') {
+        guestReceivedHostWelcome = detail.snapshot;
+        guestBoard = structuredClone(detail.snapshot);
+        guest.markSynced(detail.snapshot.canvasId);
+      }
+    },
+  });
+
+  await host.start();
+  await guest.start();
+  await new Promise((r) => setTimeout(r, 40));
+
+  // 1. 房主绝不会收到新访客的空默认画布 welcome，房主原有内容完整保留
+  assert.equal(hostReceivedUnexpectedWelcome, false);
+  assert.equal(host.canvasId, 'cv-host');
+  assert.equal(hostBoard.shapes.length, 1);
+  assert.equal(hostBoard.shapes[0].text, '房主的重要内容');
+
+  // 2. 新访客成功收到房主画布，并将会话切换并同步至 cv-host
+  assert.ok(guestReceivedHostWelcome);
+  assert.equal(guestReceivedHostWelcome.canvasId, 'cv-host');
+  assert.equal(guest.joining, false);
+  assert.equal(guest.canvasId, 'cv-host');
+
+  // 3. 同步完成后，新访客添加的便签可以正常同步回房主（仍在 cv-host 上）
+  guestBoard.shapes.push({ id: 's-guest-2', t: 'sticky', x: 520, y: 80, w: 200, h: 200, text: '访客新想法', _u: 900 });
+  guest.send('board-sync', { snapshot: guestBoard, tombstones: guest.tombstones });
+  await new Promise((r) => setTimeout(r, 25));
+
+  assert.equal(hostBoard.canvasId, 'cv-host');
+  assert.equal(hostBoard.shapes.length, 2);
+  assert.equal(hostBoard.shapes[1].text, '访客新想法');
+
+  host.stop();
+  guest.stop();
+});
