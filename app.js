@@ -1727,19 +1727,43 @@ function renderRail(zs, nt) {
   }
   lastZoneCounts = counts;
 }
+function syncSidebarToggleChip() {
+  const chip = $('#sidebarToggleChip');
+  if (!chip) return;
+  const col = draftsCollapsed();
+  const tip = col ? '展开右侧功能区（Ctrl+\\）' : '收起右侧功能区，扩大工作空间（Ctrl+\\）';
+  chip.setAttribute('aria-pressed', String(!col));
+  chip.classList.toggle('active-panel', !col);
+  chip.title = tip;
+  chip.dataset.tip = tip;
+  chip.setAttribute('aria-label', tip);
+}
 function setDraftsCollapsed(v) {
   document.body.classList.toggle('drafts-collapsed', v);
   document.body.classList.remove('drafts-peek');
   ls.set('draftsCollapsed', v);
   $('#drafts').setAttribute('data-state', v ? 'collapsed' : 'open');
+  syncSidebarToggleChip();
   const btn = v ? $('#draftsRail .rail-expand') : $('#drafts .collapse-drafts');
-  setTimeout(() => { if (state.view && isCanvas(state.view)) positionFmt(); }, 450);
+  setTimeout(() => { if (state.view && isCanvas(state.view)) positionFmt(); if (!v) syncZoneInk(); }, 450);
   return btn;
 }
-// 拖东西靠近收起的功能区：临时弹开，放下后自动收回
+function toggleCanvasMax(force) {
+  const next = typeof force === 'boolean' ? force : !document.body.classList.contains('canvas-maximized');
+  document.body.classList.toggle('canvas-maximized', next);
+  document.body.classList.remove('drafts-peek');
+  $$('.canvas-max-btn').forEach((b) => {
+    b.setAttribute('aria-pressed', String(next));
+    b.classList.toggle('on', next);
+    b.title = next ? '退出最大化工作区（F 或 Esc）' : '最大化工作空间：隐藏顶栏与右侧功能区（快捷键 F）';
+  });
+  setTimeout(() => { if (isCanvas(state.view)) positionFmt(); }, 80);
+}
+// 拖东西靠近收起或最大化的功能区：临时弹开，放下后自动收回
 function peekDrafts(on) {
   clearTimeout(peekTimer);
-  if (on) { if (draftsCollapsed()) document.body.classList.add('drafts-peek'); return; }
+  const canPeek = draftsCollapsed() || document.body.classList.contains('canvas-maximized');
+  if (on) { if (canPeek) document.body.classList.add('drafts-peek'); return; }
   if (document.body.classList.contains('drafts-peek')) peekTimer = setTimeout(() => document.body.classList.remove('drafts-peek'), 650);
 }
 (function initDrafts() {
@@ -1750,6 +1774,7 @@ function peekDrafts(on) {
   const w = Math.min(DW_MAX, Math.max(DW_MIN, +ls.get('draftsW', 320) || 320));
   setDw(w);
   if (ls.get('draftsCollapsed', false)) { document.body.classList.add('drafts-collapsed', 'drafts-instant'); requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove('drafts-instant'))); }
+  syncSidebarToggleChip();
   // 拖左边缘调宽度；拖到很窄松手 = 收起；从收起状态往左拖 = 展开
   const rz = $('#draftsResizer'), d = $('#drafts');
   let rs = null;
@@ -1799,11 +1824,13 @@ function peekDrafts(on) {
   document.addEventListener('dragend', () => peekDrafts(false));
   document.addEventListener('drop', () => peekDrafts(false));
   document.addEventListener('dragleave', (e) => { if (!e.relatedTarget && document.body.classList.contains('drafts-peek')) peekDrafts(false); });
-  // 画布上拖卡片（指针拖动）经过功能区：同样弹开
+  // 画布上拖卡片（指针拖动）经过功能区或右边缘：同样弹开
   document.addEventListener('pointermove', (e) => {
-    if (!cardDrag?.moved || !draftsCollapsed()) return;
+    const canPeek = draftsCollapsed() || document.body.classList.contains('canvas-maximized');
+    if (!cardDrag?.moved || !canPeek) return;
     const r = d.getBoundingClientRect();
-    if (e.clientX >= r.left - 24) peekDrafts(true);
+    const edge = r.width > 0 ? r.left - 24 : innerWidth - 28;
+    if (e.clientX >= edge) peekDrafts(true);
   }, true);
   document.addEventListener('pointerup', () => { if (document.body.classList.contains('drafts-peek') && !state.dragId) peekDrafts(false); }, true);
   // 数字跳动的动画放完就去掉，下次还能再跳
@@ -3820,7 +3847,7 @@ const SHORTCUTS = [
   ['拖动', [['Shift + 拖动', '只水平或只垂直移动'], ['Alt + 拖动', '复制一份拖走（形状、文件卡片都可以）'], ['Ctrl + 拖动', '暂时关闭对齐吸附（文件卡片上是转换圆环）'], ['Shift + 拖角', '等比缩放'], ['Alt + 拖边 / 角', '以中心对称缩放'], ['Shift / Alt + 画形状', '画正方形 / 从中心向外画'], ['拖连接点到空白处', '新建一个相连的形状']]],
   ['选择', [['左键拖空白处', '拉出多选框（框选卡片与形状）'], ['Shift + 点击', '加选 / 减选'], ['Ctrl + A', '全选画布内容'], ['Enter / 双击', '编辑文字 / 预览卡片'], ['Esc / Ctrl + Enter', '结束编辑']]],
   ['编辑', [['Ctrl + Z', '撤销'], ['Ctrl + Y / Ctrl + Shift + Z', '重做'], ['Ctrl + C / X / V', '复制 / 剪切 / 粘贴'], ['Ctrl + D', '原地复制'], ['Delete', '删除'], ['方向键', '微移（Shift 每次 40）'], ['Ctrl + 方向键', '在该方向新建相连形状'], ['Ctrl + ] / [', '置于顶层 / 底层'], ['Ctrl + B', '加粗'], ['Ctrl + Shift + . / ,', '放大 / 缩小字号']]],
-  ['视图', [['鼠标中键 + 拖动', '平移画布（或空格 + 拖动）'], ['Ctrl + 滚轮', '缩放'], ['Shift + 1', '显示全部'], ['Shift + 2', '缩放到选中'], ['Shift + 0', '回到 100%'], ['?', '打开这张速查表']]],
+  ['视图', [['F', '最大化工作空间 / 沉浸模式'], ['鼠标中键 + 拖动', '平移画布（或空格 + 拖动）'], ['Ctrl + 滚轮', '缩放'], ['Shift + 1', '显示全部'], ['Shift + 2', '缩放到选中'], ['Shift + 0', '回到 100%'], ['?', '打开这张速查表']]],
 ];
 function showShortcuts() {
   const m = $('#modal');
@@ -3856,7 +3883,8 @@ document.addEventListener('keydown', (e) => {
     renderCanvas();
     return;
   }
-  // 视图：Shift+1 显示全部，Shift+2 缩放到选中，Shift+0 回到 100%；? 打开快捷键速查
+  // 视图：F 最大化工作区，Shift+1 显示全部，Shift+2 缩放到选中，Shift+0 回到 100%；? 打开快捷键速查
+  if (!mod && !e.shiftKey && k === 'f' && !onCard) { e.preventDefault(); toggleCanvasMax(); return; }
   if (!mod && e.shiftKey && e.code === 'Digit1') { e.preventDefault(); zoomFit(); return; }
   if (!mod && e.shiftKey && e.code === 'Digit2') { e.preventDefault(); zoomToSelection(); return; }
   if (!mod && e.shiftKey && e.code === 'Digit0') { e.preventDefault(); zoomAt(1 / cam().z, null, null, true); return; }
@@ -3866,6 +3894,7 @@ document.addEventListener('keydown', (e) => {
     if (state.tool !== 'select') { setTool('select'); e.stopPropagation(); }
     else if (fmtPop) { fmtPop = null; positionFmt(); e.stopPropagation(); }
     else if (sel) { selectBoard(null); e.stopPropagation(); }
+    else if (document.body.classList.contains('canvas-maximized') && !state.selected.size && !state.pickedCard) { toggleCanvasMax(false); e.stopPropagation(); }
     return;
   }
   if (!sel) return;
@@ -4147,6 +4176,7 @@ async function pickCanvas(exceptId) {
     (f) => f.querySelector('[name="canvas"]:checked')?.value);
 }
 function setView(v) {
+  if (!isCanvas(v) && document.body.classList.contains('canvas-maximized')) toggleCanvasMax(false);
   state.view = v;
   ls.set('view', v);
 }
@@ -5875,6 +5905,8 @@ document.addEventListener('click', async (e) => {
     case 'toggle-theme': return toggleTheme(btn);
     case 'collapse-drafts': return setDraftsCollapsed(true)?.focus({ preventScroll: true });
     case 'expand-drafts': return setDraftsCollapsed(false)?.focus({ preventScroll: true });
+    case 'toggle-drafts-rail': return setDraftsCollapsed(!draftsCollapsed());
+    case 'canvas-max': return toggleCanvasMax();
     case 'toggle-drafts': {
       const open = document.body.classList.toggle('drafts-open');
       $('.drafts-toggle').setAttribute('aria-expanded', String(open));
