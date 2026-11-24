@@ -112,11 +112,37 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .icon-btn { width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 8px; background: transparent; color: var(--text-2); }
 .icon-btn:hover { background: var(--surface-3); color: var(--text); }
 
-.status-chip { border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 2px 10px; font-size: 12px; color: var(--text-2); display: inline-flex; align-items: center; gap: 6px; }
-.status-chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); }
-.status-chip.ok::before { background: var(--ok); }
-.status-chip.warn { background: var(--warn-soft); border-color: transparent; color: var(--warn); }
-.status-chip.warn::before { background: var(--warn); }
+.status-chip, .assoc-chip {
+  position: relative; width: 32px; height: 32px; padding: 0; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  display: inline-grid; place-items: center; flex-shrink: 0;
+  transition: transform .28s cubic-bezier(.22, 1.4, .36, 1), background .18s, border-color .18s, color .18s;
+}
+.status-chip svg, .assoc-chip svg { width: 16px; height: 16px; }
+.status-chip:hover, .assoc-chip:hover {
+  background: var(--surface-2); color: var(--text); transform: translateY(-1.5px) scale(1.05);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+.status-chip:active, .assoc-chip:active { transform: scale(.92); }
+.status-chip .st-dot {
+  position: absolute; right: 4px; bottom: 4px; width: 6.5px; height: 6.5px; border-radius: 50%;
+  background: var(--text-3); box-shadow: 0 0 0 1.5px var(--surface);
+}
+.status-chip.ok .st-dot { background: var(--ok); }
+.status-chip.warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 35%, transparent); color: var(--warn); }
+.status-chip.warn .st-dot { background: var(--warn); }
+/* 纯图标悬停弹性文字提示 */
+.status-chip[data-tip]:hover::after, .assoc-chip[data-tip]:hover::after {
+  content: attr(data-tip); position: absolute; top: calc(100% + 8px); right: 0; z-index: 50;
+  white-space: nowrap; padding: 5px 10px; border-radius: 8px;
+  background: var(--text); color: var(--bg); font-size: 12px; font-weight: 500;
+  box-shadow: var(--shadow-lg); pointer-events: none;
+  animation: statusTipIn .22s cubic-bezier(.22, 1.4, .36, 1);
+}
+@keyframes statusTipIn {
+  from { opacity: 0; transform: translateY(-4px) scale(.94); }
+  to { opacity: 1; transform: none; }
+}
 
 /* ---------- 页面切换栏 ---------- */
 .viewbar { display: flex; align-items: center; gap: 12px; padding: 8px 20px; }
@@ -653,15 +679,36 @@ body.file-over .drop-overlay { display: flex; }
 
 /* ---------- 草稿区 ---------- */
 .drafts { width: 320px; flex-shrink: 0; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--surface); }
-.drafts-head { display: flex; align-items: center; padding: 10px 10px 0 12px; gap: 6px; }
-.zone-tabs { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; background: var(--surface-2); padding: 3px; border-radius: 10px; }
-.tab { flex: 1 0 auto; display: inline-flex; align-items: center; justify-content: center; gap: 3px; border: 0; background: transparent; border-radius: 8px; padding: 6px 9px; color: var(--text-2); font-weight: 550; white-space: nowrap; transition: background .15s; }
-.tab:hover { color: var(--text); }
-.tab b { font-weight: 600; color: var(--text-3); margin-left: 2px; }
-.tab svg { width: 16px; height: 16px; }
-.tab[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
-.tab.trash-tab, .tab.add-zone { flex: 0 0 auto; padding: 6px 8px; }
-.tab.add-zone { color: var(--text-3); }
+.drafts-head { display: flex; align-items: center; padding: 6px 12px 0; gap: 6px; }
+.zone-tabs {
+  position: relative; display: flex; flex-wrap: nowrap; align-items: center; gap: 2px; flex: 1; min-width: 0;
+  background: transparent; padding: 0; border-radius: 0; border-bottom: 1px solid var(--border);
+  overflow-x: auto; scrollbar-width: none;
+}
+.zone-tabs::-webkit-scrollbar { display: none; }
+.tab {
+  position: relative; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  border: 0; background: transparent; border-radius: 8px 8px 0 0; padding: 8px 8px 10px;
+  color: var(--text-3); font-size: 13px; font-weight: 550; white-space: nowrap;
+  transition: color .2s, background .18s, transform .28s cubic-bezier(.22, 1.4, .36, 1);
+}
+.tab:hover { color: var(--text-2); background: color-mix(in srgb, var(--surface-2) 55%, transparent); }
+.tab:active { transform: scale(.93); }
+.tab b {
+  font-weight: 600; font-size: 11.5px; color: var(--text-3); margin-left: 1px;
+  transition: color .2s, transform .3s cubic-bezier(.22, 1.4, .36, 1);
+}
+.tab svg { width: 15px; height: 15px; }
+.tab[aria-selected="true"] { background: transparent; color: var(--text); font-weight: 650; box-shadow: none; }
+.tab[aria-selected="true"] b { color: var(--accent); transform: scale(1.08); }
+.tab.trash-tab, .tab.add-zone { flex: 0 0 auto; padding: 8px 7px 10px; }
+.tab.add-zone { color: var(--text-3); margin-left: auto; }
+.zone-ink {
+  position: absolute; bottom: 0; left: 0; width: 0; height: 2.5px; border-radius: 999px;
+  background: var(--accent); pointer-events: none; transform-origin: center bottom;
+  box-shadow: 0 -1px 8px color-mix(in srgb, var(--accent) 45%, transparent);
+  transition: left .38s cubic-bezier(.22, 1.35, .36, 1), width .38s cubic-bezier(.22, 1.35, .36, 1);
+}
 .close-drafts { display: none; }
 .zone-bar { display: flex; align-items: flex-start; gap: 4px; padding: 8px 8px 2px 14px; }
 .drafts-desc { margin: 4px 0; flex: 1; font-size: 12px; color: var(--text-3); }
@@ -674,6 +721,12 @@ body.file-over .drop-overlay { display: flex; }
 
 /* ---------- 功能区：收起 / 调宽 / 弹开（宽屏） ---------- */
 @media (min-width: 1001px) {
+  .viewbar .status {
+    margin-right: var(--dw, 320px);
+    transition: margin-right .46s cubic-bezier(.2, 1.15, .32, 1);
+  }
+  body.drafts-collapsed:not(.drafts-peek) .viewbar .status { margin-right: 64px; }
+  body.drafts-resizing .viewbar .status { transition: none; }
   .drafts { --rail: 64px; position: relative; overflow: hidden; width: var(--dw, 320px);
     transition: width .46s cubic-bezier(.2, 1.15, .32, 1), box-shadow .3s, border-color .3s; }
   .drafts-main { min-width: calc(var(--dw, 320px) - 1px); transition: opacity .22s ease .08s, transform .42s cubic-bezier(.2, 1, .3, 1), filter .3s; }
@@ -965,9 +1018,11 @@ b.bump { display: inline-block; border-radius: 6px; padding: 0 3px; }
 .suggest-badge { display: inline-flex; align-items: center; height: 17px; margin-left: 6px; padding: 0 7px; border-radius: 9px; vertical-align: 1px;
   border: 1px dashed color-mix(in srgb, var(--warn) 70%, transparent); background: var(--warn-soft); color: var(--warn); font-size: 11px; font-weight: 600; cursor: pointer; transition: transform .15s, background .15s; }
 .suggest-badge:hover { transform: translateY(-1px); background: color-mix(in srgb, var(--warn) 22%, var(--surface)); }
-.assoc-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 2px 10px; font-size: 12px; color: var(--text-2); }
-.assoc-chip svg { width: 14px; height: 14px; }
-.assoc-chip b { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; display: inline-grid; place-items: center; background: var(--warn); color: #fff; font-size: 11px; }
+.assoc-chip b {
+  position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 999px; display: inline-grid; place-items: center;
+  background: var(--warn); color: #fff; font-size: 10px; font-weight: 700; box-shadow: 0 0 0 1.5px var(--surface);
+}
 .assoc-chip.has { border-color: color-mix(in srgb, var(--warn) 50%, var(--border)); color: var(--warn); animation: chip-pulse 2.4s ease-in-out 2; }
 @keyframes chip-pulse { 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 20%, transparent); } }
 .modal.wide { width: min(640px, calc(100vw - 32px)); }

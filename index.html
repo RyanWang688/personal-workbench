@@ -13,7 +13,7 @@
     // 尽早应用主题，避免刷新时闪一下
     try { var t = JSON.parse(localStorage.getItem('wb:theme') || '"auto"'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
   </script>
-  <link rel="stylesheet" href="style.css?v=40">
+  <link rel="stylesheet" href="style.css?v=41">
 </head>
 <body>
   <header class="topbar">
@@ -62,9 +62,9 @@
   <nav class="viewbar" aria-label="页面">
     <div class="views" id="views" role="tablist"></div>
     <div class="status">
-      <button class="assoc-chip" data-action="assoc-panel" id="assocChip">智能关联</button>
-      <button class="status-chip" data-action="storage-info" id="storageChip">正在检查存储…</button>
-      <button class="status-chip" data-action="backup" id="backupChip">尚未备份</button>
+      <button class="assoc-chip icon-chip" data-action="assoc-panel" id="assocChip" aria-label="智能关联" title="智能关联"></button>
+      <button class="status-chip icon-chip" data-action="storage-info" id="storageChip" aria-label="存储状态" title="正在检查存储…"></button>
+      <button class="status-chip icon-chip" data-action="backup" id="backupChip" aria-label="备份状态" title="尚未备份"></button>
     </div>
   </nav>
 
@@ -156,6 +156,6 @@
   <input type="file" id="fileInput" multiple hidden>
   <input type="file" id="restoreInput" accept=".wbk" hidden>
   <noscript>此工作台需要启用 JavaScript。</noscript>
-  <script type="module" src="app.js?v=47"></script>
+  <script type="module" src="app.js?v=48"></script>
 </body>
 </html>

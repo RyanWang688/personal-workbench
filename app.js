@@ -1632,9 +1632,13 @@ document.addEventListener('submit', (e) => {
 function renderZones() {
   const zs = zones();
   const nt = cardsIn(TRASH, false).length;
-  $('#zoneTabs').innerHTML = zs.map((z) => `<button role="tab" class="tab" data-zone="${z.id}" data-drop="${z.id}" aria-selected="${state.zone === z.id}">${esc(z.title)} <b>${cardsIn(z.id, false).length}</b></button>`).join('')
+  const zt = $('#zoneTabs');
+  const oldTab = zt?.querySelector('.tab[aria-selected="true"]');
+  const prevInk = oldTab ? { left: oldTab.offsetLeft, width: oldTab.offsetWidth, zone: oldTab.dataset.zone } : null;
+  zt.innerHTML = zs.map((z) => `<button role="tab" class="tab" data-zone="${z.id}" data-drop="${z.id}" aria-selected="${state.zone === z.id}"><span>${esc(z.title)}</span><b>${cardsIn(z.id, false).length}</b></button>`).join('')
     + `<button role="tab" class="tab trash-tab" data-zone="${TRASH}" data-drop="${TRASH}" aria-selected="${state.zone === TRASH}" title="回收站"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg><b>${nt}</b></button>`
-    + `<button class="tab add-zone" data-action="add-zone" title="新建功能区" aria-label="新建功能区"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>`;
+    + `<button class="tab add-zone" data-action="add-zone" title="新建功能区" aria-label="新建功能区"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>`
+    + `<i class="zone-ink" id="zoneInk" aria-hidden="true"></i>`;
   const z = area(state.zone);
   const dl = $('#draftsList');
   dl.dataset.col = state.zone;
@@ -1647,6 +1651,47 @@ function renderZones() {
   $('#draftsFoot').innerHTML = state.zone === TRASH && nt ? `<button class="btn" data-action="empty-trash">清空回收站</button>` : '';
   $('#zonesBadge').textContent = zs.reduce((n, z2) => n + cardsIn(z2.id, false).length, 0);
   renderRail(zs, nt);
+  syncZoneInk(prevInk);
+}
+function syncZoneInk(prevInk = null) {
+  const zt = $('#zoneTabs'), ink = $('#zoneInk'), active = zt?.querySelector('.tab[aria-selected="true"]');
+  if (!zt || !ink || !active) return;
+  const pad = 6;
+  const nextLeft = active.offsetLeft + pad;
+  const nextW = Math.max(16, active.offsetWidth - pad * 2);
+  ink.style.left = `${nextLeft}px`;
+  ink.style.width = `${nextW}px`;
+  if (prevInk && prevInk.zone && prevInk.zone !== state.zone && prevInk.width > 0 && !reduceMotion.matches) {
+    const fromLeft = prevInk.left + pad;
+    const fromW = Math.max(16, prevInk.width - pad * 2);
+    const dir = nextLeft >= fromLeft ? 1 : -1;
+    const minL = Math.min(fromLeft, nextLeft), maxR = Math.max(fromLeft + fromW, nextLeft + nextW);
+    const stretchW = Math.min(maxR - minL, Math.max(fromW, nextW) * 1.9);
+    const midLeft = dir > 0 ? (nextLeft + nextW - stretchW) : nextLeft;
+    const overshootLeft = nextLeft + dir * 3.5;
+    ink.animate([
+      { left: `${fromLeft}px`, width: `${fromW}px`, transform: 'scaleY(1)' },
+      { left: `${midLeft}px`, width: `${stretchW}px`, transform: 'scaleY(1.3)', offset: 0.36 },
+      { left: `${overshootLeft}px`, width: `${Math.max(12, nextW * 0.92)}px`, transform: 'scaleY(0.94)', offset: 0.74 },
+      { left: `${nextLeft}px`, width: `${nextW}px`, transform: 'scaleY(1)' },
+    ], { duration: 420, easing: 'cubic-bezier(.22, 1, .36, 1)' });
+    active.animate([
+      { transform: 'translateY(0) scale(1)' },
+      { transform: 'translateY(-2px) scale(1.06)', offset: 0.38 },
+      { transform: 'translateY(0.5px) scale(0.98)', offset: 0.74 },
+      { transform: 'translateY(0) scale(1)' },
+    ], { duration: 380, easing: 'cubic-bezier(.22, 1.4, .36, 1)' });
+    const dl = $('#draftsList'), dd = $('#draftsDesc');
+    dl?.animate([
+      { opacity: 0.35, transform: `translateX(${dir * 14}px) scale(.985)` },
+      { opacity: 1, transform: `translateX(${-dir * 2}px) scale(1.003)`, offset: 0.68 },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 360, easing: 'cubic-bezier(.22, 1, .36, 1)' });
+    dd?.animate([
+      { opacity: 0.3, transform: `translateX(${dir * 8}px)` },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 280, easing: 'cubic-bezier(.22, 1, .36, 1)' });
+  }
 }
 
 // ---------- 功能区：可收起成窄侧栏、拖左边缘调宽度、拖东西过来自动弹开 ----------
@@ -1698,8 +1743,12 @@ function peekDrafts(on) {
   if (document.body.classList.contains('drafts-peek')) peekTimer = setTimeout(() => document.body.classList.remove('drafts-peek'), 650);
 }
 (function initDrafts() {
+  const setDw = (val) => {
+    $('#drafts').style.setProperty('--dw', `${val}px`);
+    document.body.style.setProperty('--dw', `${val}px`);
+  };
   const w = Math.min(DW_MAX, Math.max(DW_MIN, +ls.get('draftsW', 320) || 320));
-  $('#drafts').style.setProperty('--dw', `${w}px`);
+  setDw(w);
   if (ls.get('draftsCollapsed', false)) { document.body.classList.add('drafts-collapsed', 'drafts-instant'); requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove('drafts-instant'))); }
   // 拖左边缘调宽度；拖到很窄松手 = 收起；从收起状态往左拖 = 展开
   const rz = $('#draftsResizer'), d = $('#drafts');
@@ -1720,17 +1769,18 @@ function peekDrafts(on) {
     d.classList.remove('will-collapse');
     if (draftsCollapsed()) setDraftsCollapsed(false);
     rs.cur = Math.min(DW_MAX, Math.max(DW_MIN, w));
-    d.style.setProperty('--dw', `${rs.cur}px`);
+    setDw(rs.cur);
+    syncZoneInk();
   });
   const end = () => {
     if (!rs) return;
     document.body.classList.remove('drafts-resizing');
     if (d.classList.contains('will-collapse')) {
       // 拖窄到收起：宽度恢复成上次保存的值，下次展开还是原来的宽度
-      d.style.setProperty('--dw', `${Math.min(DW_MAX, Math.max(DW_MIN, +ls.get('draftsW', 320) || 320))}px`);
+      setDw(Math.min(DW_MAX, Math.max(DW_MIN, +ls.get('draftsW', 320) || 320)));
       d.classList.remove('will-collapse'); setDraftsCollapsed(true);
     }
-    else if (rs.cur) { ls.set('draftsW', Math.round(rs.cur)); if (isCanvas(state.view)) positionFmt(); }
+    else if (rs.cur) { ls.set('draftsW', Math.round(rs.cur)); if (isCanvas(state.view)) positionFmt(); syncZoneInk(); }
     rs = null;
   };
   rz.addEventListener('pointerup', end);
@@ -4599,6 +4649,8 @@ async function requestPersist() {
   if (!(await navigator.storage.persisted())) await navigator.storage.persist().catch(() => {});
   refreshStatus();
 }
+const STORAGE_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M3 13h18"/><circle cx="7.5" cy="16" r="1" fill="currentColor" stroke="none"/><circle cx="11.5" cy="16" r="1" fill="currentColor" stroke="none"/></svg>`;
+const BACKUP_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 6v5.5c0 5 3.2 8.7 7.5 10 4.3-1.3 7.5-5 7.5-10V6z"/><path d="m9 12 2 2 4-4"/></svg>`;
 async function refreshStatus() {
   const chip = $('#storageChip');
   let persisted = false, used = 0, quota = 0;
@@ -4608,24 +4660,35 @@ async function refreshStatus() {
   } catch {}
   let mode = 'idb', perm = 'none', dir = null;
   try { mode = await db.storageMode(); if (mode === 'folder') { dir = await db.getDir(); perm = await db.dirPermission(); } } catch {}
+  let stTip, stCls;
   if (mode === 'folder' && perm !== 'granted') {
-    chip.textContent = `存储文件夹「${dir?.name}」需要授权 · 点此授权`;
-    chip.className = 'status-chip warn';
+    stTip = `存储文件夹「${dir?.name}」需要授权 · 点此授权`;
+    stCls = 'status-chip icon-chip warn';
   } else if (mode === 'folder') {
-    chip.textContent = `文件存在「${dir?.name}」· 容量随硬盘`;
-    chip.className = 'status-chip ok';
+    stTip = `文件存在「${dir?.name}」· 容量随硬盘`;
+    stCls = 'status-chip icon-chip ok';
   } else {
-    chip.textContent = `已用 ${fmtSize(used)}${quota ? ` / ${fmtSize(quota)}` : ''} · ${persisted ? '持久存储' : '普通存储'}`;
-    chip.className = `status-chip ${persisted && (!quota || used / quota < 0.8) ? 'ok' : 'warn'}`;
+    stTip = `已用 ${fmtSize(used)}${quota ? ` / ${fmtSize(quota)}` : ''} · ${persisted ? '持久存储' : '普通存储'}`;
+    stCls = `status-chip icon-chip ${persisted && (!quota || used / quota < 0.8) ? 'ok' : 'warn'}`;
     // 浏览器空间用到八成时提醒扩容
     if (quota && used / quota > 0.8 && !refreshStatus.warned) { refreshStatus.warned = true; toast('浏览器存储快满了，可以在「存储与容量」里把文件改存到电脑文件夹来扩容', { action: '去设置', onAction: storageInfo }); }
   }
+  chip.innerHTML = `${STORAGE_SVG}<i class="st-dot" aria-hidden="true"></i>`;
+  chip.className = stCls;
+  chip.title = stTip;
+  chip.dataset.tip = stTip;
+  chip.setAttribute('aria-label', stTip);
+
   let lastBackup = 0, lastChange = 0;
   try { [lastBackup, lastChange] = await Promise.all([db.getMeta('lastBackup', 0), db.getMeta('lastChange', 0)]); } catch { return; }
   const bc = $('#backupChip');
   const stale = state.cards.length && lastChange > lastBackup && (!lastBackup || Date.now() - lastBackup > 3 * 86400e3);
-  bc.textContent = lastBackup ? `上次备份 ${ago(lastBackup)}${lastChange > lastBackup ? ' · 有新改动' : ''}` : '尚未备份';
-  bc.className = `status-chip ${stale ? 'warn' : lastBackup ? 'ok' : ''}`;
+  const bkTip = lastBackup ? `上次备份 ${ago(lastBackup)}${lastChange > lastBackup ? ' · 有新改动（点击立即备份）' : '（点击立即备份）'}` : '尚未备份（点击立即备份）';
+  bc.innerHTML = `${BACKUP_SVG}<i class="st-dot" aria-hidden="true"></i>`;
+  bc.className = `status-chip icon-chip ${stale ? 'warn' : lastBackup ? 'ok' : ''}`;
+  bc.title = bkTip;
+  bc.dataset.tip = bkTip;
+  bc.setAttribute('aria-label', bkTip);
 }
 // 文件存在电脑文件夹时，读取前确认已授权（必须在用户点击里调用，浏览器才会弹出授权）
 async function ensureAccess() {
@@ -5472,9 +5535,13 @@ function renderAssocChip() {
   const chip = $('#assocChip');
   if (!chip) return;
   const n = state.suggestions?.length || 0;
-  chip.innerHTML = `${SPARK_SVG}智能关联${n ? `<b>${n}</b>` : ''}`;
+  const tip = n ? `智能关联：发现 ${n} 条可能的项目关联，点击查看` : '智能关联：自动关联设置与已识别的项目';
+  chip.innerHTML = `${SPARK_SVG}${n ? `<b>${n}</b>` : ''}`;
   chip.classList.toggle('has', n > 0);
-  chip.title = n ? `发现 ${n} 条可能的项目关联，点击查看` : '自动关联设置与已识别的项目';
+  chip.classList.add('icon-chip');
+  chip.title = tip;
+  chip.dataset.tip = tip;
+  chip.setAttribute('aria-label', tip);
 }
 function assocPanelHTML() {
   buildGroups();
