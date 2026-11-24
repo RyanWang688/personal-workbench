@@ -1,6 +1,7 @@
 import * as db from './db.js?v=6';
 import * as pv from './preview.js?v=7';
 import * as collab from './collab.js?v=6';
+import * as rn from './rename.js?v=1';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -190,6 +191,7 @@ const highlight = (s) => {
   return t.replace(new RegExp(q, 'gi'), (m) => `<mark>${m}</mark>`);
 };
 const MORE = `<button class="more" data-action="card-menu" aria-label="更多操作" aria-haspopup="menu"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>`;
+const RENAME_BTN = `<button type="button" class="quick-rename-btn" data-action="quick-rename" title="快速重命名（F2 · Tab 连续改下一个）" aria-label="快速重命名"><svg viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="m13.5 6.5 3 3"/></svg></button>`;
 const HANDLE = `<span class="export-handle" draggable="true" title="拖到桌面导出"><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg></span>`;
 const fmtDur = (s) => { s = Math.round(s || 0); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 function metaText(c, t) {
@@ -376,7 +378,7 @@ function cardHTML(c, onCanvas = false) {
     ? `draggable="false" style="left:${Math.round(c.x || 0)}px;top:${Math.round(c.y || 0)}px;width:${cw}px;z-index:${Math.max(1, Math.round(c.order) || 1)}"`
     : `draggable="${IS_TOUCH ? 'false' : 'true'}"`;
   const cls = `card${onCanvas ? ' on-canvas' : ''}${onCanvas && state.pickedCard === c.id ? ' picked' : ''}${isCanvasImg ? ' canvas-hd-card' : ''}${isCanvasPdf ? ' canvas-pdf-card' : ''}${onCanvas && !matches(c) ? ' dim' : ''}${state.selected.has(c.id) ? ' selected' : ''}${PRIO[c.prio] ? ` prio-${c.prio}` : ''}`;
-  const extra = (onCanvas ? HANDLE + EXPAND_BTN(c.id) + CARD_HANDLES : '') + (c.columnId !== TRASH ? selBtn(c) : '');
+  const extra = (onCanvas ? HANDLE + EXPAND_BTN(c.id) + CARD_HANDLES : '') + (c.columnId !== TRASH ? selBtn(c) + RENAME_BTN : '');
   if (c.kind === 'note') {
     return `<article class="${cls} note" ${attrs} tabindex="0" data-id="${c.id}" aria-label="便签 ${esc(c.name)}">
       <div class="body"><div class="name">${prioTag(c)}${highlight(c.name || '便签')}</div>
@@ -677,6 +679,7 @@ function renderArchive() {
           <h2><span class="title-sw" aria-hidden="true"></span>${esc(f.title)}</h2>
           <div class="meta">${folderMeta(f)} · 归档于 ${fmtDate(f.doneAt || Date.now())}</div>
         </div>
+        <button class="btn" data-action="batch-rename-folder" ${own ? '' : 'disabled'} title="逐张预览或按序号一键批量重命名当前文件夹内的文件（F2）"><svg viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="m13.5 6.5 3 3"/></svg><span>快速重命名</span></button>
         <button class="btn" data-action="add-subfolder"><svg viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></svg><span>新建子文件夹</span></button>
         <button class="btn" data-action="folder-zip" ${n ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg><span>打包下载</span></button>
         <button class="icon-btn" data-action="folder-menu" aria-label="文件夹设置" aria-haspopup="menu">${DOTS}</button>
@@ -1581,6 +1584,7 @@ function exportChangelog(w) {
 function workMenu(anchor, w) {
   if (!w) return;
   const items = [{ text: '编辑…', run: () => editWork(w) }];
+  if (cardsIn(w.id, false).length) items.push({ text: '快速重命名文件…', run: () => openBatchRename(cardsIn(w.id, false), w.title) });
   if (safeUrl(w.url)) items.push({ text: '预览网站', run: () => previewSite(w) });
   if (w.repo) items.push({ text: '同步 GitHub 更新日志', run: () => syncMany([w]) });
   items.push({ text: '导出更新日志（Markdown）', run: () => exportChangelog(w) });
@@ -2226,7 +2230,7 @@ vp.addEventListener('pointerdown', (e) => {
   }
   if (!forcePan && pointers.size === 0 && boardDown(e)) return; // 白板：形状、连线、工具、左键空白处框选
   const cardEl = forcePan ? null : e.target.closest('.card');
-  if (cardEl && !e.target.closest('.more, .export-handle, .card-expand-btn, .pdf-page-bar, [data-card-handle]')) {
+  if (cardEl && !e.target.closest('.more, .export-handle, .card-expand-btn, .pdf-page-bar, .quick-rename-btn, .inline-rn-wrap, [data-card-handle]')) {
     const card = findCard(cardEl.dataset.id);
     if (cardEl.classList.contains('on-canvas')) pickCanvasCard(card.id);
     const isMulti = cardEl.classList.contains('on-canvas') && !e.altKey && state.selected.has(card.id) && (state.selected.size > 1 || selShapes().length > 0);
@@ -2563,7 +2567,7 @@ vp.addEventListener('dblclick', async (e) => {
   if (hit.closest('.comment-pin, .comment-thread-pop, .comments-popover') || e.target.closest('.comment-pin, .comment-thread-pop, .comments-popover')) return;
   const hitCard = hit.closest('.card.on-canvas') || e.target.closest('.card.on-canvas');
   if (hitCard) {
-    if (hit.closest('.pdf-page-bar, [data-card-handle], .more, .sel, .export-handle, .card-expand-btn')) return;
+    if (hit.closest('.pdf-page-bar, [data-card-handle], .more, .sel, .export-handle, .card-expand-btn, .quick-rename-btn, .inline-rn-wrap')) return;
     return preview(hitCard.dataset.id);
   }
   if (hit.closest('.card, .fmt-bar, .canvas-palette, .canvas-tools, .canvas-workspace-head') || e.target.closest('.card, .fmt-bar')) return;
@@ -3062,7 +3066,7 @@ function boardDown(e) {
     bd = { ...base, mode: 'link', lid: l.id, end: lend.dataset.lend, from: lend.dataset.lend === 'from' ? l.to : l.from, cur: p };
     capture(); hideDots(); return true;
   }
-  if (dot || (state.tool === 'arrow' && !e.target.closest('.more, .export-handle, .sel'))) {
+  if (dot || (state.tool === 'arrow' && !e.target.closest('.more, .export-handle, .sel, .quick-rename-btn, .inline-rn-wrap'))) {
     const owner = dot ? hoverRef : (shapeEl?.dataset.sid || (cardEl && cardEl.classList.contains('on-canvas') ? cardEl.dataset.id : null));
     bd = { ...base, mode: 'link', fromDot: !!dot, from: owner ? { id: owner } : { x: Math.round(p.x), y: Math.round(p.y) }, cur: p };
     capture(); hideDots(); e.preventDefault(); return true;
@@ -4415,7 +4419,7 @@ function dialog(html, onSubmit) {
     m.oncancel = () => finish(null);
     m.onclose = () => finish(null);
     m.showModal();
-    const first = f.querySelector('[autofocus], input, textarea');
+    const first = f.querySelector('[autofocus]') || f.querySelector('input, textarea');
     if (first) { first.focus(); first.select?.(); }
   });
 }
@@ -4705,9 +4709,7 @@ function cardMenu(anchor, card) {
   } });
   items.push({ text: card.kind === 'note' ? '编辑' : '预览', run: () => preview(card.id) },
     { text: '下载', run: () => download(card.id) },
-    { text: '重命名', run: async () => {
-      const n = await prompt({ title: '重命名', value: card.name, ok: '保存' });
-      if (n && n !== card.name) { card.name = n; await saveCard(card); await changed(); } } });
+    { text: '重命名', run: () => startInlineRename(card.id) });
   if (isCanvas(card.columnId)) {
     items.push({ text: '添加备注评论…', run: () => openCommentDraftOnTarget(card.id) });
   }
@@ -4740,6 +4742,7 @@ function areaMenu(anchor, a) {
   const list = areasOf(kind), i = list.indexOf(a);
   const prev = kind === 'column' ? '向左移' : '前移', next = kind === 'column' ? '向右移' : '后移';
   const items = [{ text: '重命名', run: () => renameArea(a) }];
+  if (cardsIn(a.id, false).length) items.push({ text: '快速重命名文件…', run: () => openBatchRename(cardsIn(a.id, false), a.title) });
   if (kind !== 'canvas' && kind !== 'folder') items.push({ text: '添加便签', run: () => newNote(a.id) });
   if (kind === 'column') items.push({ text: '整列归档到已完成项目…', run: () => archiveColumn(a) });
   if (kind === 'folder') {
@@ -5021,7 +5024,7 @@ document.addEventListener('pointerdown', (e) => {
   pressFired = false;
   if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
   const el = e.target.closest?.('.card');
-  if (!el || e.target.closest('.more, .export-handle, .card-expand-btn, .sel, .suggest-badge, .pdf-page-bar, [data-card-handle]')) return;
+  if (!el || e.target.closest('.more, .export-handle, .card-expand-btn, .sel, .suggest-badge, .pdf-page-bar, .quick-rename-btn, .inline-rn-wrap, [data-card-handle]')) return;
   const card = findCard(el.dataset.id);
   if (!card || !isActive(card)) return;
   cancelPress();
@@ -5596,6 +5599,7 @@ function renderSelBar() {
   bar.innerHTML = `<span class="sel-count">已选 <b>${ids.length}</b> 个</span>
     <button class="sel-btn" data-action="sel-clear" title="取消勾选（Esc）">取消勾选</button>
     <button class="sel-btn primary" data-action="sel-done" ${active.length ? '' : 'disabled'}>${CHECK_SVG}<span>一起完成并打包</span></button>
+    <button class="sel-btn" data-action="sel-rename" title="快速批量重命名已选文件（F2）"><svg viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="m13.5 6.5 3 3"/></svg><span>快速重命名</span></button>
     ${canvasSel.length >= 2 ? `<button class="sel-btn" data-action="sel-align" aria-haspopup="menu" title="对齐与分布选中的画布卡片"><svg viewBox="0 0 24 24"><path d="M4 4v16M8 7h12v4H8zM8 14h8v4H8z"/></svg><span>自动对齐…</span></button>` : ''}
     <button class="sel-btn" data-action="sel-link" ${active.length > 1 ? '' : 'disabled'} title="以后长按其中任意一个都会整组打包">${LINK_SVG}<span>关联为一个项目</span></button>
     <button class="sel-btn" data-action="sel-prio" aria-haspopup="menu" title="设置优先级（也可按 1 / 2 / 3，0 清除）"><span class="prio" style="--pc:#e03131">急</span><span>优先级</span></button>
@@ -5908,6 +5912,7 @@ document.addEventListener('click', async (e) => {
   const zoneTab = e.target.closest('[data-zone]');
   if (zoneTab) { state.zone = zoneTab.dataset.zone; ls.set('zone', state.zone); return renderZones(), loadThumbs(); }
   const cardEl = e.target.closest('.card');
+  if (cardEl && e.target.closest('.inline-rn-wrap')) return;
   const colEl = e.target.closest('.column');
   const col = colEl && area(colEl.dataset.colId);
   // Shift 点击卡片或勾选按钮时，范围以当前列表中的卡片顺序为准。
@@ -5925,6 +5930,12 @@ document.addEventListener('click', async (e) => {
     return;
   }
   switch (btn.dataset.action) {
+    case 'quick-rename': return startInlineRename(cardEl?.dataset.id || btn.closest('.card')?.dataset.id);
+    case 'batch-rename-folder': {
+      const fid = openFolder();
+      return fid && openBatchRename(cardsIn(fid, false), area(fid)?.title);
+    }
+    case 'sel-rename': return openBatchRename([...state.selected].map(findCard).filter(Boolean), '已选文件');
     case 'card-preview': return preview(btn.dataset.id || cardEl?.dataset.id);
     case 'pdf-prev': {
       const c = findCard(btn.dataset.id || cardEl?.dataset.id);
@@ -6083,6 +6094,14 @@ document.addEventListener('keydown', (e) => {
     }
   }
   if (e.target.matches?.('[data-folder], [data-work]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); e.target.click(); }
+  if (e.key === 'F2' && !isTypingTarget(e.target) && !$('#modal').open && !$('#viewer').open) {
+    if (state.selected.size > 1) { e.preventDefault(); return openBatchRename([...state.selected].map(findCard).filter(Boolean), '已选文件'); }
+    if (state.selected.size === 1) { e.preventDefault(); return startInlineRename([...state.selected][0]); }
+    if (isCanvas(state.view) && state.pickedCard) { e.preventDefault(); return startInlineRename(state.pickedCard); }
+    if (cardEl && findCard(cardEl.dataset.id)?.columnId !== TRASH) { e.preventDefault(); return startInlineRename(cardEl.dataset.id); }
+    const fid = openFolder();
+    if (fid && cardsIn(fid, false).length) { e.preventDefault(); return openBatchRename(cardsIn(fid, false), area(fid)?.title); }
+  }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#search').focus(); }
   if ((e.ctrlKey || e.metaKey) && (e.key === '\\' || e.code === 'Backslash') && matchMedia('(min-width: 1001px)').matches) { e.preventDefault(); setDraftsCollapsed(!draftsCollapsed()); }
 });
@@ -7892,6 +7911,503 @@ async function initCollabFromUrl() {
   let wasHost = false;
   try { wasHost = sessionStorage.getItem('wb:collabHostRoom') === room; } catch {}
   await startCollabRoom(room, { autoCopy: false, quiet: false, isJoining: !wasHost });
+}
+
+// ---------- 快速重命名：卡片原地连改（Tab 跳下一张） + 分栏批量重命名工作台 ----------
+const RENAME_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="m13.5 6.5 3 3"/></svg>`;
+
+function findVisibleCardEl(cardId) {
+  return $$(`.card[data-id="${CSS.escape(cardId)}"]`).find((el) => el.offsetParent !== null)
+    || $(`.card[data-id="${CSS.escape(cardId)}"]`);
+}
+
+function startInlineRename(cardId) {
+  const card = cardId && findCard(cardId);
+  if (!card || card.columnId === TRASH) return;
+  const cardEl = findVisibleCardEl(card.id);
+  const nameEl = cardEl?.querySelector('.name');
+  if (!cardEl || !nameEl) return openBatchRename([card]);
+  if (cardEl.querySelector('.inline-rn-wrap')) {
+    cardEl.querySelector('.inline-rn-input')?.focus();
+    return;
+  }
+
+  const { stem, ext } = rn.splitCardName(card.name, card.kind === 'note');
+  const prevDrag = cardEl.getAttribute('draggable');
+  cardEl.setAttribute('draggable', 'false');
+  cardEl.classList.add('is-renaming');
+
+  const wrap = document.createElement('span');
+  wrap.className = 'inline-rn-wrap';
+  wrap.innerHTML = `<input type="text" class="inline-rn-input" value="${esc(stem)}" maxlength="120" aria-label="输入新文件名">${ext ? `<span class="inline-rn-ext" title="保留扩展名">${esc(ext)}</span>` : ''}`;
+  nameEl.replaceChildren(wrap);
+
+  const input = wrap.querySelector('.inline-rn-input');
+  let finished = false;
+
+  const findNextCardId = (dir) => {
+    const container = cardEl.closest('.list, #world') || document;
+    const cards = $$('.card[data-id]', container).filter((el) => el.offsetParent !== null);
+    const idx = cards.indexOf(cardEl);
+    if (idx < 0) return null;
+    const next = cards[idx + dir];
+    return next ? next.dataset.id : null;
+  };
+
+  const cleanupDom = () => {
+    if (prevDrag != null) cardEl.setAttribute('draggable', prevDrag);
+    cardEl.classList.remove('is-renaming');
+  };
+
+  const done = async (mode, stepDir = 0) => {
+    if (finished) return;
+    finished = true;
+    input.removeEventListener('blur', onBlur);
+    input.removeEventListener('keydown', onKey);
+    const nextId = stepDir ? findNextCardId(stepDir) : null;
+    const nextName = mode === 'cancel' ? card.name : rn.joinCardName(input.value, ext, card.name);
+    const prevName = card.name;
+    const modified = nextName !== prevName;
+
+    if (modified) {
+      card.name = nextName;
+      await db.put('cards', Object.assign(card, { updatedAt: Date.now() }));
+      await db.setMeta('lastChange', Date.now());
+      if (!collabSession) channel?.postMessage('changed');
+      else scheduleCollabSync();
+    }
+
+    cleanupDom();
+    refreshCard(card);
+
+    if (nextId) {
+      const nextEl = findVisibleCardEl(nextId);
+      nextEl?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      startInlineRename(nextId);
+      return;
+    }
+
+    if (modified) {
+      render();
+      refreshStatus();
+      toast(`已重命名为「${card.name}」`, {
+        action: '撤销',
+        onAction: async () => { card.name = prevName; await saveCard(card); await changed(); },
+      });
+    }
+  };
+
+  const onBlur = () => done('commit', 0);
+  const onKey = (e) => {
+    if (e.isComposing) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      done('cancel', 0);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      done('commit', 0);
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      e.stopPropagation();
+      done('commit', e.shiftKey ? -1 : 1);
+    }
+  };
+
+  input.addEventListener('blur', onBlur);
+  input.addEventListener('keydown', onKey);
+  cardEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  input.focus({ preventScroll: true });
+  input.select();
+}
+
+async function openBatchRename(cards, contextTitle = '') {
+  const list = (cards || []).filter((c) => c && c.columnId !== TRASH);
+  if (!list.length) return toast('这里还没有可重命名的文件');
+
+  const items = list.map((card) => {
+    const { stem, ext } = rn.splitCardName(card.name, card.kind === 'note');
+    return {
+      card,
+      origName: card.name,
+      origStem: stem,
+      ext,
+      stem,
+      dirty: false,
+    };
+  });
+
+  const modal = $('#modal');
+  modal.classList.add('wide', 'batch-rename-modal');
+  modal.setAttribute('aria-labelledby', 'brTitle');
+
+  let activeIdx = 0;
+  let ruleMode = 'seq'; // 'seq' | 'rep'
+  let previewToken = 0;
+  let settled = false;
+  const ac = new AbortController();
+
+  const baseDefault = contextTitle && contextTitle !== '已选文件' ? contextTitle : '';
+  const rowsHTML = items.map((it, i) => {
+    const t = it.card.kind === 'note' ? { c: '#f0b429', label: '便签' } : typeOf(it.card);
+    const thumbUrlCached = it.card.thumb === 'ok' ? state.urls.get(`thumb:${it.card.id}`) : null;
+    const thumbHTML = thumbUrlCached
+      ? `<img src="${thumbUrlCached}" alt="" class="br-row-thumb">`
+      : `<span class="br-row-ico" style="--c:${t.c}">${esc(it.card.kind === 'note' ? '便签' : (it.ext.slice(1, 5) || t.label))}</span>`;
+    return `<div class="br-row${i === 0 ? ' active' : ''}" data-br-row="${i}">
+      <span class="br-idx">${i + 1}</span>
+      <span class="br-mini">${thumbHTML}</span>
+      <div class="br-field">
+        <input type="text" class="br-row-input" data-idx="${i}" value="${esc(it.stem)}" maxlength="120" aria-label="第 ${i + 1} 个文件名"${i === 0 ? ' autofocus' : ''}>
+        ${it.ext ? `<span class="br-ext">${esc(it.ext)}</span>` : ''}
+      </div>
+      <button type="button" class="icon-btn br-row-reset" data-br-reset="${i}" tabindex="-1" title="还原为原名" aria-label="还原第 ${i + 1} 项" hidden><svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></button>
+    </div>`;
+  }).join('');
+
+  const p = dialog(`<h3 id="brTitle" tabindex="-1">${RENAME_SVG}快速重命名 · 共 ${items.length} 个${contextTitle ? `<small class="br-ctx">「${esc(contextTitle)}」</small>` : ''}</h3>
+    <div class="br-layout">
+      <aside class="br-preview" aria-label="当前文件预览">
+        <div class="br-preview-stage" id="brStage"></div>
+        <div class="br-preview-info">
+          <div class="br-preview-nav">
+            <button type="button" class="icon-btn" id="brPrevBtn" title="上一个文件 (↑)" aria-label="上一个"><svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></button>
+            <span id="brPosLabel">1 / ${items.length}</span>
+            <button type="button" class="icon-btn" id="brNextBtn" title="下一个文件 (↓ / Enter)" aria-label="下一个"><svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+          </div>
+          <div class="br-orig-name" id="brOrigName"></div>
+          <div class="br-meta" id="brMeta"></div>
+        </div>
+      </aside>
+      <section class="br-main">
+        <div class="br-rules" id="brRules">
+          <div class="br-rule-tabs" role="tablist">
+            <button type="button" role="tab" class="br-rtab" data-br-tab="seq" aria-selected="true">按序号批量命名</button>
+            <button type="button" role="tab" class="br-rtab" data-br-tab="rep" aria-selected="false">查找替换 / 加前后缀</button>
+            <button type="button" class="btn ghost br-reset-all" id="brResetAll">全部还原</button>
+          </div>
+          <div class="br-rule-pane" data-br-pane="seq">
+            <div class="br-rule-grid">
+              <div class="br-base-wrap">
+                <input type="text" id="brSeqBase" value="" placeholder="${esc(baseDefault || '统一前缀，例如：宣传海报')}" aria-label="统一前缀">
+                ${baseDefault ? `<button type="button" class="br-fill-chip" id="brFillBase" title="填入「${esc(baseDefault)}」">用「${esc(baseDefault.slice(0, 10))}」</button>` : ''}
+              </div>
+              <select id="brSeqSep" aria-label="分隔符" title="分隔符">
+                <option value="_">分隔：_</option>
+                <option value="-">分隔：-</option>
+                <option value=" ">分隔：空格</option>
+                <option value="">无分隔</option>
+              </select>
+              <select id="brSeqStyle" aria-label="序号格式" title="序号格式">
+                <option value="01">序号：01, 02…</option>
+                <option value="001">序号：001, 002…</option>
+                <option value="1">序号：1, 2…</option>
+                <option value="(1)">序号：(1), (2)…</option>
+              </select>
+              <label class="br-num-start" title="起始数字"><span>起始</span><input type="number" id="brSeqStart" min="0" value="1"></label>
+              <button type="button" class="btn primary br-apply-btn" id="brApplySeq">应用序号</button>
+            </div>
+            <label class="br-check"><input type="checkbox" id="brKeepOrig"><span>保留各自原名，只在末尾加序号</span></label>
+          </div>
+          <div class="br-rule-pane" data-br-pane="rep" hidden>
+            <div class="br-rule-grid rep">
+              <input type="text" id="brRepFind" placeholder="查找文字（如 download）" aria-label="查找文字">
+              <input type="text" id="brRepWith" placeholder="替换为（留空则删除）" aria-label="替换为">
+              <input type="text" id="brRepPre" placeholder="加前缀" aria-label="加前缀">
+              <input type="text" id="brRepSuf" placeholder="加后缀" aria-label="加后缀">
+              <button type="button" class="btn primary br-apply-btn" id="brApplyRep">应用替换</button>
+            </div>
+          </div>
+        </div>
+        <div class="br-list" id="brList">${rowsHTML}</div>
+      </section>
+    </div>
+    <div class="modal-actions br-foot">
+      <button type="button" class="btn primary" id="brSaveBtn">保存重命名</button>
+      <button type="button" class="btn" data-br-cancel="1">取消</button>
+      <span class="br-hint">Enter / ↓ 下一张并预览 · ↑ 上一张 · Ctrl+Enter 保存</span>
+    </div>`,
+  () => items.map((it) => ({
+    card: it.card,
+    oldName: it.origName,
+    newName: rn.joinCardName(it.stem, it.ext, it.origName),
+  })).filter((x) => x.newName !== x.oldName));
+
+  const root = $('#modalInner');
+  const inputs = $$('.br-row-input', root);
+  const rows = $$('.br-row', root);
+  const saveBtn = $('#brSaveBtn', root);
+  const stage = $('#brStage', root);
+  const origEl = $('#brOrigName', root);
+  const metaEl = $('#brMeta', root);
+  const posEl = $('#brPosLabel', root);
+  const prevBtn = $('#brPrevBtn', root);
+  const nextBtn = $('#brNextBtn', root);
+
+  const updateChangedCount = () => {
+    let changedN = 0;
+    items.forEach((it, i) => {
+      const nextName = rn.joinCardName(it.stem, it.ext, it.origName);
+      it.dirty = nextName !== it.origName;
+      if (it.dirty) changedN++;
+      rows[i]?.classList.toggle('is-dirty', it.dirty);
+      const rbtn = rows[i]?.querySelector('.br-row-reset');
+      if (rbtn) rbtn.hidden = !it.dirty;
+    });
+    saveBtn.textContent = changedN ? `保存重命名（${changedN} 项）` : '保存重命名';
+    saveBtn.disabled = changedN === 0;
+  };
+
+  const showPreview = async (idx) => {
+    activeIdx = Math.max(0, Math.min(items.length - 1, idx));
+    rows.forEach((r, i) => r.classList.toggle('active', i === activeIdx));
+    rows[activeIdx]?.scrollIntoView({ block: 'nearest' });
+    const it = items[activeIdx];
+    const card = it.card;
+    const token = ++previewToken;
+
+    posEl.textContent = `${activeIdx + 1} / ${items.length}`;
+    prevBtn.disabled = activeIdx === 0;
+    nextBtn.disabled = activeIdx === items.length - 1;
+    origEl.textContent = `原名：${it.origName}`;
+    origEl.title = it.origName;
+
+    if (card.kind === 'note') {
+      metaEl.textContent = `便签 · ${fmtDate(card.updatedAt || card.createdAt)}`;
+      stage.innerHTML = `<div class="br-prev-note"><b>${esc(card.name || '便签')}</b><p>${esc(card.text || '（空便签）')}</p></div>`;
+      return;
+    }
+
+    const t = typeOf(card);
+    metaEl.textContent = metaText(card, t);
+    const fam = pv.family(card);
+    const fallbackIco = `<div class="br-prev-file"><div class="type-icon" style="--c:${t.c}">${esc(it.ext.slice(1, 5) || t.label)}</div><span>${esc(card.name)}</span></div>`;
+
+    if (fam === 'image') {
+      stage.innerHTML = '<div class="spinner" aria-label="加载预览"></div>';
+      try {
+        const u = await urlFor(card.id);
+        if (settled || token !== previewToken) return;
+        stage.innerHTML = u ? `<img src="${u}" alt="${esc(card.name)}" class="br-prev-img">` : fallbackIco;
+      } catch {
+        if (!settled && token === previewToken) stage.innerHTML = fallbackIco;
+      }
+      return;
+    }
+
+    if (card.thumb === 'ok') {
+      stage.innerHTML = '<div class="spinner" aria-label="加载预览"></div>';
+      try {
+        const u = await thumbUrl(card.id);
+        if (settled || token !== previewToken) return;
+        stage.innerHTML = u ? `<img src="${u}" alt="${esc(card.name)}" class="br-prev-img">` : fallbackIco;
+      } catch {
+        if (!settled && token === previewToken) stage.innerHTML = fallbackIco;
+      }
+      return;
+    }
+
+    stage.innerHTML = fallbackIco;
+  };
+
+  const focusRow = (idx) => {
+    const target = inputs[Math.max(0, Math.min(inputs.length - 1, idx))];
+    if (!target) return;
+    target.focus();
+    target.select();
+  };
+
+  // 加载列表中尚未缓存的小缩略图
+  for (let i = 0; i < items.length; i++) {
+    const card = items[i].card;
+    if (card.thumb === 'ok' && !state.urls.get(`thumb:${card.id}`)) {
+      thumbUrl(card.id).then((u) => {
+        if (settled || !u) return;
+        const mini = rows[i]?.querySelector('.br-mini');
+        if (mini) mini.innerHTML = `<img src="${u}" alt="" class="br-row-thumb">`;
+      }).catch(() => {});
+    }
+  }
+
+  root.addEventListener('input', (e) => {
+    if (!e.target.matches('.br-row-input')) return;
+    const idx = Number(e.target.dataset.idx);
+    if (!Number.isInteger(idx) || !items[idx]) return;
+    items[idx].stem = e.target.value;
+    updateChangedCount();
+  }, { signal: ac.signal });
+
+  root.addEventListener('focusin', (e) => {
+    const inp = e.target.closest('.br-row-input');
+    if (inp) {
+      const idx = Number(inp.dataset.idx);
+      if (Number.isInteger(idx) && idx !== activeIdx) showPreview(idx);
+    }
+  }, { signal: ac.signal });
+
+  root.addEventListener('click', (e) => {
+    const tab = e.target.closest('[data-br-tab]');
+    if (tab) {
+      ruleMode = tab.dataset.brTab;
+      $$('[data-br-tab]', root).forEach((b) => b.setAttribute('aria-selected', String(b === tab)));
+      $$('[data-br-pane]', root).forEach((pane) => { pane.hidden = pane.dataset.brPane !== ruleMode; });
+      return;
+    }
+    if (e.target.closest('#brFillBase')) {
+      const baseInp = $('#brSeqBase', root);
+      if (baseInp && baseDefault) {
+        baseInp.value = baseDefault;
+        $('#brKeepOrig', root).checked = false;
+        $('#brApplySeq', root)?.click();
+      }
+      return;
+    }
+    if (e.target.closest('#brApplySeq')) {
+      const base = $('#brSeqBase', root)?.value || '';
+      const sep = $('#brSeqSep', root)?.value ?? '_';
+      const numStyle = $('#brSeqStyle', root)?.value || '01';
+      const start = $('#brSeqStart', root)?.value ?? 1;
+      const keepOrig = Boolean($('#brKeepOrig', root)?.checked);
+      const nextStems = rn.applySequenceRule(items, { base, sep, numStyle, start, keepOrig });
+      nextStems.forEach((st, i) => {
+        items[i].stem = st;
+        if (inputs[i]) inputs[i].value = st;
+      });
+      updateChangedCount();
+      return;
+    }
+    if (e.target.closest('#brApplyRep')) {
+      const find = $('#brRepFind', root)?.value || '';
+      const replace = $('#brRepWith', root)?.value || '';
+      const prefix = $('#brRepPre', root)?.value || '';
+      const suffix = $('#brRepSuf', root)?.value || '';
+      const nextStems = rn.applyReplaceRule(items.map((it) => it.stem), { find, replace, prefix, suffix });
+      nextStems.forEach((st, i) => {
+        items[i].stem = st;
+        if (inputs[i]) inputs[i].value = st;
+      });
+      updateChangedCount();
+      return;
+    }
+    if (e.target.closest('#brResetAll')) {
+      items.forEach((it, i) => {
+        it.stem = it.origStem;
+        if (inputs[i]) inputs[i].value = it.origStem;
+      });
+      updateChangedCount();
+      return;
+    }
+    const rbtn = e.target.closest('[data-br-reset]');
+    if (rbtn) {
+      const idx = Number(rbtn.dataset.brReset);
+      if (items[idx]) {
+        items[idx].stem = items[idx].origStem;
+        if (inputs[idx]) inputs[idx].value = items[idx].origStem;
+        updateChangedCount();
+        focusRow(idx);
+      }
+      return;
+    }
+    if (e.target.closest('#brSaveBtn')) {
+      triggerSave();
+      return;
+    }
+    if (e.target.closest('[data-br-cancel]')) return modal.close();
+    if (e.target.closest('#brPrevBtn')) return focusRow(activeIdx - 1);
+    if (e.target.closest('#brNextBtn')) return focusRow(activeIdx + 1);
+    const row = e.target.closest('[data-br-row]');
+    if (row && !e.target.closest('button, input')) focusRow(Number(row.dataset.brRow));
+  }, { signal: ac.signal });
+
+  // Capture-phase submit guard ensures Enter inside row/rule inputs navigates instead of implicitly submitting
+  let allowSubmit = false;
+  const triggerSave = () => {
+    if (saveBtn.disabled || settled) return;
+    allowSubmit = true;
+    try {
+      root.requestSubmit();
+    } finally {
+      allowSubmit = false;
+    }
+  };
+  modal.addEventListener('submit', (e) => {
+    if (!allowSubmit) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
+  }, { signal: ac.signal, capture: true });
+
+  root.addEventListener('keydown', (e) => {
+    if (e.isComposing) return;
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      triggerSave();
+      return;
+    }
+    const inp = e.target.closest('.br-row-input');
+    if (inp) {
+      const idx = Number(inp.dataset.idx);
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (idx < inputs.length - 1) focusRow(idx + 1);
+        else if (!saveBtn.disabled) requestAnimationFrame(() => saveBtn.focus());
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        e.stopPropagation();
+        focusRow(idx + 1);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        e.stopPropagation();
+        focusRow(idx - 1);
+      }
+      return;
+    }
+    if (e.key === 'Enter' && e.target.closest('#brSeqBase, #brSeqStart')) {
+      e.preventDefault();
+      e.stopPropagation();
+      $('#brApplySeq', root)?.click();
+    } else if (e.key === 'Enter' && e.target.closest('#brRepFind, #brRepWith, #brRepPre, #brRepSuf')) {
+      e.preventDefault();
+      e.stopPropagation();
+      $('#brApplyRep', root)?.click();
+    }
+  }, { signal: ac.signal, capture: true });
+
+  updateChangedCount();
+  await showPreview(0);
+
+  let changes = null;
+  try {
+    changes = await p;
+  } finally {
+    settled = true;
+    ac.abort();
+    modal.classList.remove('wide', 'batch-rename-modal');
+    modal.removeAttribute('aria-labelledby');
+  }
+
+  if (!changes?.length) return;
+  const now = Date.now();
+  changes.forEach(({ card, newName }) => {
+    card.name = newName;
+    card.updatedAt = now;
+  });
+  await db.putMany('cards', changes.map((x) => x.card));
+  await changed();
+  toast(`已重命名 ${changes.length} 个文件`, {
+    action: '撤销',
+    onAction: async () => {
+      changes.forEach(({ card, oldName }) => {
+        card.name = oldName;
+        card.updatedAt = Date.now();
+      });
+      await db.putMany('cards', changes.map((x) => x.card));
+      await changed();
+    },
+  });
 }
 
 // ---------- 启动 ----------
