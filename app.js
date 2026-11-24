@@ -1,6 +1,6 @@
 import * as db from './db.js?v=6';
 import * as pv from './preview.js?v=7';
-import * as collab from './collab.js?v=5';
+import * as collab from './collab.js?v=6';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -562,6 +562,7 @@ const CANVAS_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y=
 function renderViews() {
   const count = (id) => cardsIn(id, false).length;
   const boardCount = columns().reduce((n, c) => n + count(c.id), 0);
+  const unreadCm = unreadCommentCountAll();
   $('#views').innerHTML = `
     <button role="tab" class="view-tab" data-view="${BOARD}" aria-selected="${state.view === BOARD}">
       <svg viewBox="0 0 24 24"><rect x="4" y="4" width="4.5" height="16" rx="1"/><rect x="10" y="4" width="4.5" height="11" rx="1"/><rect x="16" y="4" width="4" height="7" rx="1"/></svg>看板<b>${boardCount}</b></button>
@@ -571,16 +572,17 @@ function renderViews() {
       ${WORK_SVG}作品<b>${works().length}</b></button>
     <span class="view-sep" aria-hidden="true"></span>
     <button role="tab" class="view-tab canvas-tab" data-view="${CANVASES}" data-drop="${CANVAS_PICK}" aria-selected="${state.view === CANVASES || isCanvas(state.view)}" aria-controls="${isCanvas(state.view) ? 'canvasWorkspace' : 'canvasDirectory'}" title="查看全部画布工作区">
-      ${CANVAS_SVG}画布<b>${canvases().length}</b></button>`;
+      ${CANVAS_SVG}画布<b>${canvases().length}</b>${unreadCm ? `<span class="tab-unread-badge" title="${unreadCm} 条未读备注">${unreadCm}</span>` : ''}</button>`;
 }
 function renderCanvasDirectory() {
   const list = canvases();
   const totalCards = list.reduce((n, cv) => n + cardsIn(cv.id, false).length, 0);
   const totalShapes = list.reduce((n, cv) => n + (cv.shapes?.length || 0), 0);
+  const totalComments = list.reduce((n, cv) => n + (cv.comments?.length || 0), 0);
   $('#canvasDirectory').innerHTML = `<header class="archive-head canvas-directory-head">
     <div class="ah-text">
       <h2 id="canvasDirectoryTitle" tabindex="-1">画布工作区</h2>
-      <div class="meta">${list.length} 个画布 · ${totalCards} 张卡片${totalShapes ? ` · ${totalShapes} 个白板对象` : ''} · 把卡片或文件拖到画布上即可放入</div>
+      <div class="meta">${list.length} 个画布 · ${totalCards} 张卡片${totalShapes ? ` · ${totalShapes} 个白板对象` : ''}${totalComments ? ` · ${totalComments} 条备注` : ''} · 把卡片或文件拖到画布上即可放入</div>
     </div>
     <button type="button" class="btn primary" data-action="add-canvas"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新建画布</span></button>
     </header>
@@ -589,7 +591,7 @@ function renderCanvasDirectory() {
         <span class="canvas-directory-icon">${CANVAS_SVG}</span>
         <span class="canvas-directory-info">
           <strong>${esc(cv.title)}${collabSession?.canvasId === cv.id ? '<span class="canvas-live-pill">多人协作中</span>' : ''}</strong>
-          <span>${cardsIn(cv.id, false).length} 张卡片${cv.shapes?.length ? ` · ${cv.shapes.length} 个白板对象` : ''}</span>
+          <span>${cardsIn(cv.id, false).length} 张卡片${cv.shapes?.length ? ` · ${cv.shapes.length} 个白板对象` : ''}${cv.comments?.length ? ` · ${cv.comments.length} 条备注` : ''}</span>
         </span>
       </button>
       <button type="button" class="icon-btn" data-action="canvas-menu" data-id="${esc(cv.id)}" aria-label="管理画布 ${esc(cv.title)}" aria-haspopup="menu">${DOTS}</button>
@@ -2044,6 +2046,7 @@ function applyCam() {
   $('#zoomLabel').textContent = `${Math.round(c.z * 100)}%`;
   $('#world').style.setProperty('--iz', (1 / c.z).toFixed(4)); // 选框、手柄不随缩放变粗变细
   positionFmt();
+  positionCommentPop();
   scheduleCanvasPdfSharpen();
 }
 function renderCanvas() {
@@ -2058,13 +2061,18 @@ function renderCanvas() {
   $('#world').innerHTML = `<svg class="links" id="links" aria-hidden="true"></svg>${list.map((c) => cardHTML(c, true)).join('')}${(b?.shapes || []).map(shapeHTML).join('')}
     <div class="group-box" id="groupBox" hidden></div><div class="guides" id="guides"></div>
     <div class="conn-dots" id="connDots" hidden>${['t', 'r', 'b', 'l'].map((k) => `<i class="cd cd-${k}" data-dot="${k}" title="拖出箭头；拖到空白处会新建一个相连的形状"></i>`).join('')}</div>
+    <div class="comment-layer" id="commentLayer"></div>
     <div class="collab-layer" id="collabLayer" aria-hidden="true"></div>`;
   boardRendering = false;
-  $('#canvasEmpty').hidden = list.length > 0 || (b?.shapes.length || 0) > 0;
+  $('#canvasEmpty').hidden = list.length > 0 || (b?.shapes.length || 0) > 0 || (b?.comments.length || 0) > 0;
   $('#viewport').dataset.tool = state.tool;
   decorateBoard();
   applyCam();
   drawLinks();
+  renderCommentsLayer();
+  renderCommentCenterUI();
+  renderCommentThreadPop();
+  if (!$('#commentsPopover').hidden) renderCommentsPopover();
   renderCollabOverlay();
   if (editing) {
     editingShape = null;
@@ -2552,6 +2560,7 @@ vp.addEventListener('dblclick', async (e) => {
   // 第一下点击会选中形状并重绘画布，原来被点的元素已被替换，事件目标可能变成画布背景；
   // 所以按鼠标位置重新找一次「真正点到的东西」，避免在已有便签上又新建一张
   const hit = document.elementFromPoint(e.clientX, e.clientY) || e.target;
+  if (hit.closest('.comment-pin, .comment-thread-pop, .comments-popover') || e.target.closest('.comment-pin, .comment-thread-pop, .comments-popover')) return;
   const hitCard = hit.closest('.card.on-canvas') || e.target.closest('.card.on-canvas');
   if (hitCard) {
     if (hit.closest('.pdf-page-bar, [data-card-handle], .more, .sel, .export-handle, .card-expand-btn')) return;
@@ -2583,10 +2592,11 @@ const SH_DEF = {
   diamond: { w: 180, h: 140, fill: 3, fs: 16, al: 'center' }, text: { w: 240, h: 44, fill: 'none', fs: 20, al: 'left' },
 };
 const FONT_SIZES = [12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64, 80, 96];
-const TOOL_KEYS = { v: 'select', n: 'sticky', t: 'text', r: 'rect', o: 'ellipse', d: 'diamond', l: 'arrow' };
+const TOOL_KEYS = { v: 'select', n: 'sticky', t: 'text', r: 'rect', o: 'ellipse', d: 'diamond', l: 'arrow', c: 'comment' };
 const TOOL_HINT = {
   sticky: '点击贴一张便签，或拖出大小', text: '点击放置文字框，然后直接输入', rect: '点击放置，或拖出大小（Shift 画正方形）',
   ellipse: '点击放置，或拖出大小（Shift 画正圆）', diamond: '点击放置，或拖出大小', arrow: '从一个对象拖到另一个对象',
+  comment: '点击画布或任意卡片 / 形状添加备注评论，协作者会收到实时提醒',
 };
 const ALIGN_OPS = { smart: '✨ 智能对齐行列', l: '左对齐', ch: '水平居中', r: '右对齐', t: '顶部对齐', cv: '垂直居中', b: '底部对齐', dh: '横向均匀分布', dv: '纵向均匀分布', ew: '统一等宽' };
 state.tool = 'select';
@@ -2594,7 +2604,7 @@ state.toolLock = false;
 state.bsel = null; // { type: 'shape', ids: [...] } | { type: 'link', id }
 let editingShape = null, editSnap = null, editOrig = '', bd = null, hoverRef = null, boardRendering = false;
 let spaceDown = false, fmtPop = null, boardClip = null, lastPointer = null, pasteN = 0;
-const boardOf = (id = state.view) => { const a = area(id); if (!a || a.kind !== 'canvas') return null; a.shapes ||= []; a.links ||= []; return a; };
+const boardOf = (id = state.view) => { const a = area(id); if (!a || a.kind !== 'canvas') return null; a.shapes ||= []; a.links ||= []; a.comments ||= []; return a; };
 const shapeById = (id) => boardOf()?.shapes.find((s) => s.id === id);
 const linkById = (id) => boardOf()?.links.find((l) => l.id === id);
 const shColor = (s) => (s.fill === 'none' || s.fill == null ? null : SH_COLORS[s.fill] || SH_COLORS[0]);
@@ -2636,7 +2646,7 @@ function decorateBoard() {
 // ---- 撤销 / 重做（每个画布各自一份历史） ----
 const hist = new Map();
 const H = () => { let h = hist.get(state.view); if (!h) hist.set(state.view, (h = { u: [], r: [] })); return h; };
-const snapBoard = () => { const b = boardOf(); return JSON.stringify({ s: b.shapes, l: b.links }, (k, v) => (k === '_t' ? undefined : v)); };
+const snapBoard = () => { const b = boardOf(); return JSON.stringify({ s: b.shapes, l: b.links, c: b.comments }, (k, v) => (k === '_t' ? undefined : v)); };
 function record(snap = snapBoard()) {
   const h = H();
   if (h.u[h.u.length - 1] === snap) return;
@@ -2649,9 +2659,10 @@ async function undoBoard(redo = false) {
   const h = H(), from = redo ? h.r : h.u, to = redo ? h.u : h.r;
   if (!from.length) return toast(redo ? '没有可以重做的操作' : '没有可以撤销的操作');
   to.push(snapBoard());
-  const { s, l } = JSON.parse(from.pop());
+  const { s, l, c } = JSON.parse(from.pop());
   const b = boardOf();
   b.shapes = s; b.links = l;
+  if (Array.isArray(c)) b.comments = c;
   state.bsel = null;
   await saveBoard();
 }
@@ -2728,6 +2739,7 @@ function drawLinks() {
     if (g) html += linkSVG({ end: 'arrow' }, g, { temp: true });
   }
   svg.innerHTML = html;
+  syncCommentPinPositions();
 }
 // 缩略图加载后卡片变高，连线跟着重算
 $('#world').addEventListener('load', () => { if (boardOf()?.links.length) drawLinks(); }, true);
@@ -3018,8 +3030,28 @@ function boardDown(e) {
   const p = toWorld(e.clientX, e.clientY);
   const handle = e.target.closest('[data-handle]'), dot = e.target.closest('[data-dot]'), lend = e.target.closest('[data-lend]');
   const shapeEl = e.target.closest('.shape'), linkEl = e.target.closest('[data-lid]'), cardEl = e.target.closest('.card');
+  const pinEl = e.target.closest('.comment-pin[data-cid]');
   const capture = () => { try { vp.setPointerCapture(e.pointerId); } catch {} };
   const base = { pid: e.pointerId, sx: e.clientX, sy: e.clientY, moved: false, snap: snapBoard() };
+  if (pinEl) {
+    const cid = pinEl.dataset.cid;
+    if (cid === 'draft') {
+      $('#commentThreadPop textarea')?.focus();
+      return true;
+    }
+    const cm = commentById(cid);
+    if (cm) {
+      bd = { ...base, mode: 'comment-drag', cm, pinEl, o: commentPos(cm) };
+      capture();
+      return true;
+    }
+  }
+  if (state.tool === 'comment' && e.button === 0) {
+    const hitTarget = shapeEl?.dataset.sid || (cardEl?.classList.contains('on-canvas') ? cardEl.dataset.id : null);
+    openCommentDraftAt(p.x, p.y, hitTarget);
+    e.preventDefault();
+    return true;
+  }
   if (handle && shapeEl) {
     const s = shapeById(shapeEl.dataset.sid);
     bd = { ...base, mode: 'resize', s, el: shapeEl, k: handle.dataset.handle, o: { x: s.x, y: s.y, w: s.w, h: s.h } };
@@ -3190,6 +3222,12 @@ function boardMove(e) {
     }).map((el) => el.dataset.id);
     bd.cardHits = [...new Set([...(bd.baseCards || []), ...hitCards])];
     $$('#world .card.on-canvas').forEach((el) => el.classList.toggle('selected', bd.cardHits.includes(el.dataset.id)));
+  } else if (bd.mode === 'comment-drag') {
+    const nx = Math.round(bd.o.x + dx), ny = Math.round(bd.o.y + dy);
+    bd.pinEl.style.setProperty('--cx', `${nx}px`);
+    bd.pinEl.style.setProperty('--cy', `${ny}px`);
+    bd.cur = { x: nx, y: ny };
+    if (openCommentId === bd.cm.id) positionCommentPop();
   } else if (bd.mode === 'link') {
     bd.cur = toWorld(e.clientX, e.clientY);
     const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest('.shape, .card.on-canvas');
@@ -3231,6 +3269,32 @@ async function boardUp(e) {
     else if (d.shiftToggle) selectBoard(pickShapes(selIds().filter((x) => x !== d.clicked))); // Shift + 点已选中的 → 移出多选
     else if (d.mode === 'move' && d.was) startEdit(d.clicked); // 再点一下已选中的形状 → 编辑文字
     else { decorateBoard(); positionFmt(); }
+    return true;
+  }
+  if (d.mode === 'comment-drag') {
+    if (d.moved && d.cur) {
+      record(d.snap);
+      d.pinEl.style.pointerEvents = 'none';
+      const under = document.elementFromPoint(e.clientX, e.clientY)?.closest('.shape, .card.on-canvas');
+      d.pinEl.style.pointerEvents = '';
+      const tid = under ? (under.dataset.sid || under.dataset.id) : null;
+      const bx = tid ? boxOf({ id: tid }) : null;
+      d.cm.x = d.cur.x;
+      d.cm.y = d.cur.y;
+      if (tid && bx) {
+        d.cm.targetId = tid;
+        d.cm.dx = Math.round(d.cur.x - bx.x);
+        d.cm.dy = Math.round(d.cur.y - bx.y);
+      } else {
+        delete d.cm.targetId;
+        delete d.cm.dx;
+        delete d.cm.dy;
+      }
+      await saveBoard();
+      if (openCommentId === d.cm.id) renderCommentThreadPop();
+    } else {
+      openCommentThread(d.cm.id);
+    }
     return true;
   }
   if (d.mode === 'marquee') {
@@ -3883,7 +3947,7 @@ async function insertTemplate(id) {
   toast(`已插入「${tpl.name}」模板，双击便签就能改文字`, { action: '撤销', onAction: () => undoBoard() });
 }
 const SHORTCUTS = [
-  ['工具', [['V', '选择'], ['N', '便签'], ['T', '文字'], ['R', '矩形'], ['O', '圆形'], ['D', '菱形'], ['L', '箭头连线'], ['双击工具', '锁定工具，连续放置'], ['Esc', '退出工具 / 取消选中']]],
+  ['工具', [['V', '选择'], ['N', '便签'], ['T', '文字'], ['R', '矩形'], ['O', '圆形'], ['D', '菱形'], ['L', '箭头连线'], ['C', '备注评论'], ['双击工具', '锁定工具，连续放置'], ['Esc', '退出工具 / 取消选中']]],
   ['拖动', [['Shift + 拖动', '只水平或只垂直移动'], ['Alt + 拖动', '复制一份拖走（形状、文件卡片都可以）'], ['Ctrl + 拖动', '暂时关闭对齐吸附（文件卡片上是转换圆环）'], ['Shift + 拖角', '等比缩放'], ['Alt + 拖边 / 角', '以中心对称缩放'], ['Shift / Alt + 画形状', '画正方形 / 从中心向外画'], ['拖连接点到空白处', '新建一个相连的形状']]],
   ['选择', [['左键拖空白处', '拉出多选框（框选卡片与形状）'], ['Shift + 点击', '加选 / 减选'], ['Ctrl + A', '全选画布内容'], ['Enter / 双击', '编辑文字 / 预览卡片'], ['Esc / Ctrl + Enter', '结束编辑']]],
   ['编辑', [['Ctrl + Z', '撤销'], ['Ctrl + Y / Ctrl + Shift + Z', '重做'], ['Ctrl + C / X / V', '复制 / 剪切 / 粘贴'], ['Ctrl + D', '原地复制'], ['Delete', '删除'], ['方向键', '微移（Shift 每次 40）'], ['Ctrl + 方向键', '在该方向新建相连形状'], ['Ctrl + ] / [', '置于顶层 / 底层'], ['Ctrl + B', '加粗'], ['Ctrl + Shift + . / ,', '放大 / 缩小字号']]],
@@ -3931,7 +3995,9 @@ document.addEventListener('keydown', (e) => {
   if (!mod && (e.key === '?' || (e.shiftKey && e.code === 'Slash'))) { e.preventDefault(); showShortcuts(); return; }
   if (!mod && TOOL_KEYS[k] && !onCard) { e.preventDefault(); setTool(TOOL_KEYS[k]); return; }
   if (e.key === 'Escape') {
-    if (state.tool !== 'select') { setTool('select'); e.stopPropagation(); }
+    if (openCommentId) { closeCommentPop(); e.stopPropagation(); }
+    else if (!$('#commentsPopover').hidden) { toggleCommentsPopover(false); e.stopPropagation(); }
+    else if (state.tool !== 'select') { setTool('select'); e.stopPropagation(); }
     else if (fmtPop) { fmtPop = null; positionFmt(); e.stopPropagation(); }
     else if (sel) { selectBoard(null); e.stopPropagation(); }
     else if (document.body.classList.contains('canvas-maximized') && !state.selected.size && !state.pickedCard) { toggleCanvasMax(false); e.stopPropagation(); }
@@ -4217,6 +4283,14 @@ async function pickCanvas(exceptId) {
     (f) => f.querySelector('[name="canvas"]:checked')?.value);
 }
 function setView(v) {
+  if (v !== state.view) {
+    openCommentId = null;
+    draftComment = null;
+    const tp = $('#commentThreadPop');
+    if (tp) tp.hidden = true;
+    const cp = $('#commentsPopover');
+    if (cp) cp.hidden = true;
+  }
   if (!isCanvas(v) && document.body.classList.contains('canvas-maximized')) toggleCanvasMax(false);
   state.view = v;
   ls.set('view', v);
@@ -4634,6 +4708,9 @@ function cardMenu(anchor, card) {
     { text: '重命名', run: async () => {
       const n = await prompt({ title: '重命名', value: card.name, ok: '保存' });
       if (n && n !== card.name) { card.name = n; await saveCard(card); await changed(); } } });
+  if (isCanvas(card.columnId)) {
+    items.push({ text: '添加备注评论…', run: () => openCommentDraftOnTarget(card.id) });
+  }
   if (isCanvas(card.columnId) && card.w) {
     items.push({ text: '重置画布卡片大小', run: async () => { delete card.w; await saveCard(card); await changed(); } });
   }
@@ -4695,9 +4772,10 @@ function areaMenu(anchor, a) {
 }
 
 // ---------- 提示 ----------
-function toast(text, { error, action, onAction, sticky } = {}) {
+function toast(text, { error, action, onAction, sticky, commentAlert, color, duration } = {}) {
   const el = document.createElement('div');
-  el.className = `toast${error ? ' error' : ''}`;
+  el.className = `toast${error ? ' error' : ''}${commentAlert ? ' comment-alert' : ''}`;
+  if (commentAlert && color) el.style.setProperty('--c', color);
   el.setAttribute('role', error ? 'alert' : 'status');
   const span = document.createElement('span');
   span.textContent = text;
@@ -4706,12 +4784,13 @@ function toast(text, { error, action, onAction, sticky } = {}) {
   if (action) {
     const b = document.createElement('button');
     b.textContent = action;
-    b.onclick = () => { close(); onAction(); };
+    b.onclick = () => { close(); onAction?.(); };
     el.appendChild(b);
   }
   $('#toasts').appendChild(el);
   while ($('#toasts').children.length > 3) $('#toasts').firstChild.remove();
-  if (!sticky) setTimeout(close, action || error ? 6000 : 3000);
+  const waitMs = duration ?? (commentAlert ? 8000 : (action || error ? 6000 : 3000));
+  if (!sticky) setTimeout(close, waitMs);
   return { close, set: (t) => { span.textContent = t; } };
 }
 
@@ -5950,6 +6029,7 @@ document.addEventListener('click', async (e) => {
     case 'toggle-drafts-rail': return setDraftsCollapsed(!draftsCollapsed());
     case 'canvas-max': return toggleCanvasMax();
     case 'collab-panel': return toggleCollabPopover();
+    case 'comments-panel': return toggleCommentsPopover();
     case 'toggle-drafts': {
       const open = document.body.classList.toggle('drafts-open');
       $('.drafts-toggle').setAttribute('aria-expanded', String(open));
@@ -6096,9 +6176,10 @@ let collabShapeLiveTimer = 0;
 let collabCardLiveTimer = 0;
 let lastCollabCursor = { x: 0, y: 0, act: '' };
 const deferredCollabPkts = [];
-const canvasKnownShapes = new Map(); // canvasId -> Map(shapeId -> json)
-const canvasKnownLinks = new Map();  // canvasId -> Map(linkId -> json)
-const canvasKnownCards = new Map();  // canvasId -> Set(cardId)
+const canvasKnownShapes = new Map();   // canvasId -> Map(shapeId -> json)
+const canvasKnownLinks = new Map();    // canvasId -> Map(linkId -> json)
+const canvasKnownComments = new Map(); // canvasId -> Map(commentId -> json)
+const canvasKnownCards = new Map();    // canvasId -> Set(cardId)
 const cardSyncProgress = new Map();  // cardId -> 0..100
 const orphanCollabBlobs = new Map(); // `${cardId}:${kind}` -> Blob（防元数据先于或晚于文件到达导致的丢包）
 let collabTaskChain = Promise.resolve();
@@ -6145,7 +6226,7 @@ function saveCollabProfile(patch) {
 function recordCanvasBaseline(a) {
   if (!a || a.kind !== 'canvas') return;
   const now = Date.now();
-  const sMap = new Map(), lMap = new Map();
+  const sMap = new Map(), lMap = new Map(), cMap = new Map();
   for (const s of a.shapes || []) {
     if (!s._u) s._u = now;
     sMap.set(s.id, JSON.stringify({ ...s, _u: undefined, _t: undefined }));
@@ -6154,8 +6235,13 @@ function recordCanvasBaseline(a) {
     if (!l._u) l._u = now;
     lMap.set(l.id, JSON.stringify({ ...l, _u: undefined }));
   }
+  for (const cm of a.comments || []) {
+    if (!cm._u) cm._u = cm.createdAt || now;
+    cMap.set(cm.id, JSON.stringify({ ...cm, _u: undefined }));
+  }
   canvasKnownShapes.set(a.id, sMap);
   canvasKnownLinks.set(a.id, lMap);
+  canvasKnownComments.set(a.id, cMap);
   canvasKnownCards.set(a.id, new Set(cardsIn(a.id, false).map((c) => c.id)));
 }
 
@@ -6165,7 +6251,8 @@ function stampCanvasMutations(a) {
   a._u = now;
   const prevS = canvasKnownShapes.get(a.id) || new Map();
   const prevL = canvasKnownLinks.get(a.id) || new Map();
-  const nextS = new Map(), nextL = new Map();
+  const prevC = canvasKnownComments.get(a.id) || new Map();
+  const nextS = new Map(), nextL = new Map(), nextC = new Map();
   const deletedIds = [];
 
   for (const s of a.shapes || []) {
@@ -6184,8 +6271,17 @@ function stampCanvasMutations(a) {
   }
   for (const oldId of prevL.keys()) if (!nextL.has(oldId)) deletedIds.push(oldId);
 
+  for (const cm of a.comments || []) {
+    const raw = JSON.stringify({ ...cm, _u: undefined });
+    if (!prevC.has(cm.id) || prevC.get(cm.id) !== raw) cm._u = now;
+    else if (!cm._u) cm._u = cm.createdAt || now;
+    nextC.set(cm.id, raw);
+  }
+  for (const oldId of prevC.keys()) if (!nextC.has(oldId)) deletedIds.push(oldId);
+
   canvasKnownShapes.set(a.id, nextS);
   canvasKnownLinks.set(a.id, nextL);
+  canvasKnownComments.set(a.id, nextC);
   if (deletedIds.length && collabSession?.canvasId === a.id) {
     collabSession.recordTombstones(deletedIds, now);
   }
@@ -6215,6 +6311,7 @@ function buildCanvasSnapshot(canvasId = collabSession?.canvasId) {
     _u: a._u || Date.now(),
     shapes: collab.clonePlain(a.shapes || []),
     links: collab.clonePlain(a.links || []),
+    comments: collab.clonePlain(a.comments || []),
     cards,
   };
 }
@@ -6430,12 +6527,17 @@ async function applyRemoteSnapshot(pkt, isWelcome = false) {
         order: canvases().length * 1024,
         shapes: [],
         links: [],
+        comments: [],
         _u: 0,
       };
       state.areas.push(cv);
       createdNewCanvas = true;
     }
     collabSession.markSynced(cv.id);
+
+    const prevCommentMap = new Map(
+      (cv.comments || []).map((cm) => [cm.id, { resolved: !!cm.resolved, replies: new Set((cm.replies || []).map((r) => r.id)) }]),
+    );
 
     // 若本地正处于某个便签/形状的文字编辑状态，保留该形状正在编辑的本地副本
     const activeEditObj = editingShape ? shapeById(editingShape) : null;
@@ -6446,6 +6548,56 @@ async function applyRemoteSnapshot(pkt, isWelcome = false) {
     cv._u = mergedBoard._u;
     cv.shapes = mergedBoard.shapes;
     cv.links = mergedBoard.links;
+    cv.comments = mergedBoard.comments;
+
+    // 清理被同伴删除评论的未读状态或打开浮窗
+    const liveCmIds = new Set(cv.comments.map((cm) => cm.id));
+    for (const id of [...unreadCommentIds]) {
+      if (state.view === cv.id && !liveCmIds.has(id)) unreadCommentIds.delete(id);
+    }
+    if (state.view === cv.id && openCommentId && openCommentId !== 'draft' && !liveCmIds.has(openCommentId)) {
+      openCommentId = null;
+    }
+
+    if (!isWelcome && !wasJoining) {
+      const myId = getCollabProfile().id;
+      for (const cm of cv.comments) {
+        const prev = prevCommentMap.get(cm.id);
+        if (!prev) {
+          if (cm.authorId !== myId) {
+            handleRemoteCommentNotify({
+              canvasId: cv.id,
+              canvasTitle: cv.title,
+              eventKey: `add:${cm.id}:${cm.id}`,
+              action: 'add',
+              commentId: cm.id,
+              authorId: cm.authorId,
+              authorName: cm.authorName,
+              authorColor: cm.authorColor,
+              text: cm.text,
+              ts: cm.createdAt,
+            });
+          }
+        } else {
+          for (const r of cm.replies || []) {
+            if (!prev.replies.has(r.id) && r.authorId !== myId) {
+              handleRemoteCommentNotify({
+                canvasId: cv.id,
+                canvasTitle: cv.title,
+                eventKey: `reply:${cm.id}:${r.id}`,
+                action: 'reply',
+                commentId: cm.id,
+                authorId: r.authorId,
+                authorName: r.authorName,
+                authorColor: r.authorColor,
+                text: r.text,
+                ts: r.createdAt,
+              });
+            }
+          }
+        }
+      }
+    }
 
     if (activeEditCopy) {
       const idx = cv.shapes.findIndex((s) => s.id === activeEditCopy.id);
@@ -6516,6 +6668,8 @@ async function applyRemoteSnapshot(pkt, isWelcome = false) {
     }
     renderViews();
     renderCollabUI();
+    renderCommentCenterUI();
+    if (!$('#commentsPopover').hidden) renderCommentsPopover();
   } finally {
     suppressCollabDepth = Math.max(0, suppressCollabDepth - 1);
   }
@@ -6775,6 +6929,7 @@ function toggleCollabPopover(force) {
   const pop = $('#collabPopover'), btn = $('#collabBtn');
   if (!pop || !btn) return;
   const open = typeof force === 'boolean' ? force : pop.hidden;
+  if (open) toggleCommentsPopover(false);
   pop.hidden = !open;
   btn.setAttribute('aria-expanded', String(open));
   if (open) renderCollabPopover();
@@ -6867,6 +7022,8 @@ async function startCollabRoom(customRoomId = '', { autoCopy = true, quiet = fal
         applyRemoteShapeLive(detail);
       } else if (type === 'card-live') {
         applyRemoteCardLive(detail);
+      } else if (type === 'comment-notify') {
+        enqueueCollabTask(() => handleRemoteCommentNotify(detail));
       } else if (type === 'blob-progress') {
         if (detail?.done) enqueueCollabTask(() => handleCollabBlobProgress(detail));
         else handleCollabBlobProgress(detail);
@@ -6900,6 +7057,7 @@ function leaveCollabRoom() {
   renderCollabUI();
   renderCollabPopover();
   renderCollabOverlay();
+  renderCommentCenterUI();
   if (state.view === CANVASES) renderCanvasDirectory();
   toast('已结束多人协作');
 }
@@ -7022,6 +7180,16 @@ document.addEventListener('pointerdown', (e) => {
   if (pop && !pop.hidden && !e.target.closest('#collabPopover, #collabBtn, .collab-av[data-action="collab-panel"]')) {
     toggleCollabPopover(false);
   }
+  const cmPop = $('#commentsPopover');
+  if (cmPop && !cmPop.hidden && !e.target.closest('#commentsPopover, #commentCenterBtn')) {
+    toggleCommentsPopover(false);
+  }
+  const thPop = $('#commentThreadPop');
+  if (thPop && !thPop.hidden && e.button === 0 && !e.target.closest('#commentThreadPop, .comment-pin, #commentCenterBtn, #commentsPopover')) {
+    if (!(e.target.closest('#viewport') && state.tool === 'comment')) {
+      closeCommentPop();
+    }
+  }
   // 用户主动中键平移或滚轮时自动退出视角跟随，避免抢镜头
   if (followPeerId && e.target.closest('#viewport') && (e.button === 1 || spaceDown)) {
     followPeerId = null;
@@ -7035,6 +7203,688 @@ vp.addEventListener('wheel', () => {
     renderCollabUI();
   }
 }, { passive: true });
+
+// ---------- 画布备注评论与协作者实时提醒 ----------
+let openCommentId = null; // 'draft' | comment.id
+let draftComment = null;
+let commentsFilter = 'open'; // 'open' | 'resolved' | 'all'
+const unreadCommentIds = new Set();
+const notifiedCommentEvents = new Set();
+let commentAudioCtx = null;
+
+function commentById(id, canvasId = state.view) {
+  return (boardOf(canvasId)?.comments || []).find((cm) => cm.id === id) || null;
+}
+
+function unreadCommentCountAll() {
+  if (!unreadCommentIds.size) return 0;
+  let n = 0;
+  for (const cv of canvases()) {
+    for (const cm of cv.comments || []) {
+      if (unreadCommentIds.has(cm.id)) n++;
+    }
+  }
+  return n;
+}
+
+function unreadCommentCountIn(canvasId = state.view) {
+  if (!unreadCommentIds.size) return 0;
+  let n = 0;
+  for (const cm of boardOf(canvasId)?.comments || []) {
+    if (unreadCommentIds.has(cm.id)) n++;
+  }
+  return n;
+}
+
+function commentPos(cm) {
+  if (!cm) return { x: 0, y: 0 };
+  if (cm.targetId) {
+    const bx = boxOf({ id: cm.targetId });
+    if (bx) {
+      const x = Math.round(bx.x + (cm.dx ?? 0));
+      const y = Math.round(bx.y + (cm.dy ?? 0));
+      cm.x = x;
+      cm.y = y;
+      return { x, y };
+    }
+  }
+  return { x: Math.round(cm.x || 0), y: Math.round(cm.y || 0) };
+}
+
+function targetLabelOf(targetId) {
+  if (!targetId) return '';
+  const sh = shapeById(targetId);
+  if (sh) {
+    const label = sh.text?.trim() ? `「${sh.text.trim().slice(0, 14)}」` : '';
+    return `📌 ${SHAPE_NAMES[sh.t] || '形状'}${label}`;
+  }
+  const cd = findCard(targetId);
+  if (cd) return `📌 卡片「${(cd.name || '便签').slice(0, 14)}」`;
+  return '';
+}
+
+function playCommentPing() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!commentAudioCtx) commentAudioCtx = new AC();
+    if (commentAudioCtx.state === 'suspended') {
+      commentAudioCtx.resume().catch(() => {});
+    }
+    if (commentAudioCtx.state !== 'running') return;
+    const now = commentAudioCtx.currentTime;
+    const note = (freq, start, dur) => {
+      const osc = commentAudioCtx.createOscillator();
+      const gain = commentAudioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + start);
+      gain.gain.setValueAtTime(0.0001, now + start);
+      gain.gain.linearRampToValueAtTime(0.045, now + start + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + start + dur);
+      osc.connect(gain);
+      gain.connect(commentAudioCtx.destination);
+      osc.start(now + start);
+      osc.stop(now + start + dur + 0.02);
+    };
+    note(880, 0, 0.14);
+    note(1174.66, 0.09, 0.18);
+  } catch {}
+}
+
+function commentPinHTML(cm, isDraft = false) {
+  const pos = commentPos(cm);
+  const init = isDraft ? '+' : (cm.resolved ? '✓' : collabInitial(cm.authorName || '我'));
+  const isUnread = !isDraft && unreadCommentIds.has(cm.id);
+  const isActive = isDraft ? openCommentId === 'draft' : openCommentId === cm.id;
+  const replyCnt = !isDraft ? (cm.replies || []).length : 0;
+  const preview = isDraft ? '' : `<div class="pin-preview"><b>${esc(cm.authorName || '成员')}</b><span>${esc(cm.text || '')}</span></div>`;
+  const cls = `comment-pin${isDraft ? ' is-draft' : ''}${cm.resolved ? ' is-resolved' : ''}${isUnread ? ' is-unread' : ''}${isActive ? ' is-active' : ''}`;
+  const aria = isDraft ? '正在添加新备注' : `${cm.authorName || '成员'} 的备注：${cm.text || ''}`;
+  return `<button type="button" class="${cls}" data-cid="${isDraft ? 'draft' : esc(cm.id)}" style="--cx:${pos.x}px;--cy:${pos.y}px;--c:${esc(cm.authorColor || '#2563eb')}" aria-label="${esc(aria)}">
+    <span class="pin-init">${esc(init)}</span>
+    ${replyCnt ? `<span class="pin-cnt">${replyCnt}</span>` : ''}
+    ${preview}
+  </button>`;
+}
+
+function renderCommentsLayer() {
+  const layer = $('#commentLayer');
+  if (!layer) return;
+  const b = boardOf();
+  if (!b) {
+    layer.innerHTML = '';
+    return;
+  }
+  const items = (b.comments || []).map((cm) => commentPinHTML(cm, false));
+  if (openCommentId === 'draft' && draftComment) {
+    items.push(commentPinHTML(draftComment, true));
+  }
+  layer.innerHTML = items.join('');
+}
+
+function syncCommentPinPositions() {
+  const layer = $('#commentLayer');
+  if (!layer) return;
+  const b = boardOf();
+  if (!b) return;
+  for (const cm of b.comments || []) {
+    if (bd?.mode === 'comment-drag' && bd.cm?.id === cm.id) continue;
+    const pos = commentPos(cm);
+    const el = layer.querySelector(`.comment-pin[data-cid="${CSS.escape(cm.id)}"]`);
+    if (el) {
+      el.style.setProperty('--cx', `${pos.x}px`);
+      el.style.setProperty('--cy', `${pos.y}px`);
+    }
+  }
+  if (openCommentId) positionCommentPop();
+}
+
+function positionCommentPop() {
+  const pop = $('#commentThreadPop');
+  if (!pop || pop.hidden || !openCommentId) return;
+  let pos = null;
+  if (openCommentId === 'draft' && draftComment) {
+    pos = commentPos(draftComment);
+  } else {
+    const cm = commentById(openCommentId);
+    if (!cm) { pop.hidden = true; return; }
+    pos = (bd?.mode === 'comment-drag' && bd.cm?.id === cm.id && bd.cur) ? bd.cur : commentPos(cm);
+  }
+  const vr = $('#viewport')?.getBoundingClientRect();
+  const cv = $('#canvasView')?.getBoundingClientRect();
+  if (!vr || !cv || !cv.width) return;
+  const c = cam();
+  const tipX = vr.left - cv.left + c.x + pos.x * c.z;
+  const tipY = vr.top - cv.top + c.y + pos.y * c.z;
+  const pw = pop.offsetWidth || 328;
+  const ph = pop.offsetHeight || 220;
+  const minLeft = cv.width > 500 ? 64 : 12;
+  const maxRight = cv.width - 12;
+
+  let left, top;
+  if (tipX + 44 + pw <= maxRight) {
+    left = tipX + 44;
+    top = tipY - 46;
+  } else if (tipX - pw - 14 >= minLeft) {
+    left = tipX - pw - 14;
+    top = tipY - 46;
+  } else {
+    left = Math.max(minLeft, Math.min(maxRight - pw, tipX - pw / 2));
+    const roomBelow = cv.height - (tipY + 14) - 14;
+    const roomAbove = (tipY - 46) - 14;
+    top = roomBelow >= ph || roomBelow >= roomAbove ? tipY + 14 : tipY - ph - 46;
+  }
+  const minTop = left < 360 ? 58 : 14;
+  top = Math.max(minTop, Math.min(cv.height - ph - 14, top));
+  pop.style.left = `${Math.round(left)}px`;
+  pop.style.top = `${Math.round(top)}px`;
+}
+
+function closeCommentPop() {
+  const hadDraft = openCommentId === 'draft';
+  openCommentId = null;
+  draftComment = null;
+  const pop = $('#commentThreadPop');
+  if (pop) {
+    pop.hidden = true;
+    pop.removeAttribute('data-cid');
+  }
+  if (hadDraft) renderCommentsLayer();
+  else $$('#commentLayer .comment-pin.is-active').forEach((el) => el.classList.remove('is-active'));
+}
+
+function openCommentDraftAt(wx, wy, targetId = null) {
+  const prof = getCollabProfile();
+  const bx = targetId ? boxOf({ id: targetId }) : null;
+  draftComment = {
+    id: 'draft',
+    x: Math.round(wx),
+    y: Math.round(wy),
+    ...(targetId && bx ? { targetId, dx: Math.round(wx - bx.x), dy: Math.round(wy - bx.y) } : {}),
+    authorId: prof.id,
+    authorName: prof.name,
+    authorColor: prof.color,
+  };
+  openCommentId = 'draft';
+  toggleCommentsPopover(false);
+  toggleCollabPopover(false);
+  renderCommentsLayer();
+  renderCommentThreadPop();
+  setTimeout(() => $('#commentThreadPop textarea')?.focus(), 20);
+}
+
+function openCommentDraftOnTarget(targetId) {
+  const bx = boxOf({ id: targetId });
+  if (!bx) return;
+  openCommentDraftAt(bx.x + Math.max(20, bx.w - 18), bx.y + 18, targetId);
+}
+
+function openCommentThread(cid) {
+  const cm = commentById(cid);
+  if (!cm) return;
+  draftComment = null;
+  openCommentId = cm.id;
+  if (unreadCommentIds.delete(cm.id)) {
+    renderCommentCenterUI();
+    renderViews();
+    if (!$('#commentsPopover').hidden) renderCommentsPopover();
+  }
+  renderCommentsLayer();
+  renderCommentThreadPop();
+  setTimeout(() => $('#commentThreadPop textarea')?.focus({ preventScroll: true }), 20);
+}
+
+function buildRepliesHTML(cm) {
+  if (!cm?.replies?.length) return '';
+  return cm.replies.map((r) => `<div class="ct-reply" data-rid="${esc(r.id)}">
+    <span class="ct-reply-av" style="--c:${esc(r.authorColor || '#2563eb')}">${esc(collabInitial(r.authorName))}</span>
+    <div class="ct-reply-body">
+      <div class="ct-reply-top"><b>${esc(r.authorName || '协作者')}</b><time>${esc(ago(r.createdAt || Date.now()))}</time></div>
+      <div class="ct-reply-text">${esc(r.text || '')}</div>
+    </div>
+  </div>`).join('');
+}
+
+function renderCommentThreadPop() {
+  const pop = $('#commentThreadPop');
+  if (!pop) return;
+  if (!openCommentId || !isCanvas(state.view)) {
+    pop.hidden = true;
+    return;
+  }
+
+  const typingInPop = !pop.hidden && pop.contains(document.activeElement) && document.activeElement.tagName === 'TEXTAREA';
+
+  if (openCommentId === 'draft') {
+    if (!draftComment) { pop.hidden = true; return; }
+    if (typingInPop && pop.dataset.cid === 'draft') {
+      positionCommentPop();
+      return;
+    }
+    const prof = getCollabProfile();
+    const tLabel = targetLabelOf(draftComment.targetId);
+    pop.dataset.cid = 'draft';
+    pop.innerHTML = `<div class="ct-head">
+        <span class="ct-av" style="--c:${esc(prof.color)}">${esc(collabInitial(prof.name))}</span>
+        <div class="ct-author-info"><b>${esc(prof.name)}</b><time>新备注</time></div>
+        <button type="button" class="icon-btn ct-icon-btn" data-cm-act="close" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      </div>
+      ${tLabel ? `<div class="ct-target">${esc(tLabel)}</div>` : ''}
+      <form class="ct-compose" data-cm-form="draft">
+        <textarea name="text" placeholder="写下备注内容…（发送后会即时提醒其他在线协作者）" maxlength="600"></textarea>
+        <div class="ct-actions">
+          <span class="ct-hint">Enter 发送 · Shift+Enter 换行</span>
+          <button type="button" class="btn ghost" data-cm-act="close">取消</button>
+          <button type="submit" class="btn primary">发送备注</button>
+        </div>
+      </form>`;
+    pop.hidden = false;
+    positionCommentPop();
+    return;
+  }
+
+  const cm = commentById(openCommentId);
+  if (!cm) {
+    pop.hidden = true;
+    openCommentId = null;
+    return;
+  }
+
+  // 若用户正在输入框内回复，仅原地刷新状态与回复列表，避免打断输入与丢失焦点
+  if (typingInPop && pop.dataset.cid === cm.id) {
+    const resBtn = pop.querySelector('[data-cm-act="resolve"]');
+    if (resBtn) {
+      resBtn.className = `ct-resolve-btn${cm.resolved ? ' done' : ''}`;
+      resBtn.textContent = cm.resolved ? '✓ 已解决' : '✓ 标记解决';
+    }
+    let repliesEl = pop.querySelector('.ct-replies');
+    if (cm.replies?.length) {
+      if (!repliesEl) {
+        repliesEl = document.createElement('div');
+        repliesEl.className = 'ct-replies';
+        pop.querySelector('.ct-main-body')?.after(repliesEl);
+      }
+      const prevLen = repliesEl.children.length;
+      repliesEl.innerHTML = buildRepliesHTML(cm);
+      if (cm.replies.length > prevLen) repliesEl.scrollTop = repliesEl.scrollHeight;
+    } else if (repliesEl) {
+      repliesEl.remove();
+    }
+    positionCommentPop();
+    return;
+  }
+
+  const tLabel = targetLabelOf(cm.targetId);
+  pop.dataset.cid = cm.id;
+  pop.innerHTML = `<div class="ct-head">
+      <span class="ct-av" style="--c:${esc(cm.authorColor || '#2563eb')}">${esc(collabInitial(cm.authorName))}</span>
+      <div class="ct-author-info"><b>${esc(cm.authorName || '协作者')}</b><time>${esc(fmtDate(cm.createdAt || Date.now()))}</time></div>
+      <button type="button" class="ct-resolve-btn${cm.resolved ? ' done' : ''}" data-cm-act="resolve" title="${cm.resolved ? '重新打开此备注' : '标记为已解决'}">${cm.resolved ? '✓ 已解决' : '✓ 标记解决'}</button>
+      <button type="button" class="icon-btn ct-icon-btn danger" data-cm-act="delete" aria-label="删除备注" title="删除此备注"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m-7 0 1 12a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1l1-12"/></svg></button>
+      <button type="button" class="icon-btn ct-icon-btn" data-cm-act="close" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+    ${tLabel ? `<div class="ct-target">${esc(tLabel)}</div>` : ''}
+    <div class="ct-main-body">${esc(cm.text || '')}</div>
+    ${cm.replies?.length ? `<div class="ct-replies">${buildRepliesHTML(cm)}</div>` : ''}
+    <form class="ct-compose" data-cm-form="reply">
+      <textarea name="text" placeholder="添加回复…" maxlength="600"></textarea>
+      <div class="ct-actions">
+        <span class="ct-hint">Enter 发送</span>
+        <button type="submit" class="btn primary">回复</button>
+      </div>
+    </form>`;
+  pop.hidden = false;
+  const repliesEl = pop.querySelector('.ct-replies');
+  if (repliesEl) repliesEl.scrollTop = repliesEl.scrollHeight;
+  positionCommentPop();
+}
+
+function renderCommentCenterUI() {
+  const btn = $('#commentCenterBtn');
+  const cntPill = $('#commentCountPill');
+  const unreadBadge = $('#commentUnreadBadge');
+  if (!btn || !cntPill || !unreadBadge) return;
+  const b = boardOf();
+  if (!b) {
+    cntPill.hidden = true;
+    unreadBadge.hidden = true;
+    btn.classList.remove('has-unread');
+    return;
+  }
+  const openCnt = (b.comments || []).filter((cm) => !cm.resolved).length;
+  const unreadCnt = unreadCommentCountIn(b.id);
+  cntPill.textContent = String(openCnt);
+  cntPill.hidden = openCnt === 0 || unreadCnt > 0;
+  unreadBadge.textContent = unreadCnt > 99 ? '99+' : String(unreadCnt);
+  unreadBadge.hidden = unreadCnt === 0;
+  btn.classList.toggle('has-unread', unreadCnt > 0);
+}
+
+function toggleCommentsPopover(force) {
+  const pop = $('#commentsPopover'), btn = $('#commentCenterBtn');
+  if (!pop || !btn) return;
+  const open = typeof force === 'boolean' ? force : pop.hidden;
+  if (open) toggleCollabPopover(false);
+  pop.hidden = !open;
+  btn.setAttribute('aria-expanded', String(open));
+  if (open) {
+    const ws = $('#canvasWorkspace');
+    if (ws && !document.body.classList.contains('canvas-maximized') && innerWidth > 720) {
+      const wr = ws.getBoundingClientRect(), br = btn.getBoundingClientRect();
+      const left = Math.max(16, Math.min(br.left - wr.left, wr.width - 384));
+      pop.style.left = `${Math.round(left)}px`;
+    } else {
+      pop.style.left = '';
+    }
+    renderCommentsPopover();
+  }
+}
+
+function renderCommentsPopover() {
+  const pop = $('#commentsPopover');
+  if (!pop || pop.hidden) return;
+  const b = boardOf();
+  const all = [...(b?.comments || [])].sort((a, b) => (b._u || b.createdAt || 0) - (a._u || a.createdAt || 0));
+  const openList = all.filter((c) => !c.resolved);
+  const resList = all.filter((c) => c.resolved);
+  const unreadHere = unreadCommentCountIn(b?.id);
+  const list = commentsFilter === 'open' ? openList : commentsFilter === 'resolved' ? resList : all;
+
+  const listHTML = list.length
+    ? list.map((cm) => {
+      const isUnread = unreadCommentIds.has(cm.id);
+      const tLabel = targetLabelOf(cm.targetId);
+      const replyCnt = (cm.replies || []).length;
+      const lastReply = replyCnt ? cm.replies[replyCnt - 1] : null;
+      return `<button type="button" class="cmp-item${isUnread ? ' is-unread' : ''}${cm.resolved ? ' is-resolved' : ''}" data-cm-jump="${esc(cm.id)}">
+        <span class="cmp-item-av" style="--c:${esc(cm.authorColor || '#2563eb')}">${esc(collabInitial(cm.authorName))}</span>
+        <span class="cmp-item-body">
+          <span class="cmp-item-top"><b>${esc(cm.authorName || '协作者')}</b><time>${esc(ago(cm._u || cm.createdAt || Date.now()))}</time></span>
+          <span class="cmp-item-text">${esc(cm.text || '')}</span>
+          <span class="cmp-item-meta">
+            ${cm.resolved ? '<span class="cmp-tag resolved">✓ 已解决</span>' : ''}
+            ${tLabel ? `<span class="cmp-tag">${esc(tLabel)}</span>` : ''}
+            ${replyCnt ? `<span>${replyCnt} 条回复${lastReply ? ` · ${esc(lastReply.authorName)}` : ''}</span>` : '<span>点击定位并回复</span>'}
+          </span>
+        </span>
+        ${isUnread ? '<span class="cmp-unread-dot" aria-label="未读"></span>' : ''}
+      </button>`;
+    }).join('')
+    : `<div class="cmp-empty">${commentsFilter === 'resolved' ? '暂无已解决的备注' : '当前画布还没有备注。<br>点击右侧「+ 添加备注」或按 <kbd>C</kbd> 键即可随时批注并提醒团队成员。'}</div>`;
+
+  pop.innerHTML = `<div class="cmp-head">
+      <h3>画布备注${all.length ? ` (${all.length})` : ''}</h3>
+      ${unreadHere ? '<button type="button" class="cmp-mark-read" data-cmp-act="mark-all-read">全部已读</button>' : ''}
+      <button type="button" class="btn primary cmp-add-btn" data-cmp-act="add-tool">+ 添加备注</button>
+    </div>
+    <div class="cmp-filters" role="group" aria-label="筛选备注状态">
+      <button type="button" class="cmp-filter" data-cmp-filter="open" aria-pressed="${commentsFilter === 'open'}">待处理<b>${openList.length}</b></button>
+      <button type="button" class="cmp-filter" data-cmp-filter="resolved" aria-pressed="${commentsFilter === 'resolved'}">已解决<b>${resList.length}</b></button>
+      <button type="button" class="cmp-filter" data-cmp-filter="all" aria-pressed="${commentsFilter === 'all'}">全部<b>${all.length}</b></button>
+    </div>
+    <div class="cmp-list">${listHTML}</div>`;
+}
+
+function notifyCollabComment(action, cm, itemId, text, ts) {
+  if (!collabSession || collabSession.joining || isCollabSuppressed()) return;
+  const prof = getCollabProfile();
+  collabSession.send('comment-notify', {
+    canvasId: collabSession.canvasId,
+    canvasTitle: area(collabSession.canvasId)?.title || '协作画布',
+    eventKey: `${action}:${cm.id}:${itemId}`,
+    action,
+    commentId: cm.id,
+    comment: collab.clonePlain(cm),
+    authorId: prof.id,
+    authorName: prof.name,
+    authorColor: prof.color,
+    text: String(text || '').slice(0, 140),
+    ts: ts || Date.now(),
+  });
+}
+
+async function handleRemoteCommentNotify(pkt) {
+  if (!pkt?.commentId) return;
+  const myId = getCollabProfile().id;
+  if (pkt.authorId === myId) return;
+
+  const key = pkt.eventKey || `${pkt.action}:${pkt.commentId}:${pkt.ts || ''}`;
+  if (notifiedCommentEvents.has(key)) return;
+  notifiedCommentEvents.add(key);
+  if (notifiedCommentEvents.size > 500) {
+    notifiedCommentEvents.delete(notifiedCommentEvents.values().next().value);
+  }
+
+  // 若 comment-notify 先于 board-sync 到达，立即将评论合并进本地画布，消除点击「查看」的竞态窗口
+  const cv = pkt.canvasId ? area(pkt.canvasId) : null;
+  if (cv && cv.kind === 'canvas' && pkt.comment) {
+    suppressCollabDepth++;
+    try {
+      cv.comments = collab.mergeComments(cv.comments || [], [pkt.comment], collabSession?.tombstones || {});
+      await db.put('columns', cv).catch(() => {});
+      recordCanvasBaseline(cv);
+      if (state.view === cv.id) {
+        $('#canvasEmpty').hidden = cardsIn(cv.id, false).length > 0 || (cv.shapes?.length || 0) > 0 || (cv.comments?.length || 0) > 0;
+        renderCommentsLayer();
+        renderCommentThreadPop();
+      }
+    } finally {
+      suppressCollabDepth = Math.max(0, suppressCollabDepth - 1);
+    }
+  }
+
+  const viewingThread = isCanvas(state.view) && state.view === pkt.canvasId && openCommentId === pkt.commentId;
+  if ((pkt.action === 'add' || pkt.action === 'reply') && !viewingThread) {
+    unreadCommentIds.add(pkt.commentId);
+  }
+
+  renderCommentCenterUI();
+  renderCommentsLayer();
+  renderViews();
+  if (!$('#commentsPopover').hidden) renderCommentsPopover();
+
+  playCommentPing();
+  const rawSnip = String(pkt.text || '').replace(/\s+/g, ' ').trim();
+  const snip = rawSnip.length > 26 ? `${rawSnip.slice(0, 26)}…` : rawSnip;
+  const who = pkt.authorName || '同伴';
+  const msg = pkt.action === 'reply'
+    ? `💬 ${who} 回复了备注${snip ? `：「${snip}」` : ''}`
+    : pkt.action === 'resolve'
+      ? `✓ ${who} 已解决备注${snip ? `：「${snip}」` : ''}`
+      : `💬 ${who} 添加了备注${snip ? `：「${snip}」` : ''}`;
+
+  toast(msg, {
+    commentAlert: true,
+    color: pkt.authorColor || '#2563eb',
+    duration: 8000,
+    action: '查看',
+    onAction: () => focusComment(pkt.commentId, pkt.canvasId),
+  });
+}
+
+function focusComment(cid, canvasId) {
+  toggleCommentsPopover(false);
+  if (canvasId && state.view !== canvasId && area(canvasId)?.kind === 'canvas') {
+    setView(canvasId);
+    render();
+  }
+  const cm = commentById(cid, canvasId || state.view);
+  if (!cm) {
+    toast('该备注已被删除');
+    return;
+  }
+  const pos = commentPos(cm);
+  const r = $('#viewport')?.getBoundingClientRect();
+  if (r?.width) {
+    const z = Math.max(0.75, Math.min(1.35, cam().z));
+    tweenCam({ z, x: r.width / 2 - pos.x * z, y: r.height / 2 - pos.y * z });
+  }
+  openCommentThread(cm.id);
+}
+
+async function submitDraftComment(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text || !draftComment) return;
+  const b = boardOf();
+  if (!b) return;
+  record();
+  const prof = getCollabProfile();
+  const now = Date.now();
+  const pos = commentPos(draftComment);
+  const cm = {
+    id: uid(),
+    x: pos.x,
+    y: pos.y,
+    ...(draftComment.targetId ? { targetId: draftComment.targetId, dx: Math.round(draftComment.dx || 0), dy: Math.round(draftComment.dy || 0) } : {}),
+    authorId: prof.id,
+    authorName: prof.name,
+    authorColor: prof.color,
+    text,
+    createdAt: now,
+    resolved: false,
+    replies: [],
+    _u: now,
+  };
+  b.comments ||= [];
+  b.comments.push(cm);
+  draftComment = null;
+  openCommentId = cm.id;
+  afterCreateTool();
+  await saveBoard();
+  notifyCollabComment('add', cm, cm.id, text, now);
+}
+
+async function submitCommentReply(cid, rawText) {
+  const text = String(rawText || '').trim();
+  const cm = commentById(cid);
+  if (!text || !cm) return;
+  record();
+  const prof = getCollabProfile();
+  const now = Date.now();
+  const reply = {
+    id: uid(),
+    authorId: prof.id,
+    authorName: prof.name,
+    authorColor: prof.color,
+    text,
+    createdAt: now,
+    _u: now,
+  };
+  cm.replies ||= [];
+  cm.replies.push(reply);
+  if (cm.resolved) {
+    cm.resolved = false;
+    delete cm.resolvedBy;
+    delete cm.resolvedAt;
+  }
+  cm._u = now;
+  await saveBoard();
+  notifyCollabComment('reply', cm, reply.id, text, now);
+}
+
+async function toggleResolveComment(cid) {
+  const cm = commentById(cid);
+  if (!cm) return;
+  record();
+  const prof = getCollabProfile();
+  const now = Date.now();
+  cm.resolved = !cm.resolved;
+  if (cm.resolved) {
+    cm.resolvedBy = prof.name;
+    cm.resolvedAt = now;
+  } else {
+    delete cm.resolvedBy;
+    delete cm.resolvedAt;
+  }
+  cm._u = now;
+  unreadCommentIds.delete(cm.id);
+  await saveBoard();
+  if (cm.resolved) notifyCollabComment('resolve', cm, `res:${now}`, cm.text, now);
+}
+
+async function deleteCommentThread(cid) {
+  const b = boardOf();
+  const cm = b && commentById(cid);
+  if (!b || !cm) return;
+  record();
+  const delIds = [cm.id, ...(cm.replies || []).map((r) => r.id)];
+  b.comments = (b.comments || []).filter((x) => x.id !== cm.id);
+  if (collabSession?.canvasId === b.id) collabSession.recordTombstones(delIds, Date.now());
+  unreadCommentIds.delete(cm.id);
+  if (openCommentId === cm.id) openCommentId = null;
+  await saveBoard();
+  toast('已删除备注', { action: '撤销', onAction: () => undoBoard() });
+}
+
+$('#commentThreadPop').addEventListener('click', (e) => {
+  const actBtn = e.target.closest('[data-cm-act]');
+  if (!actBtn) return;
+  const act = actBtn.dataset.cmAct;
+  if (act === 'close') closeCommentPop();
+  else if (act === 'resolve' && openCommentId && openCommentId !== 'draft') toggleResolveComment(openCommentId);
+  else if (act === 'delete' && openCommentId && openCommentId !== 'draft') deleteCommentThread(openCommentId);
+});
+
+$('#commentThreadPop').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target.closest('[data-cm-form]');
+  if (!form) return;
+  const ta = form.querySelector('textarea[name="text"]');
+  const val = ta?.value || '';
+  if (!val.trim()) { ta?.focus(); return; }
+  if (form.dataset.cmForm === 'draft') {
+    await submitDraftComment(val);
+  } else if (openCommentId && openCommentId !== 'draft') {
+    ta.value = '';
+    await submitCommentReply(openCommentId, val);
+  }
+});
+
+$('#commentThreadPop').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    closeCommentPop();
+    return;
+  }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.target.matches('textarea')) {
+    e.preventDefault();
+    e.target.closest('form')?.requestSubmit();
+  }
+});
+
+$('#commentsPopover').addEventListener('click', (e) => {
+  const act = e.target.closest('[data-cmp-act]')?.dataset.cmpAct;
+  if (act === 'mark-all-read') {
+    for (const cm of boardOf()?.comments || []) unreadCommentIds.delete(cm.id);
+    renderCommentCenterUI();
+    renderCommentsLayer();
+    renderViews();
+    renderCommentsPopover();
+    return;
+  }
+  if (act === 'add-tool') {
+    toggleCommentsPopover(false);
+    setTool('comment');
+    return;
+  }
+  const f = e.target.closest('[data-cmp-filter]')?.dataset.cmpFilter;
+  if (f) {
+    commentsFilter = f;
+    renderCommentsPopover();
+    return;
+  }
+  const jumpId = e.target.closest('[data-cm-jump]')?.dataset.cmJump;
+  if (jumpId) {
+    focusComment(jumpId, state.view);
+  }
+});
+
+$('#commentsPopover').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    toggleCommentsPopover(false);
+  }
+});
 
 async function initCollabFromUrl() {
   const room = collab.normalizeRoomId(new URLSearchParams(location.search).get('room') || '');

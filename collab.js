@@ -60,8 +60,73 @@ export function mergeTombstones(a = {}, b = {}) {
 }
 
 /**
- * 合并画布白板状态（形状 shapes、连线 links、标题 title）
- * 采用 LWW（Last-Write-Wins，基于 _u 时间戳）+ 删除墓碑（tombstones），防止已删除形状“复活”。
+ * 合并画布评论/备注列表（支持并发回复无冲突合并 + 解决状态 LWW + 墓碑删除保护）
+ */
+export function mergeComments(localComments = [], remoteComments = [], tombstones = {}) {
+  const mergeReplies = (localReplies = [], remoteReplies = []) => {
+    const rMap = new Map();
+    for (const r of localReplies || []) {
+      if (!r?.id) continue;
+      const ru = Number(r._u || r.createdAt || 1);
+      if ((tombstones[r.id] || 0) >= ru) continue;
+      rMap.set(r.id, clonePlain({ ...r, _u: ru }));
+    }
+    for (const r of remoteReplies || []) {
+      if (!r?.id) continue;
+      const ru = Number(r._u || r.createdAt || 1);
+      if ((tombstones[r.id] || 0) >= ru) {
+        const cur = rMap.get(r.id);
+        if (cur && (tombstones[r.id] || 0) >= (cur._u || 1)) rMap.delete(r.id);
+        continue;
+      }
+      const cur = rMap.get(r.id);
+      if (!cur || ru >= (cur._u || 1)) {
+        rMap.set(r.id, clonePlain({ ...r, _u: ru }));
+      }
+    }
+    return [...rMap.values()].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)));
+  };
+
+  const map = new Map();
+  for (const cm of localComments || []) {
+    if (!cm?.id) continue;
+    const u = Number(cm._u || cm.createdAt || 1);
+    if ((tombstones[cm.id] || 0) >= u) continue;
+    const replies = mergeReplies(cm.replies, []);
+    const maxRU = replies.reduce((m, r) => Math.max(m, Number(r._u || r.createdAt || 0)), 0);
+    map.set(cm.id, clonePlain({ ...cm, replies, _u: Math.max(u, maxRU) }));
+  }
+
+  for (const cm of remoteComments || []) {
+    if (!cm?.id) continue;
+    const u = Number(cm._u || cm.createdAt || 1);
+    if ((tombstones[cm.id] || 0) >= u) {
+      const cur = map.get(cm.id);
+      if (cur && (tombstones[cm.id] || 0) >= (cur._u || 1)) map.delete(cm.id);
+      continue;
+    }
+    const cur = map.get(cm.id);
+    if (!cur) {
+      const replies = mergeReplies([], cm.replies);
+      const maxRU = replies.reduce((m, r) => Math.max(m, Number(r._u || r.createdAt || 0)), 0);
+      map.set(cm.id, clonePlain({ ...cm, replies, _u: Math.max(u, maxRU) }));
+    } else {
+      const curU = Number(cur._u || cur.createdAt || 1);
+      const base = u >= curU ? clonePlain(cm) : clonePlain(cur);
+      const replies = mergeReplies(cur.replies, cm.replies);
+      const maxRU = replies.reduce((m, r) => Math.max(m, Number(r._u || r.createdAt || 0)), 0);
+      base.replies = replies;
+      base._u = Math.max(curU, u, maxRU);
+      map.set(cm.id, base);
+    }
+  }
+
+  return [...map.values()].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)));
+}
+
+/**
+ * 合并画布白板状态（形状 shapes、连线 links、评论备注 comments、标题 title）
+ * 采用 LWW（Last-Write-Wins，基于 _u 时间戳）+ 删除墓碑（tombstones），防止已删除对象“复活”。
  */
 export function mergeBoardState(localBoard, remoteBoard, tombstones = {}) {
   const tombs = mergeTombstones(localBoard?.tombstones, mergeTombstones(remoteBoard?.tombstones, tombstones));
@@ -98,6 +163,7 @@ export function mergeBoardState(localBoard, remoteBoard, tombstones = {}) {
     if (tId && (tombs[tId] || 0) >= (l._u || 1)) return false;
     return true;
   });
+  const comments = mergeComments(localBoard?.comments, remoteBoard?.comments, tombs);
 
   const localU = Number(localBoard?._u || 0);
   const remoteU = Number(remoteBoard?._u || 0);
@@ -108,6 +174,7 @@ export function mergeBoardState(localBoard, remoteBoard, tombstones = {}) {
     _u: Math.max(localU, remoteU, Date.now()),
     shapes,
     links,
+    comments,
     tombstones: tombs,
   };
 }
@@ -749,7 +816,8 @@ export class CollabSession {
       case 'board-sync':
       case 'shape-live':
       case 'cards-sync':
-      case 'card-live': {
+      case 'card-live':
+      case 'comment-notify': {
         this._emit(pkt.type, pkt);
         break;
       }

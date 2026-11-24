@@ -4,6 +4,7 @@ import {
   generateRoomId,
   normalizeRoomId,
   mergeBoardState,
+  mergeComments,
   mergeCanvasCards,
   chunkArrayBuffer,
   BlobAssembler,
@@ -544,6 +545,208 @@ test('star-topology WebRTC relay forwards cursors, tombstones, and blob chunks b
   assert.ok(guestCReceivedBlob);
   assert.equal(guestCReceivedBlob.cardId, 'card-pdf');
   assert.deepEqual(guestCReceivedBlob.bytes, guestBFile);
+
+  host.stop();
+  guestB.stop();
+  guestC.stop();
+});
+
+test('mergeComments preserves concurrent replies, resolves LWW status, and honors deletion tombstones', () => {
+  const local = {
+    title: '设计评审画布',
+    _u: 100,
+    shapes: [],
+    links: [],
+    comments: [
+      {
+        id: 'cm-1',
+        x: 160,
+        y: 220,
+        targetId: 'sh-title',
+        dx: 20,
+        dy: 10,
+        authorId: 'u-alice',
+        authorName: 'Alice',
+        authorColor: '#2563eb',
+        text: '主标题建议放大一点',
+        createdAt: 100,
+        resolved: false,
+        replies: [
+          { id: 'r-bob', authorId: 'u-bob', authorName: 'Bob', text: '收到，改成 32px', createdAt: 150, _u: 150 },
+        ],
+        _u: 150,
+      },
+      {
+        id: 'cm-del',
+        x: 400,
+        y: 300,
+        authorId: 'u-alice',
+        authorName: 'Alice',
+        text: '这条备注将被删除',
+        createdAt: 110,
+        replies: [],
+        _u: 110,
+      },
+    ],
+  };
+
+  const remote = {
+    title: '设计评审画布',
+    _u: 210,
+    shapes: [],
+    links: [],
+    comments: [
+      {
+        id: 'cm-1',
+        x: 160,
+        y: 220,
+        targetId: 'sh-title',
+        dx: 20,
+        dy: 10,
+        authorId: 'u-alice',
+        authorName: 'Alice',
+        authorColor: '#2563eb',
+        text: '主标题建议放大一点',
+        createdAt: 100,
+        resolved: true,
+        resolvedBy: 'Carol',
+        resolvedAt: 210,
+        replies: [
+          { id: 'r-carol', authorId: 'u-carol', authorName: 'Carol', text: '我也觉得 32px 更好看', createdAt: 200, _u: 200 },
+        ],
+        _u: 210,
+      },
+      {
+        id: 'cm-del',
+        x: 400,
+        y: 300,
+        authorId: 'u-alice',
+        authorName: 'Alice',
+        text: '这条备注将被删除',
+        createdAt: 110,
+        replies: [],
+        _u: 110,
+      },
+      {
+        id: 'cm-2',
+        x: 520,
+        y: 120,
+        authorId: 'u-carol',
+        authorName: 'Carol',
+        text: '右下角加个二维码',
+        createdAt: 205,
+        resolved: false,
+        replies: [],
+        _u: 205,
+      },
+    ],
+  };
+
+  const direct = mergeComments(local.comments, remote.comments, { 'cm-del': 180 });
+  assert.deepEqual(direct.map((c) => c.id), ['cm-1', 'cm-2']);
+
+  const merged = mergeBoardState(local, remote, { 'cm-del': 180 });
+  assert.deepEqual(merged.comments.map((c) => c.id), ['cm-1', 'cm-2']);
+  const cm1 = merged.comments.find((c) => c.id === 'cm-1');
+  assert.equal(cm1.resolved, true);
+  assert.equal(cm1.resolvedBy, 'Carol');
+  // 两位协作者在同一个备注下并发添加的回复必须全部保留且按时间排序
+  assert.deepEqual(cm1.replies.map((r) => r.id), ['r-bob', 'r-carol']);
+});
+
+test('CollabSession delivers real-time comment-notify events through WebRTC star-topology relay', async () => {
+  function makeMockRtcPair(hostSession, hostPeerLabel, guestSession, guestPeerLabel) {
+    const hostConn = {
+      peer: guestPeerLabel,
+      open: true,
+      handlers: {},
+      on(ev, fn) { (this.handlers[ev] ||= []).push(fn); },
+      send(pkt) { queueMicrotask(() => guestConn._emit('data', structuredClone(pkt))); },
+      close() { this.open = false; this._emit('close'); },
+      _emit(ev, arg) { (this.handlers[ev] || []).forEach((f) => f(arg)); },
+    };
+    const guestConn = {
+      peer: hostPeerLabel,
+      open: true,
+      handlers: {},
+      on(ev, fn) { (this.handlers[ev] ||= []).push(fn); },
+      send(pkt) { queueMicrotask(() => hostConn._emit('data', structuredClone(pkt))); },
+      close() { this.open = false; this._emit('close'); },
+      _emit(ev, arg) { (this.handlers[ev] || []).forEach((f) => f(arg)); },
+    };
+    hostSession._bindRTCConn(hostConn);
+    guestSession._bindRTCConn(guestConn);
+  }
+
+  const isolated = () => ({ postMessage() {}, close() {} });
+  const hostBoard = { canvasId: 'cv-cm', title: '评论测试画布', _u: 100, shapes: [], links: [], comments: [], cards: [] };
+  const hostAlerts = [];
+  const guestCAlerts = [];
+
+  const host = new CollabSession({
+    roomId: 'cmt001',
+    canvasId: 'cv-cm',
+    joining: false,
+    user: { id: 'u-h', name: '房主小王', color: '#2563eb' },
+    enableWebRTC: false,
+    transportFactory: isolated,
+    getSnapshot: () => hostBoard,
+    onEvent: (type, detail) => {
+      if (type === 'comment-notify') hostAlerts.push(detail);
+    },
+  });
+
+  const guestB = new CollabSession({
+    roomId: 'cmt001',
+    canvasId: 'cv-tmp-b',
+    joining: true,
+    user: { id: 'u-b', name: '李设计师', color: '#e11d48' },
+    enableWebRTC: false,
+    transportFactory: isolated,
+    onEvent: (type, detail) => {
+      if (type === 'welcome') guestB.markSynced(detail.snapshot.canvasId);
+    },
+  });
+
+  const guestC = new CollabSession({
+    roomId: 'cmt001',
+    canvasId: 'cv-tmp-c',
+    joining: true,
+    user: { id: 'u-c', name: '张产品', color: '#059669' },
+    enableWebRTC: false,
+    transportFactory: isolated,
+    onEvent: (type, detail) => {
+      if (type === 'welcome') guestC.markSynced(detail.snapshot.canvasId);
+      if (type === 'comment-notify') guestCAlerts.push(detail);
+    },
+  });
+
+  await host.start();
+  await guestB.start();
+  await guestC.start();
+  makeMockRtcPair(host, 'fangcun-wb-v1-cmt001', guestB, 'rtc-b');
+  makeMockRtcPair(host, 'fangcun-wb-v1-cmt001', guestC, 'rtc-c');
+  await new Promise((r) => setTimeout(r, 35));
+
+  guestB.send('comment-notify', {
+    canvasId: 'cv-cm',
+    eventKey: 'add:cm-99:cm-99',
+    action: 'add',
+    commentId: 'cm-99',
+    authorId: 'u-b',
+    authorName: '李设计师',
+    authorColor: '#e11d48',
+    text: '配色再亮一点更好看',
+  });
+  await new Promise((r) => setTimeout(r, 30));
+
+  assert.equal(hostAlerts.length, 1);
+  assert.equal(hostAlerts[0].commentId, 'cm-99');
+  assert.equal(hostAlerts[0].text, '配色再亮一点更好看');
+
+  assert.equal(guestCAlerts.length, 1);
+  assert.equal(guestCAlerts[0].authorName, '李设计师');
+  assert.equal(guestCAlerts[0].action, 'add');
 
   host.stop();
   guestB.stop();
