@@ -2424,7 +2424,29 @@ function tweenCam(to) {
   };
   camAnim = requestAnimationFrame(step);
 }
+// 平移惯性（Miro 同款）：松手时按最后 0.1 秒的速度继续滑动，摩擦衰减直到停下；任何点击 / 滚轮 / 缩放立刻停住
+const INERTIA_TAU = 325; // 衰减时间常数（毫秒），越大滑得越远
+function stopInertia() { if (camAnim) { cancelAnimationFrame(camAnim); camAnim = 0; } }
+function startInertia(vx, vy) {
+  stopInertia();
+  if (reduceMotion.matches || Math.hypot(vx, vy) < 0.25) return; // 太慢就不滑（px/ms）
+  const c = cam(), max = 4; // 限制最高速度，避免甩飞
+  const k = Math.min(1, max / Math.hypot(vx, vy)); vx *= k; vy *= k;
+  let last = performance.now();
+  const t0 = last;
+  const step = (now) => {
+    const dt = Math.min(40, now - last); last = now;
+    c.x += vx * dt; c.y += vy * dt;
+    const decay = Math.exp(-dt / INERTIA_TAU);
+    vx *= decay; vy *= decay;
+    applyCam();
+    if (Math.hypot(vx, vy) > 0.02 && now - t0 < 2000) camAnim = requestAnimationFrame(step);
+    else { camAnim = 0; saveCam(); }
+  };
+  camAnim = requestAnimationFrame(step);
+}
 function zoomAt(factor, clientX, clientY, animate = false) {
+  stopInertia();
   const c = cam(), r = $('#viewport').getBoundingClientRect();
   if (clientX == null) { clientX = r.left + r.width / 2; clientY = r.top + r.height / 2; }
   const z = Math.min(3, Math.max(0.15, c.z * factor));
@@ -2576,9 +2598,10 @@ vp.addEventListener('pointerdown', (e) => {
     pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) }; pan = null;
   } else {
     const c = cam();
-    pan = { sx: e.clientX, sy: e.clientY, x: c.x, y: c.y, moved: false, right: false, target: e.target };
+    pan = { sx: e.clientX, sy: e.clientY, x: c.x, y: c.y, moved: false, right: false, target: e.target, samples: [{ t: performance.now(), x: e.clientX, y: e.clientY }] };
   }
 });
+vp.addEventListener('pointerdown', stopInertia, true); // 滑动中再按下：立刻停住（像 Miro 一样「接住」画布）
 // 右键拖动后不弹菜单；macOS 按下右键就会触发菜单，先压住，松手时没拖动再弹卡片菜单
 let rightPanAt = 0;
 vp.addEventListener('pointerup', () => { if (pan?.right) { pan.released = true; if (pan.moved) rightPanAt = Date.now(); } }, true);
@@ -2747,6 +2770,10 @@ vp.addEventListener('pointermove', (e) => {
     const c = cam();
     c.x = pan.x + e.clientX - pan.sx; c.y = pan.y + e.clientY - pan.sy;
     if (Math.hypot(e.clientX - pan.sx, e.clientY - pan.sy) > 3) { pan.moved = true; vp.classList.add('panning'); }
+    // 记录最近 100ms 的轨迹，用来算松手时的速度
+    const now = performance.now();
+    pan.samples.push({ t: now, x: e.clientX, y: e.clientY });
+    while (pan.samples.length > 2 && now - pan.samples[0].t > 100) pan.samples.shift();
     applyCam();
   }
 });
@@ -2837,6 +2864,12 @@ async function endPointer(e) {
   if (pointers.size < 2) pinch = null;
   if (pan) {
     vp.classList.remove('panning'); saveCam();
+    // 惯性：松手前最后一小段在动才滑（停住再松手就不滑）
+    if (pan.moved && e.type === 'pointerup' && !pointers.size && pan.samples?.length > 1) {
+      const now = performance.now(), s = pan.samples, a = s[0], b = s[s.length - 1];
+      const dt = b.t - a.t;
+      if (dt > 8 && now - b.t < 60) startInertia((b.x - a.x) / dt, (b.y - a.y) / dt);
+    }
     if (pan.right && pan.moved) rightPanAt = Date.now();
     else if (pan.right && pan.menuHeld && e.type === 'pointerup') {
       const cardEl = pan.target?.closest?.('.card');
@@ -2868,9 +2901,21 @@ function highlightZoneUnder(x, y, el) {
 }
 vp.addEventListener('wheel', (e) => {
   e.preventDefault();
+  stopInertia();
+  // 触控板双指捏合（浏览器会带上 Ctrl）→ 缩放
   if (e.ctrlKey || e.metaKey) return zoomAt(Math.exp(-e.deltaY * 0.0025), e.clientX, e.clientY);
+  // 鼠标滚轮直接缩放（以鼠标位置为中心）；触控板双指滑动仍然是平移，Shift + 滚轮左右平移
+  // 区分方法：鼠标滚轮按「格」滚 —— Chrome / Edge / Safari 里每格 wheelDelta 是 120 的整数倍，Firefox 里按「行」滚；
+  // 触控板滑动的数值是连续的小步，通常不是 120 的倍数，还常带横向分量（系统缩放、浏览器缩放不影响这个判断）
+  const lineMode = e.deltaMode === 1, wd = e.wheelDeltaY || e.wheelDelta || 0;
+  const mouseWheel = lineMode || (e.deltaX === 0 && wd !== 0 && Math.abs(wd) % 120 === 0);
+  const trackpad = !mouseWheel;
+  if (!e.shiftKey && !trackpad && e.deltaY) {
+    const d = Math.max(-150, Math.min(150, e.deltaY * (lineMode ? 40 : 1)));
+    return zoomAt(Math.exp(-d * 0.0018), e.clientX, e.clientY);
+  }
   const c = cam();
-  c.x -= e.deltaX; c.y -= e.deltaY;
+  if (e.shiftKey && !e.deltaX) { c.x -= e.deltaY; } else { c.x -= e.deltaX; c.y -= e.deltaY; }
   applyCam();
   clearTimeout(vp._t); vp._t = setTimeout(saveCam, 200);
 }, { passive: false });
@@ -4296,7 +4341,7 @@ const SHORTCUTS = [
   ['拖动', [['Shift + 拖动', '只水平或只垂直移动'], ['Alt + 拖动', '复制一份拖走（形状、文件卡片都可以）'], ['Ctrl + 拖动', '暂时关闭对齐吸附（文件卡片上是转换圆环）'], ['Shift + 拖角', '等比缩放'], ['Alt + 拖边 / 角', '以中心对称缩放'], ['Shift / Alt + 画形状', '画正方形 / 从中心向外画'], ['拖连接点到空白处', '新建一个相连的形状']]],
   ['选择', [['左键拖空白处', '拉出多选框（框选卡片与形状）'], ['Shift + 点击', '加选 / 减选'], ['Ctrl + A', '全选画布内容'], ['Enter / 双击', '编辑文字 / 预览卡片'], ['Esc / Ctrl + Enter', '结束编辑']]],
   ['编辑', [['Ctrl + Z', '撤销'], ['Ctrl + Y / Ctrl + Shift + Z', '重做'], ['Ctrl + C / X / V', '复制 / 剪切 / 粘贴'], ['Ctrl + D', '原地复制'], ['Delete', '删除'], ['方向键', '微移（Shift 每次 40）'], ['Ctrl + 方向键', '在该方向新建相连形状'], ['Ctrl + ] / [', '置于顶层 / 底层'], ['Ctrl + B', '加粗'], ['Ctrl + Shift + . / ,', '放大 / 缩小字号']]],
-  ['视图', [['F', '最大化工作空间 / 沉浸模式'], ['鼠标中键 + 拖动', '平移画布（或空格 + 拖动）'], ['Ctrl + 滚轮', '缩放'], ['Shift + 1', '显示全部'], ['Shift + 2', '缩放到选中'], ['Shift + 0', '回到 100%'], ['?', '打开这张速查表']]],
+  ['视图', [['F', '最大化工作空间 / 沉浸模式'], ['鼠标中键 + 拖动', '平移画布（或空格 + 拖动），快速甩动松手会惯性滑动'], ['滚轮', '缩放（以鼠标位置为中心）'], ['Shift + 滚轮', '左右平移'], ['触控板双指滑动', '平移'], ['Shift + 1', '显示全部'], ['Shift + 2', '缩放到选中'], ['Shift + 0', '回到 100%'], ['?', '打开这张速查表']]],
 ];
 function showShortcuts() {
   const m = $('#modal');
