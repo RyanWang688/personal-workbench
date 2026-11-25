@@ -13,7 +13,7 @@
     // 尽早应用主题，避免刷新时闪一下
     try { var t = JSON.parse(localStorage.getItem('wb:theme') || '"auto"'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
   </script>
-  <link rel="stylesheet" href="style.css?v=58">
+  <link rel="stylesheet" href="style.css?v=59">
 </head>
 <body>
   <header class="topbar">
@@ -37,8 +37,8 @@
       <input id="search" type="search" placeholder="搜索文件和便签…  Ctrl+K" autocomplete="off" aria-label="搜索">
     </label>
     <div class="actions">
-      <button class="btn" data-action="add-files" title="选择文件添加到当前页面">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>添加文件</span>
+      <button class="btn primary-soft" data-action="add-files" title="上传文件或文件夹（支持批量多文件夹，自动保留子文件夹结构）">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg><span>上传</span>
       </button>
       <button class="btn" data-action="new-note" title="新建便签">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h10l4 4v12H5z"/><path d="M9 12h6M9 16h4"/></svg><span>便签</span>
@@ -179,8 +179,9 @@
   <dialog class="modal viewer" id="viewer"><div class="modal-inner" id="viewerInner"></div></dialog>
 
   <input type="file" id="fileInput" multiple hidden>
+  <input type="file" id="dirInput" webkitdirectory directory multiple hidden>
   <input type="file" id="restoreInput" accept=".wbk" hidden>
   <noscript>此工作台需要启用 JavaScript。</noscript>
-  <script type="module" src="app.js?v=69"></script>
+  <script type="module" src="app.js?v=70"></script>
 </body>
 </html>

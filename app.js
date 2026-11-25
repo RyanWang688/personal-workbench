@@ -5,6 +5,7 @@ import * as rn from './rename.js?v=1';
 import * as cpv from './canvas-preview.js?v=1';
 import * as zip from './zip.js?v=1';
 import * as assoc from './assoc.js?v=1';
+import * as upTree from './upload-tree.js?v=1';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -83,6 +84,10 @@ const byOrder = (a, b) => a.order - b.order;
 let areaById = new Map();
 let cardById = new Map();
 let cardsByCol = new Map();
+let foldersSorted = [];
+let childrenByParent = new Map();
+let deepCardsMemo = new Map();
+let deepSizeMemo = new Map();
 let indexesDirty = true;
 const invalidateIndexes = () => { indexesDirty = true; };
 function ensureIndexes() {
@@ -99,10 +104,20 @@ function ensureIndexes() {
     if (colId === TRASH) arr.sort((a, b) => (b.trashedAt || 0) - (a.trashedAt || 0));
     else arr.sort(byOrder);
   }
+  foldersSorted = state.areas.filter((a) => (a.kind || 'column') === 'folder').sort(byOrder);
+  childrenByParent = new Map();
+  for (const f of foldersSorted) {
+    const pid = f.parentId && areaById.get(f.parentId)?.kind === 'folder' ? f.parentId : '';
+    let subs = childrenByParent.get(pid);
+    if (!subs) childrenByParent.set(pid, (subs = []));
+    subs.push(f);
+  }
+  deepCardsMemo = new Map();
+  deepSizeMemo = new Map();
   indexesDirty = false;
 }
 const kindOf = (a) => a.kind || 'column';
-const areasOf = (kind) => state.areas.filter((a) => kindOf(a) === kind).sort(byOrder);
+const areasOf = (kind) => (kind === 'folder' ? (ensureIndexes(), foldersSorted) : state.areas.filter((a) => kindOf(a) === kind).sort(byOrder));
 const columns = () => areasOf('column');
 const zones = () => areasOf('zone');
 const canvases = () => areasOf('canvas');
@@ -402,6 +417,7 @@ function appendMoreCards(areaId, btnEl) {
   if (nextLimit >= list.length) btnEl.remove();
   else btnEl.textContent = `已显示 ${nextLimit} / ${list.length} 项 · 向下滚动或点击加载更多`;
   loadThumbs(parent || document);
+  queueThumbs();
 }
 
 // ---------- 渲染 ----------
@@ -485,25 +501,66 @@ async function animateOut(id) {
   await el.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(.9)' }], { duration: 170, easing: 'ease-in', fill: 'forwards' }).finished.catch(() => {});
 }
 
-// ---------- 缩略图队列（当前视图优先 + 让出主线程帧预算 + 批量落盘） ----------
+// ---------- 缩略图队列（仅当前可视卡片 + 上传期间让出全部 I/O + 批量落盘） ----------
 const thumbQ = [], queued = new Set();
 let thumbBusy = false;
-function queueThumbs() {
-  const curFolder = openFolder();
-  const onBoard = state.view === BOARD;
-  const front = [], back = [];
-  for (const c of state.cards) {
-    if (c.kind === 'file' && !c.thumb && c.columnId !== TRASH && !queued.has(c.id)) {
-      queued.add(c.id);
-      const isCur = c.columnId === state.view || c.columnId === curFolder
-        || (onBoard && area(c.columnId)?.kind === 'column') || c.columnId === state.zone;
-      if (isCur) front.push(c.id);
-      else back.push(c.id);
+let uploadDepth = 0;
+function visibleThumbCandidates() {
+  const seen = new Set();
+  const front = [];
+  const back = [];
+  const pushCard = (c, isFront = true) => {
+    if (!c || c.kind !== 'file' || c.thumb || c.columnId === TRASH || queued.has(c.id) || seen.has(c.id)) return;
+    seen.add(c.id);
+    (isFront ? front : back).push(c.id);
+  };
+  const takeArea = (areaId, cap = LIST_PAGE_SIZE, isFront = true) => {
+    const list = cardsIn(areaId, false);
+    const lim = Math.min(list.length, cap);
+    for (let i = 0; i < lim; i++) pushCard(list[i], isFront);
+  };
+  if (state.view === BOARD) {
+    for (const col of columns()) takeArea(col.id, state.listLimits.get(col.id) || LIST_PAGE_SIZE, true);
+  } else if (state.view === ARCHIVE) {
+    const fid = openFolder();
+    if (fid) {
+      const subs = childFolders(fid);
+      for (let i = 0; i < Math.min(subs.length, 60); i++) {
+        const dc = deepCards(subs[i].id);
+        for (let j = 0; j < Math.min(dc.length, 4); j++) pushCard(dc[j], true);
+      }
+      takeArea(fid, state.listLimits.get(fid) || LIST_PAGE_SIZE, true);
+    } else {
+      const roots = rootFolders();
+      for (let i = 0; i < Math.min(roots.length, 60); i++) {
+        const dc = deepCards(roots[i].id);
+        for (let j = 0; j < Math.min(dc.length, 4); j++) pushCard(dc[j], true);
+      }
     }
+  } else if (state.view === WORKS) {
+    const wid = area(state.work)?.kind === 'work' ? state.work : null;
+    if (wid) takeArea(wid, state.listLimits.get(wid) || LIST_PAGE_SIZE, true);
+    else {
+      const ws = works();
+      for (let i = 0; i < Math.min(ws.length, 40); i++) takeArea(ws[i].id, 2, true);
+    }
+  } else if (isCanvas(state.view)) {
+    takeArea(state.view, 500, true);
   }
+  const draftsOpen = !draftsCollapsed() || document.body.classList.contains('drafts-open');
+  if (draftsOpen && state.zone !== TRASH) {
+    takeArea(state.zone, state.listLimits.get(state.zone) || LIST_PAGE_SIZE, false);
+  }
+  return { front, back };
+}
+function queueThumbs() {
+  if (uploadDepth > 0) return;
+  const { front, back } = visibleThumbCandidates();
+  for (const id of front) queued.add(id);
+  for (const id of back) queued.add(id);
   if (front.length) thumbQ.unshift(...front);
   if (back.length) thumbQ.push(...back);
-  runThumbs();
+  if (thumbQ.length) runThumbs();
 }
 const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('超时')), ms))]);
 const THUMB_BATCH = 8;
@@ -524,6 +581,7 @@ async function runThumbs() {
   };
   try {
     while (thumbQ.length) {
+      while (uploadDepth > 0) await new Promise((r) => setTimeout(r, 100));
       const id = thumbQ.shift();
       queued.delete(id);
       const c = findCard(id);
@@ -713,11 +771,38 @@ function renderBoard() {
 const FOLDER_SVG = `<svg viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="m9 13.5 2 2 4-4"/></svg>`;
 // ---------- 子文件夹：folder.parentId 指向上级文件夹 ----------
 const parentOf = (f) => (f?.parentId && area(f.parentId)?.kind === 'folder' ? area(f.parentId) : null);
-const childFolders = (id) => folders().filter((f) => parentOf(f)?.id === id);
-const rootFolders = () => folders().filter((f) => !parentOf(f));
-function descendantIds(id) { const out = []; const walk = (x) => childFolders(x).forEach((c) => { out.push(c.id); walk(c.id); }); walk(id); return out; }
-const deepCards = (id) => [id, ...descendantIds(id)].flatMap((x) => cardsIn(x, false));
-const folderSize = (id) => deepCards(id).reduce((n, c) => n + (c.size || 0), 0);
+const childFolders = (id) => { ensureIndexes(); return childrenByParent.get(id) || []; };
+const rootFolders = () => { ensureIndexes(); return childrenByParent.get('') || []; };
+function descendantIds(id) {
+  ensureIndexes();
+  const out = [];
+  const stack = [...(childrenByParent.get(id) || [])];
+  while (stack.length) {
+    const cur = stack.pop();
+    out.push(cur.id);
+    const kids = childrenByParent.get(cur.id);
+    if (kids) for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+  }
+  return out;
+}
+function deepCards(id) {
+  ensureIndexes();
+  let res = deepCardsMemo.get(id);
+  if (!res) {
+    res = [id, ...descendantIds(id)].flatMap((x) => cardsIn(x, false));
+    deepCardsMemo.set(id, res);
+  }
+  return res;
+}
+function folderSize(id) {
+  ensureIndexes();
+  let s = deepSizeMemo.get(id);
+  if (s === undefined) {
+    s = deepCards(id).reduce((n, c) => n + (c.size || 0), 0);
+    deepSizeMemo.set(id, s);
+  }
+  return s;
+}
 function ancestors(f) { const out = []; let p = parentOf(f); while (p && out.length < 50) { out.unshift(p); p = parentOf(p); } return out; }
 const folderPath = (f) => [...ancestors(f), f].map((x) => x.title).join(' / ');
 function folderMeta(f) {
@@ -763,6 +848,7 @@ function renderArchive() {
           <h2><span class="title-sw" aria-hidden="true"></span>${esc(f.title)}</h2>
           <div class="meta">${folderMeta(f)} · 归档于 ${fmtDate(f.doneAt || Date.now())}</div>
         </div>
+        <button class="btn primary" data-action="add-files"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0-4 4m4-4 4 4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg><span>上传文件 / 文件夹</span></button>
         <button class="btn" data-action="batch-rename-folder" ${own ? '' : 'disabled'} title="逐张预览或按序号一键批量重命名当前文件夹内的文件（F2）"><svg viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="m13.5 6.5 3 3"/></svg><span>快速重命名</span></button>
         <button class="btn" data-action="add-subfolder"><svg viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></svg><span>新建子文件夹</span></button>
         <button class="btn" data-action="folder-zip" ${n ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg><span>打包下载</span></button>
@@ -799,6 +885,7 @@ function renderArchive() {
         <h2>已完成项目</h2>
         <div class="meta">在看板上<b>长按任意卡片</b>即可完成项目：同名的关联文件会自动打包成文件夹放到这里。文件夹可以拖到分类上归类，拖到另一个文件夹上合并。</div>
       </div>
+      <button class="btn" data-action="add-files"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0-4 4m4-4 4 4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg><span>上传文件 / 文件夹</span></button>
       <button class="btn primary" data-action="add-folder"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>新建项目文件夹</span></button>
     </header>
     ${bar}${body}`;
@@ -4237,9 +4324,17 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keyup', (e) => { if (e.key === ' ' && spaceDown) { spaceDown = false; vp.classList.remove('space-pan'); } });
 window.addEventListener('blur', () => { spaceDown = false; vp.classList.remove('space-pan'); });
 
-// ---------- 添加文件 ----------
+// ---------- 极速统一上传（多文件 / 多层级文件夹保留子文件夹结构） ----------
+let activeUploadModal = null;
+
+function formatThroughput(bytes, startMs) {
+  const sec = (performance.now() - startMs) / 1000;
+  if (sec < 0.08 || !bytes) return '';
+  return ` · ${(bytes / (1024 * 1024 * sec)).toFixed(1)} MB/s`;
+}
+
 async function addFiles(files, areaId, index = null, pos = null, { quiet = false, extra = {} } = {}) {
-  files = files.filter((f) => f && f.name !== '.DS_Store');
+  files = (files || []).filter((f) => f && !upTree.isIgnoredFile(f.name));
   if (!files.length) return [];
   if (!areaId || !area(areaId)) {
     areaId = state.view === CANVASES ? await pickCanvas() : defaultTarget();
@@ -4265,12 +4360,12 @@ async function addFiles(files, areaId, index = null, pos = null, { quiet = false
       orderForIndex = (i) => prev.order + step * (i + 1);
     }
   }
-  const batchId = n > 1 ? uid() : undefined; // 同一批拖入的文件，关联算法会加分
+  const batchId = n > 1 ? uid() : undefined;
   if (batchId && !extra.batchId) extra = { batchId, ...extra };
   const totalBytes = files.reduce((s, f) => s + (f.size || 0), 0);
   const showProgress = n > 1 || totalBytes >= 10 * 1024 * 1024;
   const t = showProgress
-    ? toast(n === 1 ? `正在保存「${files[0].name || '文件'}」（${fmtSize(totalBytes)}）…` : `正在保存 0/${n}（${fmtSize(totalBytes)}）…`, { sticky: true })
+    ? toast(n === 1 ? `正在保存「${files[0].name || '文件'}」（${fmtSize(totalBytes)}）…` : `正在极速保存 0/${n}（${fmtSize(totalBytes)}）…`, { sticky: true })
     : null;
   const perRow = Math.max(1, Math.ceil(Math.sqrt(n)));
   const now = Date.now();
@@ -4282,18 +4377,26 @@ async function addFiles(files, areaId, index = null, pos = null, { quiet = false
     if (canvas) { card.x = pos.x + (i % perRow) * (CARD_W + 20); card.y = pos.y + Math.floor(i / perRow) * 120; }
     return { card, blob: f };
   });
+  const startMs = performance.now();
   let lastTick = 0;
-  const { ok: added, errors } = await db.addFilesBatch(entries, {
-    onProgress: t ? ({ done, total, bytesDone, bytesTotal }) => {
-      const ts = performance.now();
-      if (done === total || ts - lastTick >= 80) {
-        lastTick = ts;
-        if (total === 1) t.set(`正在写入「${entries[0].card.name}」（${fmtSize(bytesDone)} / ${fmtSize(bytesTotal)}）…`);
-        else t.set(`正在保存 ${done}/${total}（${fmtSize(bytesDone)} / ${fmtSize(bytesTotal)}）…`);
-      }
-    } : undefined,
-  });
-  t?.close();
+  let added = [], errors = [];
+  uploadDepth++;
+  try {
+    ({ ok: added, errors } = await db.addFilesBatch(entries, {
+      onProgress: t ? ({ done, total, bytesDone, bytesTotal }) => {
+        const ts = performance.now();
+        if (done === total || ts - lastTick >= 80) {
+          lastTick = ts;
+          const speed = formatThroughput(bytesDone, startMs);
+          if (total === 1) t.set(`正在写入「${entries[0].card.name}」（${fmtSize(bytesDone)} / ${fmtSize(bytesTotal)}${speed}）…`);
+          else t.set(`正在极速上传 ${done}/${total}（${fmtSize(bytesDone)} / ${fmtSize(bytesTotal)}${speed}）…`);
+        }
+      } : undefined,
+    }));
+  } finally {
+    t?.close();
+    uploadDepth = Math.max(0, uploadDepth - 1);
+  }
   for (const card of added) {
     state.cards.push(card);
     state.fresh.add(card.id);
@@ -4301,18 +4404,14 @@ async function addFiles(files, areaId, index = null, pos = null, { quiet = false
   if (errors.length) {
     console.error(errors[0].error);
     const quota = errors.some(({ error: e }) => e && (e.name === 'QuotaExceededError' || /quota/i.test(e.message)));
-    if (quota) {
-      toast('存储空间不足，请先备份并清理回收站', { error: true });
-    } else if (errors.length === 1) {
-      const { card, error } = errors[0];
-      toast(`「${card.name}」保存失败：${error.message || error}`, { error: true });
-    } else {
-      toast(`有 ${errors.length} 个文件保存失败：${errors[0].error?.message || errors[0].error}`, { error: true });
-    }
+    if (quota) toast('存储空间不足，请先备份并清理回收站', { error: true });
+    else if (errors.length === 1) toast(`「${errors[0].card.name}」保存失败：${errors[0].error?.message || errors[0].error}`, { error: true });
+    else toast(`有 ${errors.length} 个文件保存失败：${errors[0].error?.message || errors[0].error}`, { error: true });
   }
   const ok = added.length;
   if (ok) {
-    if (!quiet) toast(`已保存 ${ok} 个文件到「${areaName(areaId)}」`);
+    const elapsed = ((performance.now() - startMs) / 1000).toFixed(2);
+    if (!quiet) toast(`已保存 ${ok} 个文件到「${areaName(areaId)}」${ok > 10 || totalBytes >= 10 * 1024 * 1024 ? `（${elapsed}s）` : ''}`);
     requestPersist();
     await changed();
     if (canvas && ok > 1 && state.view === areaId) await masonry(added, pos);
@@ -4336,23 +4435,449 @@ async function masonry(list, pos) {
   }
   await db.putMany('cards', list);
 }
-async function filesFromDataTransfer(dt) {
-  const entries = [...(dt.items || [])].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
-  if (!entries.length || !entries.some((e) => e.isDirectory)) return [...(dt.files || [])];
-  const out = [];
-  const readEntry = (entry) => new Promise((resolve) => {
-    if (entry.isFile) return entry.file((f) => { out.push(f); resolve(); }, () => resolve());
-    const reader = entry.createReader();
-    const all = [];
-    const next = () => reader.readEntries(async (batch) => {
-      if (batch.length) { all.push(...batch); return next(); }
-      for (const e of all) await readEntry(e);
-      resolve();
-    }, () => resolve());
-    next();
+function captureDataTransferSync(dt) {
+  const entries = [...(dt?.items || [])].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+  const files = [...(dt?.files || [])];
+  return { entries, files };
+}
+async function scanTransferPayload({ entries, files }, onTick) {
+  if (!entries?.length || !entries.some((e) => e.isDirectory)) {
+    return upTree.extractFromFileList(files);
+  }
+  const rawDirs = [];
+  const fileTasks = [];
+  let dirCount = 0;
+
+  const walkEntry = async (entry, prefix = '') => {
+    if (!entry) return;
+    if (entry.isFile) {
+      if (!upTree.isIgnoredFile(entry.name)) {
+        const relPath = upTree.normalizeRelPath(prefix ? `${prefix}/${entry.name}` : entry.name);
+        fileTasks.push({ entry, relPath });
+      }
+      return;
+    }
+    if (entry.isDirectory) {
+      const dirRel = upTree.normalizeRelPath(prefix ? `${prefix}/${entry.name}` : entry.name);
+      if (dirRel) {
+        rawDirs.push(dirRel);
+        dirCount++;
+        onTick?.({ dirs: dirCount, files: fileTasks.length });
+      }
+      const reader = entry.createReader();
+      const children = [];
+      await new Promise((resolve) => {
+        const next = () => reader.readEntries((batch) => {
+          if (batch.length) { children.push(...batch); next(); }
+          else resolve();
+        }, () => resolve());
+        next();
+      });
+      await Promise.all(children.map((ch) => walkEntry(ch, dirRel)));
+    }
+  };
+
+  await Promise.all(entries.map((e) => walkEntry(e, '')));
+
+  const rawFiles = new Array(fileTasks.length);
+  let cursor = 0;
+  let resolved = 0;
+  const workers = Math.min(fileTasks.length, 32);
+  await Promise.all(Array.from({ length: workers }, async () => {
+    while (cursor < fileTasks.length) {
+      const idx = cursor++;
+      const { entry, relPath } = fileTasks[idx];
+      const file = await new Promise((res) => entry.file(res, () => res(null)));
+      if (file) rawFiles[idx] = { file, relPath };
+      resolved++;
+      if (resolved % 100 === 0 || resolved === fileTasks.length) {
+        onTick?.({ dirs: dirCount, files: resolved, total: fileTasks.length });
+      }
+    }
+  }));
+
+  return { files: rawFiles.filter(Boolean), dirs: rawDirs };
+}
+
+async function executeUploadPlan(plan, { mode = 'folder-tree', targetAreaId = null, category = undefined, openOnFinish = true } = {}) {
+  if (!plan?.files?.length && !plan?.dirPaths?.length) return [];
+  if (mode === 'flat') {
+    if (!plan.files.length) return [];
+    return addFiles(plan.files.map((x) => x.file), targetAreaId);
+  }
+
+  const rootParentId = targetAreaId && area(targetAreaId)?.kind === 'folder' ? targetAreaId : null;
+  const existing = folders();
+  const baseOrder = existing.length ? existing[existing.length - 1].order + 1024 : 0;
+  const now = Date.now();
+  const startMs = performance.now();
+  const { createdFolders, pathToFolderId, topFolderIds } = upTree.planFolderCreation(
+    plan.dirPaths,
+    existing,
+    rootParentId,
+    { baseOrder, colorStart: existing.length, colorCount: FCOLORS.length, category, now, makeId: uid },
+  );
+
+  if (createdFolders.length) {
+    await db.putMany('columns', createdFolders);
+    state.areas.push(...createdFolders);
+  }
+
+  const perFolderOrder = new Map();
+  const batchId = plan.files.length > 1 ? uid() : undefined;
+  const entries = plan.files.map((item, i) => {
+    const colId = item.dirPath ? (pathToFolderId.get(item.dirPath) || rootParentId) : (rootParentId || topFolderIds[0] || defaultTarget());
+    let nextOrder = perFolderOrder.get(colId);
+    if (nextOrder === undefined) nextOrder = orderAt(colId, cardsIn(colId, false).length);
+    perFolderOrder.set(colId, nextOrder + 1024);
+    const f = item.file;
+    const card = {
+      id: uid(),
+      kind: 'file',
+      name: item.fileName || f.name || `文件-${now + i}`,
+      type: f.type || '',
+      size: f.size,
+      columnId: colId,
+      order: nextOrder,
+      createdAt: now + i,
+      updatedAt: now + i,
+      enteredAt: now + i,
+      ...(batchId ? { batchId } : {}),
+    };
+    return { card, blob: f };
   });
-  for (const e of entries) await readEntry(e);
-  return out;
+
+  const t = entries.length > 1 || plan.stats.totalBytes >= 5 * 1024 * 1024
+    ? toast(`正在极速上传 ${createdFolders.length} 个文件夹、0/${entries.length} 个文件…`, { sticky: true })
+    : null;
+  let lastTick = 0;
+  let added = [], errors = [];
+  if (entries.length) {
+    uploadDepth++;
+    try {
+      ({ ok: added, errors } = await db.addFilesBatch(entries, {
+        onProgress: t ? ({ done, total, bytesDone, bytesTotal }) => {
+          const ts = performance.now();
+          if (done === total || ts - lastTick >= 80) {
+            lastTick = ts;
+            const speed = formatThroughput(bytesDone, startMs);
+            t.set(`正在极速上传 ${done}/${total}（${fmtSize(bytesDone)} / ${fmtSize(bytesTotal)}${speed}）…`);
+          }
+        } : undefined,
+      }));
+    } finally {
+      t?.close();
+      uploadDepth = Math.max(0, uploadDepth - 1);
+    }
+  } else {
+    t?.close();
+  }
+
+  for (const card of added) {
+    state.cards.push(card);
+    state.fresh.add(card.id);
+  }
+  if (errors.length) {
+    console.error(errors[0].error);
+    toast(`有 ${errors.length} 个文件保存失败：${errors[0].error?.message || errors[0].error}`, { error: true });
+  }
+
+  if (openOnFinish) {
+    state.view = ARCHIVE;
+    ls.set('view', ARCHIVE);
+    if (rootParentId) {
+      state.folder = rootParentId;
+      ls.set('folder', rootParentId);
+    } else if (topFolderIds.length === 1) {
+      state.folder = topFolderIds[0];
+      ls.set('folder', topFolderIds[0]);
+    } else {
+      state.folder = null;
+      ls.set('folder', null);
+    }
+  }
+
+  requestPersist();
+  await changed();
+
+  const elapsed = ((performance.now() - startMs) / 1000).toFixed(2);
+  const createdIds = createdFolders.map((f) => f.id);
+  const msg = createdFolders.length && added.length
+    ? `已极速创建 ${createdFolders.length} 个文件夹并上传 ${added.length} 个文件（${elapsed}s）`
+    : createdFolders.length
+      ? `已创建 ${createdFolders.length} 个文件夹`
+      : `已上传 ${added.length} 个文件（${elapsed}s）`;
+
+  toast(msg, {
+    action: (createdIds.length || added.length) ? '撤销' : undefined,
+    onAction: async () => {
+      if (added.length) await purgeMany(added.map((c) => c.id));
+      for (const fid of createdIds) await db.del('columns', fid);
+      const dropSet = new Set(createdIds);
+      state.areas = state.areas.filter((a) => !dropSet.has(a.id));
+      if (dropSet.has(state.folder)) {
+        state.folder = rootParentId && area(rootParentId) ? rootParentId : null;
+        ls.set('folder', state.folder);
+      }
+      await changed();
+      toast('已撤销本次批量上传');
+    },
+  });
+  return added;
+}
+
+function defaultUploadDestValue(preferDest = null) {
+  if (preferDest) return preferDest;
+  const fid = openFolder();
+  if (fid) return `folder:${fid}`;
+  if (state.view === ARCHIVE) return 'archive-root';
+  if (isCanvas(state.view)) return `area:${state.view}`;
+  if (state.view === WORKS && area(state.work)?.kind === 'work') return `area:${state.work}`;
+  const firstCol = columns()[0]?.id || fallbackZone();
+  return firstCol ? `area:${firstCol}` : 'archive-root';
+}
+
+function buildDestSelectOptions(selectedVal) {
+  const opts = [];
+  opts.push(`<option value="archive-root"${selectedVal === 'archive-root' ? ' selected' : ''}>已完成项目（保留并自动创建多文件夹 / 子文件夹层级）</option>`);
+  const fs = folders();
+  if (fs.length) {
+    opts.push('<optgroup label="放进已有项目文件夹（自动保留子文件夹）">');
+    for (const f of fs) {
+      const val = `folder:${f.id}`;
+      opts.push(`<option value="${val}"${selectedVal === val ? ' selected' : ''}>${esc(folderPath(f))}</option>`);
+    }
+    opts.push('</optgroup>');
+  }
+  const cols = columns();
+  if (cols.length) {
+    opts.push('<optgroup label="平铺到看板列">');
+    for (const c of cols) {
+      const val = `area:${c.id}`;
+      opts.push(`<option value="${val}"${selectedVal === val ? ' selected' : ''}>看板 · ${esc(c.title)}</option>`);
+    }
+    opts.push('</optgroup>');
+  }
+  const zs = zones();
+  if (zs.length) {
+    opts.push('<optgroup label="平铺到右侧功能区">');
+    for (const z of zs) {
+      const val = `area:${z.id}`;
+      opts.push(`<option value="${val}"${selectedVal === val ? ' selected' : ''}>功能区 · ${esc(z.title)}</option>`);
+    }
+    opts.push('</optgroup>');
+  }
+  const cvs = canvases();
+  if (cvs.length) {
+    opts.push('<optgroup label="放到画布">');
+    for (const cv of cvs) {
+      const val = `area:${cv.id}`;
+      opts.push(`<option value="${val}"${selectedVal === val ? ' selected' : ''}>画布 · ${esc(cv.title)}</option>`);
+    }
+    opts.push('</optgroup>');
+  }
+  return opts.join('');
+}
+
+async function openUploadModal({ initialRaw = null, preferDest = null } = {}) {
+  const m = $('#modal'), f = $('#modalInner');
+  const rawFiles = [...(initialRaw?.files || [])];
+  const rawDirs = [...(initialRaw?.dirs || [])];
+  let stripSingleRoot = false;
+  let wrapperName = '';
+  let userPickedDest = Boolean(preferDest);
+  let destVal = defaultUploadDestValue(preferDest);
+
+  f.innerHTML = `<div class="upload-modal">
+    <div class="up-head">
+      <h3>极速上传 · 统一文件与多文件夹</h3>
+      <span class="up-head-tip">多通道并发写入，不卡主界面</span>
+    </div>
+    <div class="up-dropzone" id="upDropzone" tabindex="0">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg>
+      <div class="up-drop-title">将多个文件夹（如 2000、2001…）或文件拖放到这里</div>
+      <div class="up-drop-sub">支持任意深度的子文件夹；或点击下方按钮多次追加</div>
+      <div class="up-pick-btns">
+        <button type="button" class="btn primary-soft" id="upPickDirBtn">选择文件夹</button>
+        <button type="button" class="btn" id="upPickFilesBtn">选择多个文件</button>
+      </div>
+    </div>
+    <div class="up-summary" id="upSummary" hidden>
+      <div class="up-sum-bar">
+        <span class="up-sum-text" id="upSumText"></span>
+        <button type="button" class="up-clear-btn" id="upClearBtn">清空重选</button>
+      </div>
+      <div class="up-dir-chips" id="upDirChips"></div>
+    </div>
+    <div class="up-options">
+      <label class="up-check" id="upStripWrap" hidden>
+        <input type="checkbox" id="upStripRoot">
+        <span id="upStripLabel"></span>
+      </label>
+      <div class="up-field">
+        <label for="upWrapperName">归入统一父文件夹名称（可选，例如：Specialist 历年真题）</label>
+        <input type="text" id="upWrapperName" placeholder="留空则直接保留原有各顶层文件夹（如 2000、2001…）" maxlength="100" autocomplete="off">
+      </div>
+      <div class="up-field">
+        <label for="upDest">导入位置</label>
+        <select id="upDest">${buildDestSelectOptions(destVal)}</select>
+      </div>
+      <p class="up-hint-note" id="upHintNote"></p>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn primary" id="upSubmitBtn" disabled>开始上传</button>
+      <button type="button" class="btn" id="upCancelBtn">取消</button>
+    </div>
+  </div>`;
+
+  const dz = $('#upDropzone');
+  const sumBox = $('#upSummary');
+  const sumText = $('#upSumText');
+  const dirChips = $('#upDirChips');
+  const stripWrap = $('#upStripWrap');
+  const stripCb = $('#upStripRoot');
+  const stripLabel = $('#upStripLabel');
+  const wrapInput = $('#upWrapperName');
+  const destSel = $('#upDest');
+  const hintNote = $('#upHintNote');
+  const submitBtn = $('#upSubmitBtn');
+  let curPlan = null;
+
+  const refresh = (autoSwitchToArchive = false) => {
+    curPlan = upTree.buildUploadPlan(rawFiles, rawDirs, { stripSingleRoot, wrapperName });
+    if (autoSwitchToArchive && curPlan.hasDirs && !userPickedDest && destSel.value.startsWith('area:')) {
+      destSel.value = 'archive-root';
+    }
+    destVal = destSel.value;
+    const { fileCount, dirCount, totalBytes, singleRootName, canStripRoot } = curPlan.stats;
+    const hasAny = fileCount > 0 || dirCount > 0;
+    sumBox.hidden = !hasAny;
+    submitBtn.disabled = !hasAny;
+    if (hasAny) {
+      sumText.textContent = dirCount
+        ? `已识别 ${dirCount} 个文件夹（${curPlan.topDirs.length} 个顶层目录） · ${fileCount} 个文件 · ${fmtSize(totalBytes)}`
+        : `已选择 ${fileCount} 个文件 · ${fmtSize(totalBytes)}`;
+      const shown = curPlan.topDirs.slice(0, 24);
+      const moreCount = curPlan.topDirs.length - shown.length;
+      dirChips.hidden = !shown.length;
+      dirChips.innerHTML = shown.map((d) => `<span class="up-chip" title="${esc(d)}">📁 ${esc(d)}</span>`).join('')
+        + (moreCount > 0 ? `<span class="up-chip more">+${moreCount} 个文件夹</span>` : '');
+      submitBtn.textContent = fileCount ? `开始极速上传（${fileCount}）` : `创建 ${dirCount} 个文件夹`;
+    } else {
+      submitBtn.textContent = '开始上传';
+    }
+
+    stripWrap.hidden = !canStripRoot;
+    if (canStripRoot) {
+      stripLabel.textContent = `不创建外层总目录「${singleRootName}」，直接展开内部子文件夹到当前层级`;
+    }
+    const isTreeDest = destVal === 'archive-root' || destVal.startsWith('folder:');
+    if (curPlan.hasDirs && !isTreeDest) {
+      hintNote.textContent = '提示：当前选择了看板/功能区/画布的平铺位置，上传后文件将展开放在同一列表；如需保留文件夹与子文件夹结构，请选「已完成项目」。';
+    } else if (isTreeDest && curPlan.hasDirs) {
+      hintNote.textContent = '将自动创建对应的全部文件夹与子文件夹，并在保持顺序的同时极速写入内容。';
+    } else {
+      hintNote.textContent = wrapperName.trim()
+        ? `将创建文件夹「${wrapperName.trim()}」并把所选文件放进去。`
+        : '提示：如果填入「父文件夹名称」，松散文件也会自动收纳进同一个文件夹。';
+    }
+  };
+
+  const addRaw = (raw) => {
+    if (!raw) return;
+    if (raw.files?.length) rawFiles.push(...raw.files);
+    if (raw.dirs?.length) rawDirs.push(...raw.dirs);
+    refresh(true);
+  };
+
+  activeUploadModal = { addRaw };
+  refresh(Boolean(initialRaw?.dirs?.length || rawFiles.some((x) => String(x.relPath || '').includes('/'))));
+
+  $('#upPickDirBtn').onclick = () => $('#dirInput').click();
+  $('#upPickFilesBtn').onclick = () => $('#fileInput').click();
+  $('#upClearBtn').onclick = () => {
+    rawFiles.length = 0;
+    rawDirs.length = 0;
+    stripSingleRoot = false;
+    stripCb.checked = false;
+    refresh(false);
+  };
+  stripCb.onchange = () => { stripSingleRoot = stripCb.checked; refresh(false); };
+  wrapInput.oninput = () => {
+    wrapperName = wrapInput.value;
+    if (wrapperName.trim() && !userPickedDest && destSel.value.startsWith('area:')) destSel.value = 'archive-root';
+    refresh(false);
+  };
+  destSel.onchange = () => { userPickedDest = true; refresh(false); };
+
+  dz.addEventListener('dragover', (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault(); e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+    dz.classList.add('drag-over');
+  });
+  dz.addEventListener('dragleave', (e) => {
+    if (!dz.contains(e.relatedTarget)) dz.classList.remove('drag-over');
+  });
+  dz.addEventListener('drop', async (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault(); e.stopPropagation();
+    dz.classList.remove('drag-over');
+    const snap = captureDataTransferSync(e.dataTransfer);
+    const prevText = sumText.textContent;
+    if (snap.entries.some((en) => en.isDirectory)) {
+      sumBox.hidden = false;
+      sumText.textContent = '正在高速扫描文件夹结构…';
+    }
+    const raw = await scanTransferPayload(snap, ({ dirs, files }) => {
+      sumText.textContent = `正在扫描：${dirs} 个文件夹、${files} 个文件…`;
+    });
+    if (!raw.files.length && !raw.dirs.length && prevText) sumText.textContent = prevText;
+    addRaw(raw);
+  });
+
+  const cleanup = () => {
+    activeUploadModal = null;
+    f.onsubmit = null;
+    m.oncancel = null;
+    m.onclose = null;
+  };
+  const closeSelf = () => {
+    cleanup();
+    if (m.open) m.close();
+  };
+  f.onsubmit = (e) => { e.preventDefault(); };
+  m.oncancel = () => cleanup();
+  m.onclose = () => cleanup();
+  $('#upCancelBtn').onclick = () => closeSelf();
+  submitBtn.onclick = async () => {
+    if (!curPlan || (!curPlan.files.length && !curPlan.dirPaths.length)) return;
+    const plan = curPlan;
+    const sel = destSel.value;
+    closeSelf();
+    if (sel === 'archive-root' || sel.startsWith('folder:')) {
+      const targetAreaId = sel.startsWith('folder:') ? sel.slice(7) : null;
+      const cat = (!targetAreaId && state.view === ARCHIVE && state.archCat && state.archCat !== 'all' && state.archCat !== '__none') ? state.archCat : undefined;
+      await executeUploadPlan(plan, { mode: 'folder-tree', targetAreaId, category: cat, openOnFinish: true });
+    } else if (sel.startsWith('area:')) {
+      await executeUploadPlan(plan, { mode: 'flat', targetAreaId: sel.slice(5) });
+    }
+  };
+  m.showModal();
+}
+
+async function handleDirectInputUpload(raw) {
+  const plan = upTree.buildUploadPlan(raw.files, raw.dirs);
+  if (!plan.files.length && !plan.dirPaths.length) return;
+  if (plan.hasDirs) {
+    if (openFolder()) return executeUploadPlan(plan, { mode: 'folder-tree', targetAreaId: openFolder(), openOnFinish: true });
+    if (state.view === ARCHIVE) {
+      const cat = (state.archCat && state.archCat !== 'all' && state.archCat !== '__none') ? state.archCat : undefined;
+      return executeUploadPlan(plan, { mode: 'folder-tree', targetAreaId: null, category: cat, openOnFinish: true });
+    }
+    return openUploadModal({ initialRaw: raw, preferDest: 'archive-root' });
+  }
+  return addFiles(plan.files.map((x) => x.file), defaultTarget());
 }
 
 // ---------- 卡片操作 ----------
@@ -6160,13 +6685,16 @@ document.addEventListener('dragend', () => {
 });
 let fileDepth = 0;
 document.addEventListener('dragenter', (e) => {
+  if ($('#modal').open && $('#upDropzone')) return;
   if (isFileDrag(e)) { fileDepth++; document.body.classList.add('file-over'); }
   if (state.dragId && e.target.closest?.('.drafts-toggle')) document.body.classList.add('drafts-open');
 });
 document.addEventListener('dragleave', (e) => {
+  if ($('#modal').open && $('#upDropzone')) return;
   if (isFileDrag(e) && --fileDepth <= 0) { fileDepth = 0; document.body.classList.remove('file-over'); clearDropUI(); }
 });
 document.addEventListener('dragover', (e) => {
+  if ($('#modal').open && $('#upDropzone')) return;
   const fileDrag = isFileDrag(e);
   if (!fileDrag && !state.dragId) return;
   e.preventDefault(); // 防止浏览器直接打开文件
@@ -6176,16 +6704,22 @@ document.addEventListener('dragover', (e) => {
   if (tab && !(fileDrag && tab.dataset.drop === TRASH)) { tab.classList.add('drop-active'); return; }
   if (e.target.closest?.('#viewport')) { $('#viewport').classList.add('drop-active'); return; }
   const list = e.target.closest?.('.list');
-  if (!list || (fileDrag && list.dataset.col === TRASH)) { if (!fileDrag) e.dataTransfer.dropEffect = 'none'; return; }
+  if (!list || (fileDrag && list.dataset.col === TRASH)) {
+    if (fileDrag && e.target.closest?.('#archiveView')) { $('#archiveView').classList.add('drop-active'); return; }
+    if (!fileDrag) e.dataTransfer.dropEffect = 'none';
+    return;
+  }
   list.classList.add('drop-active');
   indicator = document.createElement('div');
   indicator.className = 'drop-indicator';
   list.insertBefore(indicator, dropBefore(list, e.clientY));
 });
 document.addEventListener('drop', async (e) => {
+  if ($('#modal').open && $('#upDropzone')) return;
   const fileDrag = isFileDrag(e);
   if (!fileDrag && !state.dragId) return;
   e.preventDefault();
+  const dtSnap = fileDrag ? captureDataTransferSync(e.dataTransfer) : null;
   const dragId = state.dragId;
   const tab = e.target.closest?.('[data-drop]');
   const onCanvas = !tab && e.target.closest?.('#viewport');
@@ -6197,18 +6731,43 @@ document.addEventListener('drop', async (e) => {
   let target = tab ? tab.dataset.drop : onCanvas ? state.view : list?.dataset.col;
   const pos = onCanvas ? (() => { const p = toWorld(e.clientX, e.clientY); return { x: p.x - CARD_W / 2, y: p.y - 30 }; })() : null;
   if (fileDrag) {
-    const files = await filesFromDataTransfer(e.dataTransfer);
+    const scanToast = dtSnap.entries.some((en) => en.isDirectory)
+      ? toast('正在高速扫描文件夹…', { sticky: true })
+      : null;
+    const raw = await scanTransferPayload(dtSnap, ({ dirs, files }) => {
+      scanToast?.set(`正在扫描：${dirs} 个文件夹、${files} 个文件…`);
+    });
+    scanToast?.close();
+    const plan = upTree.buildUploadPlan(raw.files, raw.dirs);
+    if (!plan.files.length && !plan.dirPaths.length) return;
+    if (plan.hasDirs) {
+      if (target && area(target)?.kind === 'folder') {
+        return executeUploadPlan(plan, { mode: 'folder-tree', targetAreaId: target, openOnFinish: true });
+      }
+      if (!target && openFolder()) {
+        return executeUploadPlan(plan, { mode: 'folder-tree', targetAreaId: openFolder(), openOnFinish: true });
+      }
+      if (state.view === ARCHIVE && (!target || target === PICK)) {
+        const cat = (state.archCat && state.archCat !== 'all' && state.archCat !== '__none') ? state.archCat : undefined;
+        return executeUploadPlan(plan, { mode: 'folder-tree', targetAreaId: null, category: cat, openOnFinish: true });
+      }
+      return openUploadModal({ initialRaw: raw, preferDest: 'archive-root' });
+    }
+    const flatFiles = plan.files.map((x) => x.file);
     if (target === PICK) {
       target = await pickFolder();
       if (!target) return;
     }
     if (target === CANVAS_PICK) {
-      if (!files.length) return;
+      if (!flatFiles.length) return;
       target = await pickCanvas();
       if (!target) return;
     }
+    if (!target && state.view === ARCHIVE && !openFolder()) {
+      return openUploadModal({ initialRaw: raw, preferDest: 'archive-root' });
+    }
     if (target === TRASH) target = defaultTarget();
-    return addFiles(files, target, list ? realIndex(target, before) : null, pos);
+    return addFiles(flatFiles, target, list ? realIndex(target, before) : null, pos);
   }
   // 拖动的是已选中的卡片 → 所有已选一起移动
   const group = state.selected.has(dragId) && state.selected.size > 1 ? [...state.selected] : null;
@@ -6372,7 +6931,7 @@ document.addEventListener('click', async (e) => {
     }
     case 'add-note-col': return newNote(col.id);
     case 'new-note': return newNote();
-    case 'add-files': return $('#fileInput').click();
+    case 'add-files': return openUploadModal();
     case 'backup': return doBackup();
     case 'restore': return $('#restoreInput').click();
     case 'storage-info': await ensureAccess(); return storageInfo();
@@ -6548,7 +7107,20 @@ document.addEventListener('scroll', (e) => {
     if (br.top <= sr.bottom + 320) appendMoreCards(btn.dataset.area, btn);
   });
 }, { passive: true, capture: true });
-$('#fileInput').addEventListener('change', (e) => { addFiles([...e.target.files]); e.target.value = ''; });
+$('#fileInput').addEventListener('change', (e) => {
+  const raw = upTree.extractFromFileList([...e.target.files]);
+  e.target.value = '';
+  if (!raw.files.length) return;
+  if ($('#modal').open && activeUploadModal) return activeUploadModal.addRaw(raw);
+  return handleDirectInputUpload(raw);
+});
+$('#dirInput').addEventListener('change', (e) => {
+  const raw = upTree.extractFromFileList([...e.target.files]);
+  e.target.value = '';
+  if (!raw.files.length) return;
+  if ($('#modal').open && activeUploadModal) return activeUploadModal.addRaw(raw);
+  return handleDirectInputUpload(raw);
+});
 $('#restoreInput').addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) doRestore(f); });
 window.addEventListener('resize', closeMenu);
 $('#board').addEventListener('scroll', closeMenu, { passive: true });

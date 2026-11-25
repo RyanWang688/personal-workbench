@@ -56,14 +56,18 @@ const getRec = (id) => tx(['blobs'], 'readonly', (t) => wrap(t.objectStore('blob
 // blobs 表里，存在文件夹的文件记录为 { id, ext: '<文件名>', type, size }，内容在「所选文件夹/工作台文件/」里。
 export const FOLDER_SUB = '工作台文件';
 export const folderSupported = () => typeof window.showDirectoryPicker === 'function';
-let dirCache;
+let dirCache, modeCache;
 export async function getDir() {
   if (dirCache === undefined) dirCache = await getMeta('dirHandle', null);
   return dirCache;
 }
-export async function setDir(handle) { dirCache = handle; await setMeta('dirHandle', handle); }
-export async function clearDir() { dirCache = null; await del('meta', 'dirHandle'); await setMeta('storageMode', 'idb'); }
-export const storageMode = async () => ((await getMeta('storageMode', 'idb')) === 'folder' && (await getDir()) ? 'folder' : 'idb');
+export async function setDir(handle) { dirCache = handle; modeCache = undefined; await setMeta('dirHandle', handle); }
+export async function clearDir() { dirCache = null; modeCache = 'idb'; await del('meta', 'dirHandle'); await setMeta('storageMode', 'idb'); }
+export async function storageMode() {
+  if (modeCache) return modeCache;
+  modeCache = ((await getMeta('storageMode', 'idb')) === 'folder' && (await getDir())) ? 'folder' : 'idb';
+  return modeCache;
+}
 /** 文件夹访问权限：'granted' | 'prompt' | 'denied' | 'none'；request=true 时会弹出浏览器授权（需在用户点击中调用） */
 export async function dirPermission(request = false) {
   const d = await getDir();
@@ -87,11 +91,13 @@ async function writeExternal(id, name, blob, preResolvedDir = null) {
   const fh = await fd.getFileHandle(fname, { create: true });
   const w = await fh.createWritable();
   try {
-    if (typeof blob.stream === 'function') await blob.stream().pipeTo(w);
-    else { await w.write(blob); await w.close(); }
-  } catch (e) { await w.abort?.().catch(() => {}); throw e; }
-  const check = await fh.getFile();
-  if (check.size !== blob.size) { await fd.removeEntry(fname).catch(() => {}); throw new Error('写入文件夹后校验失败'); }
+    await w.write(blob);
+    await w.close();
+  } catch (e) {
+    await w.abort?.().catch(() => {});
+    await fd.removeEntry(fname).catch(() => {});
+    throw e;
+  }
   return fname;
 }
 async function readExternal(fname, type, preResolvedDir = null) {
@@ -178,7 +184,7 @@ export async function getBlobsBatch(ids = [], { concurrency = 6, onProgress } = 
   return out;
 }
 
-/** 批量写入卡片与文件内容：减少 IndexedDB 事务开销并在文件夹模式下并发流式落盘 */
+/** 批量写入卡片与文件内容：采用流水线高并发事务（relaxed durability）并在文件夹模式下并发直写磁盘 */
 export async function addFilesBatch(items = [], { onProgress } = {}) {
   const list = items || [];
   const total = list.length;
@@ -193,103 +199,128 @@ export async function addFilesBatch(items = [], { onProgress } = {}) {
   const isFolder = (await storageMode()) === 'folder' && (await dirPermission()) === 'granted';
   if (isFolder) {
     const fd = await filesDir();
-    const hasHuge = list.some((x) => (x?.blob?.size || 0) >= 20 * 1024 * 1024);
-    const concurrency = Math.min(total, hasHuge ? 2 : 4);
+    const avgBytes = bytesTotal / total;
+    const hasHuge = list.some((x) => (x?.blob?.size || 0) >= 32 * 1024 * 1024);
+    const concurrency = Math.min(total, hasHuge ? 4 : avgBytes <= 2 * 1024 * 1024 ? 16 : 8);
     let nextIdx = 0;
-    const prepared = [];
+    const preparedSlots = new Array(total);
 
     await Promise.all(Array.from({ length: concurrency }, async () => {
       while (nextIdx < total) {
-        const item = list[nextIdx++];
+        const i = nextIdx++;
+        const item = list[i];
         try {
           const fname = await writeExternal(item.card.id, item.card.name, item.blob, fd);
-          prepared.push({ item, fname });
-          bytesDone += item.blob?.size || 0;
-          done++;
-          onProgress?.({ done, total, bytesDone, bytesTotal });
+          preparedSlots[i] = { item, fname };
         } catch (error) {
           errors.push({ card: item.card, error });
+        } finally {
+          bytesDone += item.blob?.size || 0;
           done++;
           onProgress?.({ done, total, bytesDone, bytesTotal });
         }
       }
     }));
 
-    const DB_BATCH = 50;
-    for (let i = 0; i < prepared.length; i += DB_BATCH) {
-      const slice = prepared.slice(i, i + DB_BATCH);
-      try {
-        await tx(['cards', 'blobs'], 'readwrite', (t) => {
-          const bs = t.objectStore('blobs');
-          const cs = t.objectStore('cards');
+    const prepared = preparedSlots.filter(Boolean);
+    const DB_BATCH = 250;
+    const dbSlices = [];
+    for (let i = 0; i < prepared.length; i += DB_BATCH) dbSlices.push(prepared.slice(i, i + DB_BATCH));
+    const okSlices = new Array(dbSlices.length);
+    let sliceIdx = 0;
+    const dbWorkers = Math.min(dbSlices.length, 3);
+    await Promise.all(Array.from({ length: dbWorkers }, async () => {
+      while (sliceIdx < dbSlices.length) {
+        const si = sliceIdx++;
+        const slice = dbSlices[si];
+        try {
+          await tx(['cards', 'blobs'], 'readwrite', (t) => {
+            const bs = t.objectStore('blobs');
+            const cs = t.objectStore('cards');
+            for (const { item, fname } of slice) {
+              bs.put({ id: item.card.id, ext: fname, type: item.blob.type, size: item.blob.size });
+              cs.put(item.card);
+            }
+          }, { relaxed: true });
+          okSlices[si] = slice.map(({ item }) => item.card);
+        } catch {
+          const fallbackOk = [];
           for (const { item, fname } of slice) {
-            bs.put({ id: item.card.id, ext: fname, type: item.blob.type, size: item.blob.size });
-            cs.put(item.card);
+            try {
+              await tx(['cards', 'blobs'], 'readwrite', (t) => {
+                t.objectStore('blobs').put({ id: item.card.id, ext: fname, type: item.blob.type, size: item.blob.size });
+                t.objectStore('cards').put(item.card);
+              }, { relaxed: true });
+              fallbackOk.push(item.card);
+            } catch (error) {
+              await removeExternal(fname);
+              errors.push({ card: item.card, error });
+            }
           }
-        }, { relaxed: true });
-        slice.forEach(({ item }) => ok.push(item.card));
-      } catch {
-        for (const { item, fname } of slice) {
-          try {
-            await tx(['cards', 'blobs'], 'readwrite', (t) => {
-              t.objectStore('blobs').put({ id: item.card.id, ext: fname, type: item.blob.type, size: item.blob.size });
-              t.objectStore('cards').put(item.card);
-            }, { relaxed: true });
-            ok.push(item.card);
-          } catch (error) {
-            await removeExternal(fname);
-            errors.push({ card: item.card, error });
-          }
+          okSlices[si] = fallbackOk;
         }
       }
-    }
+    }));
+    for (const s of okSlices) if (s) ok.push(...s);
     return { ok, errors };
   }
 
-  // IndexedDB 模式：按单批 <= 40 个文件或 <= 32 MB 合并写入，采用 relaxed durability 避免逐条 fsync
-  const MAX_COUNT = 40;
-  const MAX_BYTES = 32 * 1024 * 1024;
+  // IndexedDB 模式：单批扩大至 <= 250 个文件 / <= 96 MB，并行 3 条 relaxed 写入事务流水线
+  const MAX_COUNT = 250;
+  const MAX_BYTES = 96 * 1024 * 1024;
+  const batches = [];
   let idx = 0;
   while (idx < total) {
     const batch = [];
     let batchBytes = 0;
     while (idx < total && batch.length < MAX_COUNT && (batch.length === 0 || batchBytes + (list[idx].blob?.size || 0) <= MAX_BYTES)) {
-      const it = list[idx++];
-      batch.push(it);
-      batchBytes += it.blob?.size || 0;
+      const i = idx++;
+      batch.push({ idx: i, item: list[i] });
+      batchBytes += list[i].blob?.size || 0;
     }
-    try {
-      await tx(['cards', 'blobs'], 'readwrite', (t) => {
-        const bs = t.objectStore('blobs');
-        const cs = t.objectStore('cards');
-        for (const { card, blob } of batch) {
-          bs.put({ id: card.id, data: blob, type: blob.type, size: blob.size });
-          cs.put(card);
-        }
-      }, { relaxed: true });
-      for (const { card, blob } of batch) {
-        ok.push(card);
-        bytesDone += blob?.size || 0;
-        done++;
-      }
-      onProgress?.({ done, total, bytesDone, bytesTotal });
-    } catch {
-      for (const { card, blob } of batch) {
-        try {
-          await tx(['cards', 'blobs'], 'readwrite', (t) => {
-            t.objectStore('blobs').put({ id: card.id, data: blob, type: blob.type, size: blob.size });
-            t.objectStore('cards').put(card);
-          }, { relaxed: true });
-          ok.push(card);
-          bytesDone += blob?.size || 0;
-        } catch (error) {
-          errors.push({ card, error });
-        }
-        done++;
-        onProgress?.({ done, total, bytesDone, bytesTotal });
-      }
-    }
+    batches.push(batch);
   }
+
+  const okSlots = new Array(total);
+  let batchCursor = 0;
+  const TX_CONCURRENCY = Math.min(batches.length, 3);
+  await Promise.all(Array.from({ length: TX_CONCURRENCY }, async () => {
+    while (batchCursor < batches.length) {
+      const batch = batches[batchCursor++];
+      try {
+        await tx(['cards', 'blobs'], 'readwrite', (t) => {
+          const bs = t.objectStore('blobs');
+          const cs = t.objectStore('cards');
+          for (const { item: { card, blob } } of batch) {
+            bs.put({ id: card.id, data: blob, type: blob.type, size: blob.size });
+            cs.put(card);
+          }
+        }, { relaxed: true });
+        for (const { idx: gIdx, item: { card, blob } } of batch) {
+          okSlots[gIdx] = card;
+          bytesDone += blob?.size || 0;
+          done++;
+        }
+        onProgress?.({ done, total, bytesDone, bytesTotal });
+      } catch {
+        for (const { idx: gIdx, item: { card, blob } } of batch) {
+          try {
+            await tx(['cards', 'blobs'], 'readwrite', (t) => {
+              t.objectStore('blobs').put({ id: card.id, data: blob, type: blob.type, size: blob.size });
+              t.objectStore('cards').put(card);
+            }, { relaxed: true });
+            okSlots[gIdx] = card;
+            bytesDone += blob?.size || 0;
+          } catch (error) {
+            errors.push({ card, error });
+          }
+          done++;
+          onProgress?.({ done, total, bytesDone, bytesTotal });
+        }
+      }
+    }
+  }));
+  for (const c of okSlots) if (c) ok.push(c);
   return { ok, errors };
 }
 
@@ -398,7 +429,10 @@ export async function getMeta(key, fallback = null) {
   const rec = await tx(['meta'], 'readonly', (t) => wrap(t.objectStore('meta').get(key)));
   return rec ? rec.value : fallback;
 }
-export const setMeta = (key, value) => put('meta', { key, value });
+export const setMeta = (key, value) => {
+  if (key === 'storageMode') modeCache = undefined;
+  return put('meta', { key, value });
+};
 
 // ---------- 备份文件格式 (.wbk) ----------
 // [ "WBK1" 4字节 ][ 清单长度 uint32 LE ][ 清单 JSON (UTF-8) ][ 文件内容依次拼接 ]
