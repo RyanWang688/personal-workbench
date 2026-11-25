@@ -1170,7 +1170,7 @@ body.board-dragging .comment-pin { transition: none; }
 .canvas-palette .icon-btn svg { width: 19px; height: 19px; }
 .canvas-palette .icon-btn.on { background: var(--accent-soft); color: var(--accent); }
 .canvas-palette .sep { width: 20px; height: 1px; background: var(--border); margin: 3px 0; }
-.viewport[data-tool="sticky"], .viewport[data-tool="text"], .viewport[data-tool="rect"], .viewport[data-tool="ellipse"], .viewport[data-tool="diamond"], .viewport[data-tool="arrow"], .viewport[data-tool="comment"] { cursor: crosshair; }
+.viewport[data-tool="sticky"], .viewport[data-tool="text"], .viewport[data-tool="rect"], .viewport[data-tool="ellipse"], .viewport[data-tool="diamond"], .viewport[data-tool="frame"], .viewport[data-tool="arrow"], .viewport[data-tool="comment"] { cursor: crosshair; }
 .viewport[data-tool="text"] { cursor: text; }
 .viewport[data-tool="arrow"] .card.on-canvas, .viewport[data-tool="arrow"] .shape,
 .viewport[data-tool="comment"] .card.on-canvas, .viewport[data-tool="comment"] .shape { cursor: crosshair; }
@@ -1188,6 +1188,18 @@ svg.sh-bg polygon { fill: var(--sb); stroke: var(--sd); stroke-width: 1.5; strok
 .st-ellipse { padding: 14% 16%; }
 .st-diamond { padding: 22% 24%; }
 .st-text { align-items: flex-start; padding: 4px 6px; cursor: move; }
+/* 画框：纯背景分组框。底色是所选颜色的淡淡一层，标题浮在框外左上角，屏幕上字号不随缩放变化 */
+.shape.st-frame { padding: 0; cursor: default; }
+.st-frame .sh-bg { border-radius: 10px; border: calc(1.5px * var(--iz, 1)) solid color-mix(in srgb, var(--sd) 45%, var(--border));
+  background: color-mix(in srgb, var(--sb) 24%, color-mix(in srgb, var(--text) 3.5%, transparent)); }
+.st-frame.nofill .sh-bg { border-color: var(--border); background: color-mix(in srgb, var(--text) 3.5%, transparent); }
+.st-frame .sh-tx { position: absolute; left: 0; bottom: 100%; width: max-content; max-width: none; max-height: none;
+  padding: 0 2px 6px; transform: scale(var(--iz, 1)); transform-origin: left bottom; text-align: left;
+  font-size: 14px; font-weight: 600; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+.st-frame.picked .sh-tx, .st-frame:hover .sh-tx { color: var(--text); }
+.st-frame.editing .sh-tx { white-space: pre; overflow: visible; background: var(--surface); border-radius: 4px; outline: 1.5px solid var(--accent); }
+.st-frame.picked::after { border-radius: 12px; }
+.shape-ghost.st-frame { border-radius: 10px; border-style: solid; background: color-mix(in srgb, var(--accent) 5%, transparent); }
 .st-text .sh-bg { border: 0; }
 .shape.nofill:not(.st-text) .sh-bg { border-color: var(--text-3); }
 .shape.nofill.st-diamond polygon { stroke: var(--text-3); }
@@ -1309,7 +1321,7 @@ body.board-dragging .group-box { display: none; }
 .shape-ghost.st-ellipse { border-radius: 50%; }
 
 .links { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; z-index: 0; }
-.link .ln { fill: none; stroke: var(--lc); stroke-width: 2; stroke-linecap: round; }
+.link .ln { fill: none; stroke: var(--lc); stroke-width: 2.4; stroke-linecap: round; vector-effect: non-scaling-stroke; } /* 线宽在屏幕上固定，缩小时不会变成细丝 */
 .link .ln.dash { stroke-dasharray: 7 6; }
 .link .ah { fill: var(--lc); stroke: var(--lc); stroke-width: 1; stroke-linejoin: round; }
 .link .hit { fill: none; stroke: transparent; stroke-width: 16; pointer-events: stroke; cursor: pointer; }

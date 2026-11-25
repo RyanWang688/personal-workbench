@@ -2365,6 +2365,7 @@ function applyCam() {
   positionFmt();
   positionCommentPop();
   scheduleCanvasPdfSharpen();
+  if (c.z !== applyCam.linkZ) { applyCam.linkZ = c.z; if ($('#links')) drawLinks(); } // 缩放变了：重画箭头头部大小
 }
 function renderCanvas() {
   const list = cardsIn(state.view, false);
@@ -2885,13 +2886,15 @@ vp.addEventListener('dblclick', async (e) => {
   }
   if (hit.closest('.card, .fmt-bar, .canvas-palette, .canvas-tools, .canvas-workspace-head') || e.target.closest('.card, .fmt-bar')) return;
   const sh = hit.closest('.shape') || e.target.closest('.shape');
-  if (sh) return editingShape === sh.dataset.sid ? undefined : startEdit(sh.dataset.sid);
+  // 画框：双击标题改名；双击框内空白处 → 在那里贴一张便签
+  const inFrameBody = sh?.classList.contains('st-frame') && !hit.closest('.sh-tx');
+  if (sh && !inFrameBody) return editingShape === sh.dataset.sid ? undefined : startEdit(sh.dataset.sid);
   if (editingShape) return;
   const ln = hit.closest('[data-lid]') || e.target.closest('[data-lid]');
   if (ln) return editLinkLabel(ln.dataset.lid);
   const p = toWorld(e.clientX, e.clientY);
   // 双击点落在某个形状范围内（比如刚重绘过）也不新建
-  if (boardOf()?.shapes.some((s) => p.x >= s.x && p.x <= s.x + s.w && p.y >= s.y && p.y <= s.y + s.h)) return;
+  if (boardOf()?.shapes.some((s) => !isFrame(s) && p.x >= s.x && p.x <= s.x + s.w && p.y >= s.y && p.y <= s.y + s.h)) return;
   await createShape('sticky', p.x - 100, p.y - 100);
 });
 
@@ -2902,15 +2905,21 @@ const SH_COLORS = [
   { n: '灰', bg: '#e7e7ea', bd: '#97999f' }, { n: '白', bg: '#ffffff', bd: '#c2c3c9' },
 ];
 const LINK_COLORS = [null, '#f2643b', '#d6455d', '#3b82f6', '#2f9e55', '#8b5cf6'];
-const SHAPE_NAMES = { sticky: '便签', rect: '矩形', round: '圆角矩形', ellipse: '圆形', diamond: '菱形', text: '文字' };
+const SHAPE_NAMES = { sticky: '便签', rect: '矩形', round: '圆角矩形', ellipse: '圆形', diamond: '菱形', text: '文字', frame: '画框' };
 const SH_DEF = {
   sticky: { w: 200, h: 200, fill: 0, fs: 18, al: 'center' }, rect: { w: 200, h: 120, fill: 4, fs: 16, al: 'center' },
   round: { w: 200, h: 120, fill: 5, fs: 16, al: 'center' }, ellipse: { w: 160, h: 160, fill: 2, fs: 16, al: 'center' },
   diamond: { w: 180, h: 140, fill: 3, fs: 16, al: 'center' }, text: { w: 240, h: 44, fill: 'none', fs: 20, al: 'left' },
+  // 画框：纯背景的分组框，永远在最底层（箭头画在它上面），拖动时带着框里的东西一起走
+  frame: { w: 640, h: 420, fill: 'none', fs: 14, al: 'left' },
 };
 const FONT_SIZES = [12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64, 80, 96];
-const TOOL_KEYS = { v: 'select', n: 'sticky', t: 'text', r: 'rect', o: 'ellipse', d: 'diamond', l: 'arrow', c: 'comment' };
+const TOOL_KEYS = { v: 'select', n: 'sticky', t: 'text', r: 'rect', o: 'ellipse', d: 'diamond', a: 'frame', l: 'arrow', c: 'comment' };
+const isFrame = (s) => s?.t === 'frame';
+// 完全落在画框范围内的形状 / 卡片
+const insideBox = (f, b) => b.x >= f.x - 1 && b.y >= f.y - 1 && b.x + b.w <= f.x + f.w + 1 && b.y + b.h <= f.y + f.h + 1;
 const TOOL_HINT = {
+  frame: '拖出一个画框，把相关内容框在一起；拖动画框时，框里的便签、形状和文件会一起移动',
   sticky: '点击贴一张便签，或拖出大小', text: '点击放置文字框，然后直接输入', rect: '点击放置，或拖出大小（Shift 画正方形）',
   ellipse: '点击放置，或拖出大小（Shift 画正圆）', diamond: '点击放置，或拖出大小', arrow: '从一个对象拖到另一个对象',
   comment: '点击画布或任意卡片 / 形状添加备注评论，协作者会收到实时提醒',
@@ -2940,7 +2949,9 @@ const shEl = (id) => $(`#world .shape[data-sid="${CSS.escape(id)}"]`);
 function shapeHTML(s) {
   const col = shColor(s);
   const sel = isPicked(s.id), single = sel && selIds().length === 1;
-  const style = `left:${Math.round(s.x)}px;top:${Math.round(s.y)}px;width:${Math.round(s.w)}px;height:${Math.round(s.h)}px;z-index:${Number.isFinite(s.z) ? s.z : 1};`
+  // 画框始终压在最底层：比箭头层（z-index 0）、所有形状和卡片都低，框之间仍保持各自先后
+  const zi = isFrame(s) ? -100000 + Math.max(-50000, Math.min(50000, Number.isFinite(s.z) ? s.z : 0)) : (Number.isFinite(s.z) ? s.z : 1);
+  const style = `left:${Math.round(s.x)}px;top:${Math.round(s.y)}px;width:${Math.round(s.w)}px;height:${Math.round(s.h)}px;z-index:${zi};`
     + `--fs:${s.fs || 16}px;--sb:${col ? col.bg : 'transparent'};--sd:${col ? col.bd : 'var(--text-3)'};--tc:${col ? '#1f2023' : 'var(--text)'};text-align:${s.al || 'center'}`;
   const bg = s.t === 'diamond'
     ? '<svg class="sh-bg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1.5 98.5,50 50,98.5 1.5,50" vector-effect="non-scaling-stroke"/></svg>'
@@ -2948,7 +2959,7 @@ function shapeHTML(s) {
   // 整条边都能拖（看不见的感应条），四个角另有放大的感应区；看得见的小方块只是提示
   const handles = single ? ['n', 'e', 's', 'w'].map((k) => `<i class="sh-edge se-${k}" data-handle="${k}"></i>`).join('')
     + ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((k) => `<i class="sh-h h-${k}" data-handle="${k}"></i>`).join('') : '';
-  return `<div class="shape st-${s.t}${col ? '' : ' nofill'}${sel ? ' picked' : ''}${s.b ? ' bold' : ''}${s.frame ? ' frame' : ''}${s.va === 'top' ? ' va-top' : ''}" data-sid="${s.id}" style="${style}">${bg}<div class="sh-tx" data-ph="${s.t === 'text' ? '输入文字' : '双击输入'}">${esc(s.text || '')}</div>${handles}</div>`;
+  return `<div class="shape st-${s.t}${col ? '' : ' nofill'}${sel ? ' picked' : ''}${s.b ? ' bold' : ''}${s.frame ? ' frame' : ''}${s.va === 'top' ? ' va-top' : ''}" data-sid="${s.id}" style="${style}">${bg}<div class="sh-tx" data-ph="${s.t === 'text' ? '输入文字' : isFrame(s) ? '画框' : '双击输入'}">${esc(s.text || '')}</div>${handles}</div>`;
 }
 // 重绘后的装饰：便签字号自适应、多选外框
 function decorateBoard() {
@@ -3027,7 +3038,7 @@ function linkGeom(l, override) {
   }
   return { d, p1, p2, c1, c2, mid };
 }
-function arrowHead(tip, from, size = 11) {
+function arrowHead(tip, from, size = 13) {
   const a = Math.atan2(tip.y - from.y, tip.x - from.x), w = 0.42;
   const p = (ang) => `${tip.x - size * Math.cos(ang)} ${tip.y - size * Math.sin(ang)}`;
   return `M${tip.x} ${tip.y}L${p(a - w)}L${p(a + w)}Z`;
@@ -3035,8 +3046,10 @@ function arrowHead(tip, from, size = 11) {
 function linkSVG(l, g, { temp = false } = {}) {
   const sel = !temp && state.bsel?.type === 'link' && state.bsel.id === l.id;
   const color = l.color || 'var(--text-2)';
-  const heads = (l.end !== 'none' ? `<path class="ah" d="${arrowHead(g.p2, g.c2 === g.p2 ? g.p1 : g.c2)}"/>` : '')
-    + (l.end === 'both' ? `<path class="ah" d="${arrowHead(g.p1, g.c1 === g.p1 ? g.p2 : g.c1)}"/>` : '');
+  // 缩小时箭头按比例放大，屏幕上始终清楚（最多放大 4 倍）
+  const ah = 13 * Math.min(4, Math.max(1, 1 / (cam().z || 1)));
+  const heads = (l.end !== 'none' ? `<path class="ah" d="${arrowHead(g.p2, g.c2 === g.p2 ? g.p1 : g.c2, ah)}"/>` : '')
+    + (l.end === 'both' ? `<path class="ah" d="${arrowHead(g.p1, g.c1 === g.p1 ? g.p2 : g.c1, ah)}"/>` : '');
   const label = l.label ? `<text class="lbl" x="${g.mid.x}" y="${g.mid.y}">${esc(l.label)}</text>` : '';
   const ends = sel ? `<circle class="lend" data-lend="from" cx="${g.p1.x}" cy="${g.p1.y}"/><circle class="lend" data-lend="to" cx="${g.p2.x}" cy="${g.p2.y}"/>` : '';
   return `<g class="link${sel ? ' picked' : ''}${temp ? ' temp' : ''}" ${temp ? '' : `data-lid="${l.id}"`} style="--lc:${color}">
@@ -3101,6 +3114,7 @@ function newShape(t, x, y, w, h, like) {
   if (like && like.t === t) Object.assign(s, { fill: like.fill, fs: like.fs, al: like.al, b: like.b });
   else if (like && like.t !== 'text' && t !== 'text' && shColor(like)) s.fill = like.fill;
   if (!s.b) delete s.b;
+  if (t === 'frame') s.text = `画框 ${(boardOf()?.shapes.filter(isFrame).length || 0) + 1}`;
   return s;
 }
 async function createShape(t, x, y, w, h, { like, linkFrom } = {}) {
@@ -3114,8 +3128,8 @@ async function createShape(t, x, y, w, h, { like, linkFrom } = {}) {
   afterCreateTool();
   renderCanvas();
   const el = shEl(s.id);
-  if (el && !reduceMotion.matches) el.animate([{ transform: 'scale(.9)' }, { transform: 'none' }], { duration: 170, easing: 'cubic-bezier(.2,.9,.3,1.2)' });
-  startEdit(s.id, { fresh: true }); // 先进入编辑，马上就能打字；保存在后台进行
+  if (el && !reduceMotion.matches) el.animate([{ transform: 'scale(.97)', opacity: 0.6 }, { transform: 'none', opacity: 1 }], { duration: 170, easing: 'cubic-bezier(.2,.9,.3,1.2)' });
+  if (t !== 'frame') startEdit(s.id, { fresh: true }); // 先进入编辑，马上就能打字；保存在后台进行（画框只选中，双击改标题）
   await saveBoard();
   return s;
 }
@@ -3173,6 +3187,7 @@ function fitSticky(s, el) {
 }
 function fitShapeText(s, el) {
   if (s.t === 'sticky') { fitSticky(s, el); return; }
+  if (s.t === 'frame') return; // 画框的标题在框外，不影响框的大小
   const tx = el.querySelector('.sh-tx');
   const need = tx.scrollHeight + (s.t === 'text' ? 8 : s.t === 'diamond' ? s.h * 0.5 : s.t === 'ellipse' ? s.h * 0.3 : 28);
   if (need > s.h) el.style.height = `${Math.ceil(need)}px`;
@@ -3225,7 +3240,8 @@ vp.addEventListener('pointerover', (e) => {
   if (bd || cardDrag || pan || editingShape || spaceDown || e.pointerType === 'touch' || !['select', 'arrow'].includes(state.tool)) return;
   if (e.target.closest('.conn-dots')) return;
   const el = e.target.closest('.shape, .card.on-canvas');
-  if (el && !(el.classList.contains('picked') && selIds().length > 1)) showDots(el); else hideDots();
+  // 画框不显示连接点（它只是背景），箭头连的是框里的东西
+  if (el && !el.classList.contains('st-frame') && !(el.classList.contains('picked') && selIds().length > 1)) showDots(el); else hideDots();
 });
 vp.addEventListener('pointerleave', () => { if (!bd) hideDots(); });
 vp.addEventListener('pointermove', (e) => {
@@ -3380,7 +3396,7 @@ function boardDown(e) {
     capture(); hideDots(); return true;
   }
   if (dot || (state.tool === 'arrow' && !e.target.closest('.more, .export-handle, .sel, .quick-rename-btn, .inline-rn-wrap, .canvas-card-hud'))) {
-    const owner = dot ? hoverRef : (shapeEl?.dataset.sid || (cardEl && cardEl.classList.contains('on-canvas') ? cardEl.dataset.id : null));
+    const owner = dot ? hoverRef : ((shapeEl && !shapeEl.classList.contains('st-frame') ? shapeEl.dataset.sid : null) || (cardEl && cardEl.classList.contains('on-canvas') ? cardEl.dataset.id : null));
     bd = { ...base, mode: 'link', fromDot: !!dot, from: owner ? { id: owner } : { x: Math.round(p.x), y: Math.round(p.y) }, cur: p };
     capture(); hideDots(); e.preventDefault(); return true;
   }
@@ -3406,6 +3422,18 @@ function boardDown(e) {
         return el ? { card: c, el, x: c.x || 0, y: c.y || 0, w: el.offsetWidth || canvasCardW(c), h: el.offsetHeight || 120 } : null;
       }).filter(Boolean)
       : [];
+    // 拖动画框：完全在框里的形状、文件卡片一起移动（Alt 复制时只复制画框和里面的形状）
+    for (const f of items.map((it) => it.s).filter(isFrame)) {
+      const have = new Set(items.map((it) => it.s.id));
+      for (const s of boardOf().shapes) if (!have.has(s.id) && s !== f && insideBox(f, s)) items.push({ s, o: { x: s.x, y: s.y } });
+      if (e.altKey) continue;
+      const haveCards = new Set(cardItems.map((c) => c.card.id));
+      for (const el of $$('#world .card.on-canvas')) {
+        const c = findCard(el.dataset.id);
+        const box = { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight };
+        if (c && !haveCards.has(c.id) && insideBox(f, box)) { cardItems.push({ card: c, el, x: c.x || 0, y: c.y || 0, w: box.w, h: box.h }); haveCards.add(c.id); }
+      }
+    }
     bd = { ...base, mode: 'move', items, cardItems, clicked: id, was: was && !e.shiftKey && selIds().length === 1 && !cardItems.length, shiftToggle: e.shiftKey && was, alt: e.altKey };
     if (e.altKey) e.preventDefault();
     capture(); return true;
@@ -3547,7 +3575,7 @@ function boardMove(e) {
     if (openCommentId === bd.cm.id) positionCommentPop();
   } else if (bd.mode === 'link') {
     bd.cur = toWorld(e.clientX, e.clientY);
-    const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest('.shape, .card.on-canvas');
+    const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest('.shape:not(.st-frame), .card.on-canvas');
     const id = hit && (hit.dataset.sid || hit.dataset.id);
     $$('.link-target').forEach((x) => x.classList.remove('link-target'));
     if (id && id !== bd.from.id) { hit.classList.add('link-target'); bd.target = { id }; } else bd.target = null;
@@ -3584,7 +3612,7 @@ async function boardUp(e) {
       if (d.copied) toast(`已复制 ${d.items.length} 个形状`);
     }
     else if (d.shiftToggle) selectBoard(pickShapes(selIds().filter((x) => x !== d.clicked))); // Shift + 点已选中的 → 移出多选
-    else if (d.mode === 'move' && d.was) startEdit(d.clicked); // 再点一下已选中的形状 → 编辑文字
+    else if (d.mode === 'move' && d.was && !isFrame(shapeById(d.clicked))) startEdit(d.clicked); // 再点一下已选中的形状 → 编辑文字（画框改名用双击标题）
     else { decorateBoard(); positionFmt(); }
     return true;
   }
@@ -4023,6 +4051,9 @@ async function applyFmt(act, v) {
         if (v === 'text' && was !== 'text') { s.fill = 'none'; s.al = 'left'; }
         if (was === 'text' && v !== 'text' && !shColor(s)) { s.fill = SH_DEF[v].fill; s.al = 'center'; }
         if (v === 'ellipse' || v === 'sticky') { const m = Math.max(s.w, s.h); if (Math.abs(s.w - s.h) < m * 0.5) s.w = s.h = m; }
+        // 变成画框：保留原来的颜色（显示成淡淡的底色），标题左对齐；从画框变回来：文字居中
+        if (v === 'frame' && was !== 'frame') { s.al = 'left'; s.fs = SH_DEF.frame.fs; if (!s.text) s.text = '画框'; }
+        if (was === 'frame' && v !== 'frame') { s.al = SH_DEF[v].al; s.fs = SH_DEF[v].fs; }
       }
       if (act === 'fill') s.fill = v === 'none' ? 'none' : +v;
       if (act === 'fs') s.fs = +v;
