@@ -3313,14 +3313,22 @@ function fitSticky(s, el) {
   const avail = el.clientHeight - parseFloat(cs.paddingTop || 0) - parseFloat(cs.paddingBottom || 0);
   const availW = el.clientWidth - parseFloat(cs.paddingLeft || 0) - parseFloat(cs.paddingRight || 0);
   const over = () => tx.scrollHeight > avail + 1 || tx.scrollWidth > availW + 1;
-  while (over() && fs > 10) { fs -= 1; el.style.setProperty('--fs', `${fs}px`); }
+  if (!over()) return;
+  // 像 Miro 一样：二分查找能完整放下全部文字的最大字号，没有最小字号限制，保证内容全部可见
+  let lo = 1, hi = fs;
+  for (let i = 0; i < 10 && hi - lo > 0.1; i++) {
+    const mid = (lo + hi) / 2;
+    el.style.setProperty('--fs', `${mid}px`);
+    if (over()) hi = mid; else lo = mid;
+  }
+  el.style.setProperty('--fs', `${Math.floor(lo * 10) / 10}px`);
 }
 const fitAllShapeText = () => { for (const s of boardOf()?.shapes || []) if (s.text && s.t !== 'text' && s.t !== 'frame') fitSticky(s, shEl(s.id)); };
 // 网页字体加载完成后字宽会变，重新量一次，避免文字溢出
 document.fonts?.ready?.then(() => { if (isCanvas(state.view)) fitAllShapeText(); });
 document.fonts?.addEventListener?.('loadingdone', () => { if (isCanvas(state.view)) fitAllShapeText(); });
 function fitShapeText(s, el) {
-  if (s.t === 'sticky') { fitSticky(s, el); return; }
+  if (s.t !== 'text') { fitSticky(s, el); return; } // 便签和各种形状：大小不变，字自动缩小
   if (s.t === 'frame') return; // 画框的标题在框外，不影响框的大小
   const tx = el.querySelector('.sh-tx');
   const need = tx.scrollHeight + (s.t === 'text' ? 8 : s.t === 'diamond' ? s.h * 0.5 : s.t === 'ellipse' ? s.h * 0.3 : 28);
@@ -7628,7 +7636,7 @@ function applyRemoteShapeLive(pkt) {
         el.style.setProperty('--tc', col ? '#1f2023' : 'var(--text)');
         const tx = el.querySelector('.sh-tx');
         if (tx && tx.textContent !== (cur.text || '')) tx.textContent = cur.text || '';
-        if (cur.t === 'sticky' && cur.text) fitSticky(cur, el);
+        if (cur.text) fitSticky(cur, el);
       } else needFullRender = true;
     }
   }

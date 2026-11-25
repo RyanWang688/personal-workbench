@@ -1210,7 +1210,6 @@ svg.sh-bg polygon { fill: var(--sb); stroke: var(--sd); stroke-width: 1.5; strok
 .shape.editing .sh-tx { cursor: text; user-select: text; max-height: none; }
 /* 兜底：字号缩到最小仍放不下时，裁在形状里面，不再溢出到外面；编辑便签时在框内滚动 */
 .shape:not(.st-text):not(.st-frame):not(.editing) .sh-tx { overflow: hidden; }
-.shape.st-sticky.editing .sh-tx { max-height: 100%; overflow-y: auto; scrollbar-width: none; }
 .shape.editing, .shape.editing * { cursor: text; }
 .sh-tx:empty::before { content: attr(data-ph); color: color-mix(in srgb, var(--tc) 40%, transparent); }
 .shape:not(.picked) .sh-tx:empty::before { content: ''; }
