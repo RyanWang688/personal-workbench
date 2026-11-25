@@ -13,7 +13,7 @@
     // 尽早应用主题，避免刷新时闪一下
     try { var t = JSON.parse(localStorage.getItem('wb:theme') || '"auto"'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
   </script>
-  <link rel="stylesheet" href="style.css?v=62">
+  <link rel="stylesheet" href="style.css?v=63">
 </head>
 <body>
   <header class="topbar">
@@ -146,6 +146,8 @@
 
     <section class="archive-view works-view" id="worksView" aria-label="作品" hidden></section>
 
+    <section class="archive-view store-view" id="storeView" aria-label="云仓库" hidden></section>
+
     <aside class="drafts" id="drafts" aria-label="功能区">
       <div class="drafts-resizer" id="draftsResizer" role="separator" aria-orientation="vertical" aria-label="拖动调整功能区宽度，双击收起" title="拖动调整宽度 · 双击收起 / 展开"></div>
       <!-- 收起后的窄侧栏：每个功能区一个图标 + 数量，点一下展开到那个区；拖文件上来可直接放入 -->
@@ -184,6 +186,6 @@
   <input type="file" id="dirInput" webkitdirectory directory multiple hidden>
   <input type="file" id="restoreInput" accept=".wbk" hidden>
   <noscript>此工作台需要启用 JavaScript。</noscript>
-  <script type="module" src="app.js?v=75"></script>
+  <script type="module" src="app.js?v=76"></script>
 </body>
 </html>
