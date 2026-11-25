@@ -6,6 +6,7 @@ import * as cpv from './canvas-preview.js?v=1';
 import * as zip from './zip.js?v=1';
 import * as assoc from './assoc.js?v=1';
 import * as upTree from './upload-tree.js?v=1';
+import * as share from './share.js?v=2';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -884,6 +885,7 @@ function renderFolderPage(el, fid) {
         <button class="btn" data-action="batch-rename-folder" ${own ? '' : 'disabled'} title="逐张预览或按序号一键批量重命名当前文件夹内的文件（F2）"><svg viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="m13.5 6.5 3 3"/></svg><span>快速重命名</span></button>
         <button class="btn" data-action="add-subfolder"><svg viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></svg><span>新建子文件夹</span></button>
         <button class="btn" data-action="folder-zip" ${n ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg><span>打包下载</span></button>
+        <button class="btn${activeShare?.area.id === fid ? ' on' : ''}" data-action="area-share" data-id="${fid}" ${n ? '' : 'disabled'} title="生成链接，对方打开即可直接从这台电脑下载">${SHARE_SVG}<span>${activeShare?.area.id === fid ? '分享中' : '分享'}</span></button>
         <button class="icon-btn" data-action="folder-menu" aria-label="文件夹设置" aria-haspopup="menu">${DOTS}</button>
       </header>
       ${subs.length ? `<section class="cat-sec"><h3 class="cat-h"><span>子文件夹</span><b>${subs.length}</b></h3><div class="folder-grid">${subs.map(folderTile).join('')}</div></section>` : ''}
@@ -979,6 +981,7 @@ function renderStore() {
         </div>
         <button class="btn primary" data-action="add-files">${UPLOAD}<span>存入文件</span></button>
         <button class="btn" data-action="shelf-zip" data-id="${sid}" ${list.length ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg><span>打包下载</span></button>
+        <button class="btn${activeShare?.area.id === sid ? ' on' : ''}" data-action="area-share" data-id="${sid}" ${list.length ? '' : 'disabled'} title="生成链接，对方打开即可直接从这台电脑下载">${SHARE_SVG}<span>${activeShare?.area.id === sid ? '分享中' : '分享'}</span></button>
         <button class="icon-btn" data-action="shelf-menu" data-id="${sid}" aria-label="仓库文件夹设置" aria-haspopup="menu">${DOTS}</button>
       </header>
       <div class="list folder-list store-list" data-col="${sid}">${listHTML(sid, '把文件或卡片拖到这里长期保存；也可以点右上角「存入文件」')}</div>`;
@@ -1340,6 +1343,185 @@ async function zipFolder(f) {
     t.close();
     toast(`打包失败：${e.message || e}`, { error: true });
   }
+}
+
+// ---------- 分享链接：对方打开链接直接从这台电脑下载（浏览器直连，不上传到任何服务器） ----------
+const SHARE_SVG = '<svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="m8.3 10.8 7.4-4.4M8.3 13.2l7.4 4.4"/></svg>';
+let activeShare = null; // { host, area, url, files }
+const shareUrl = (id) => { const u = new URL(location.href); u.search = ''; u.hash = ''; u.searchParams.set('share', id); return u.toString(); };
+function shareFilesOf(f) {
+  const clean = (s) => String(s).replace(/[\\/:*?"<>|]/g, '_');
+  const rel = (folderId) => { const out = []; let x = area(folderId); while (x && x.id !== f.id) { out.unshift(clean(x.title)); x = parentOf(x); } return out.length ? `${out.join('/')}/` : ''; };
+  const used = new Set();
+  return deepCards(f.id).map((c) => {
+    const raw = rel(c.columnId) + clean(c.kind === 'note' ? `${c.name || '便签'}.txt` : c.name);
+    let name = raw, i = 2;
+    while (used.has(name)) name = raw.replace(/(\.[^./]*)?$/, ` (${i++})$1`);
+    used.add(name);
+    return { card: c, name, size: c.kind === 'note' ? new Blob([c.text || '']).size : (c.size || 0), type: c.kind === 'note' ? 'text/plain' : (c.type || '') };
+  });
+}
+async function startShare(f) {
+  if (!f) return;
+  if (activeShare && activeShare.area.id === f.id) return renderSharePanel();
+  if (!(await ensureAccess())) return;
+  const files = shareFilesOf(f);
+  if (!files.length) return toast('文件夹是空的，没有可以分享的文件');
+  if (activeShare) {
+    const ok = await confirmBox({ title: '换成分享这个文件夹？', body: `正在分享「${activeShare.area.title}」，同一时间只能分享一个文件夹。继续会停止之前的分享，旧链接随即失效。`, ok: '换成这个' });
+    if (!ok) return;
+    stopShare(true);
+  }
+  const id = share.newShareId();
+  const host = new share.ShareHost({
+    id, title: f.title,
+    files: files.map(({ name, size, type }) => ({ name, size, type })),
+    getFile: async (i) => { const it = files[i]; return it.card.kind === 'note' ? (it.card.text || '') : db.getBlob(it.card.id); },
+    onStatus: () => renderSharePanel(),
+  });
+  activeShare = { host, area: f, url: shareUrl(id), files, total: files.reduce((n, x) => n + x.size, 0) };
+  renderSharePanel();
+  await host.start();
+  try { await navigator.clipboard.writeText(activeShare.url); toast('分享链接已复制，发给对方打开即可下载'); } catch {}
+}
+function stopShare(quiet) {
+  if (!activeShare) return;
+  activeShare.host.stop();
+  activeShare = null;
+  $('#sharePanel')?.remove();
+  if (!quiet) toast('已停止分享，链接已失效');
+}
+window.addEventListener('beforeunload', (e) => { if (activeShare?.host.conns.size) { e.preventDefault(); e.returnValue = ''; } });
+function renderSharePanel() {
+  if (!activeShare) return;
+  let el = $('#sharePanel');
+  if (!el) {
+    el = document.createElement('aside');
+    el.id = 'sharePanel'; el.className = 'share-panel'; el.setAttribute('aria-label', '文件夹分享');
+    document.body.appendChild(el);
+    el.addEventListener('click', async (e) => {
+      const act = e.target.closest('[data-share-act]')?.dataset.shareAct;
+      if (!act || !activeShare) return;
+      if (act === 'copy') copyTextWithToast(activeShare.url, '分享链接已复制');
+      if (act === 'stop') stopShare();
+      if (act === 'min') { el.classList.toggle('min'); }
+    });
+  }
+  const { host, area: f, url, files, total } = activeShare, st = host.status();
+  const stateText = st.state === 'connecting' ? '正在开启分享…'
+    : st.state === 'error' ? (host.error || '分享出错')
+    : st.sending ? `正在发送「${st.sending.name.split('/').pop()}」${st.sending.size ? ` ${Math.round((st.sending.done / st.sending.size) * 100)}%` : ''}`
+    : st.viewers ? `${st.viewers} 人已打开链接` : '分享中 · 等待对方打开链接';
+  el.classList.toggle('busy', !!st.sending);
+  el.classList.toggle('err', st.state === 'error');
+  el.innerHTML = `
+    <header><span class="sp-ico">${SHARE_SVG}</span><div class="sp-t"><b>分享「${esc(f.title)}」</b><small>${files.length} 个文件 · ${fmtSize(total)}</small></div>
+      <button class="icon-btn" data-share-act="min" aria-label="收起 / 展开">${'<svg viewBox="0 0 24 24"><path d="M6 12h12"/></svg>'}</button></header>
+    <div class="sp-body">
+      <div class="sp-state"><i class="dot"></i>${esc(stateText)}</div>
+      ${st.sentFiles ? `<div class="sp-sub">已发送 ${st.sentFiles} 个文件 · ${fmtSize(st.sentBytes)}</div>` : ''}
+      <div class="sp-link"><input readonly value="${esc(url)}" aria-label="分享链接" onclick="this.select()"><button class="btn primary" data-share-act="copy">复制链接</button></div>
+      <p class="sp-note">对方打开链接就能看到文件并直接下载。文件从这台电脑直接传过去，不经过服务器；<b>这个页面要一直开着</b>，关掉或点「停止分享」链接就失效。</p>
+      <button class="btn danger-ghost" data-share-act="stop">停止分享</button>
+    </div>`;
+}
+
+// ---- 接收方：带 ?share= 打开时显示下载页 ----
+async function initShareFromUrl() {
+  const id = share.normalizeShareId(new URLSearchParams(location.search).get('share'));
+  if (!id) return false;
+  const view = document.createElement('section');
+  view.className = 'share-view'; view.setAttribute('role', 'dialog'); view.setAttribute('aria-label', '下载分享的文件');
+  document.body.appendChild(view);
+  document.body.classList.add('share-open');
+  let manifest = null, status = { state: 'connecting' }, busy = false;
+  const prog = new Map(); // i -> pct | 'done' | 'err'
+  let allProg = null;
+  const guest = new share.ShareGuest(id, {
+    onStatus: (s) => { status = s; draw(); },
+    onManifest: (m) => { manifest = m; draw(); },
+  });
+  const close = () => {
+    guest.close(); view.remove(); document.body.classList.remove('share-open');
+    const p = new URLSearchParams(location.search); p.delete('share');
+    history.replaceState(null, '', location.pathname + (p.toString() ? `?${p}` : '') + location.hash);
+  };
+  const saveAs = (blob, name) => {
+    const url = URL.createObjectURL(blob), a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  };
+  const fetchOne = (i) => guest.get(i, (got, size) => { prog.set(i, size ? Math.round((got / size) * 100) : 0); drawProg(i); });
+  async function downloadOne(i) {
+    const f = manifest.files[i];
+    try { const blob = await fetchOne(i); prog.set(i, 'done'); saveAs(blob, f.name.split('/').pop()); }
+    catch (e) { prog.set(i, 'err'); toast(`「${f.name.split('/').pop()}」下载失败：${e.message || e}`, { error: true }); }
+    drawProg(i);
+  }
+  async function downloadAll() {
+    const files = manifest.files, total = files.reduce((n, f) => n + f.size, 0);
+    if (total > 1.5 * 1024 ** 3 && !(await confirmBox({ title: '文件比较大', body: `一共 ${fmtSize(total)}，打成一个 zip 会占用较多内存。建议分批逐个下载；确定要整包下载吗？`, ok: '整包下载' }))) return;
+    busy = true; draw();
+    const entries = [];
+    let doneBytes = 0;
+    try {
+      for (const f of files) {
+        const blob = await guest.get(f.i, (got) => { allProg = { n: entries.length, total: files.length, bytes: doneBytes + got, all: total }; drawAll(); });
+        doneBytes += blob.size; prog.set(f.i, 'done');
+        entries.push({ name: f.name, size: blob.size, data: blob });
+      }
+      allProg = { n: files.length, total: files.length, bytes: total, all: total, packing: true }; drawAll();
+      const z = await zip.buildStoreZip(entries);
+      saveAs(z, `${String(manifest.title || '分享').replace(/[\\/:*?"<>|]/g, '_')}.zip`);
+      toast(`已下载 ${entries.length} 个文件（${fmtSize(z.size)}）`);
+    } catch (e) { toast(`下载中断：${e.message || e}`, { error: true }); }
+    busy = false; allProg = null; draw();
+  }
+  function drawProg(i) {
+    const row = view.querySelector(`[data-share-i="${i}"]`);
+    if (!row) return;
+    const p = prog.get(i);
+    row.classList.toggle('done', p === 'done');
+    const b = row.querySelector('.sf-dl');
+    if (b) b.textContent = p === 'done' ? '已下载' : p === 'err' ? '重试' : typeof p === 'number' ? `${p}%` : '下载';
+    row.style.setProperty('--p', `${typeof p === 'number' ? p : p === 'done' ? 100 : 0}%`);
+  }
+  function drawAll() {
+    const el = view.querySelector('.sv-all-prog');
+    if (!el || !allProg) return;
+    el.hidden = false;
+    el.querySelector('i').style.width = `${allProg.all ? Math.round((allProg.bytes / allProg.all) * 100) : 0}%`;
+    el.querySelector('span').textContent = allProg.packing ? '正在打包 zip…' : `正在下载 ${Math.min(allProg.n + 1, allProg.total)}/${allProg.total} · ${fmtSize(allProg.bytes)} / ${fmtSize(allProg.all)}`;
+  }
+  function draw() {
+    const head = `<header class="sv-head"><span class="sp-ico">${SHARE_SVG}</span><div><h2>${manifest ? esc(manifest.title) : '分享的文件夹'}</h2>
+      <p>${manifest ? `${manifest.files.length} 个文件 · ${fmtSize(manifest.files.reduce((n, f) => n + f.size, 0))} · 从对方电脑直接传输，不经过服务器` : '方寸工作台 · 文件分享'}</p></div>
+      <button class="icon-btn" data-sv="close" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></header>`;
+    let body;
+    if (status.state === 'offline' || status.state === 'stopped') body = `<div class="sv-msg"><b>${status.state === 'stopped' ? '对方已停止分享' : '连不上分享者'}</b><span>${status.state === 'stopped' ? '这个链接已经失效，需要对方重新分享。' : '分享者的页面可能已经关闭，或者网络不通。请让对方保持「方寸」页面开着，然后再试。'}</span>${status.state === 'offline' ? '<button class="btn primary" data-sv="retry">重新连接</button>' : ''}</div>`;
+    else if (status.state === 'error') body = `<div class="sv-msg"><b>出错了</b><span>${esc(status.msg || '')}</span><button class="btn primary" data-sv="retry">重新连接</button></div>`;
+    else if (!manifest) body = '<div class="sv-msg"><span class="sv-spin"></span><span>正在连接分享者…</span></div>';
+    else {
+      body = `<div class="sv-actions"><button class="btn primary" data-sv="all" ${busy ? 'disabled' : ''}>${busy ? '下载中…' : '全部下载（zip）'}</button>
+        <div class="sv-all-prog" hidden><i></i><span></span></div></div>
+        <ul class="sv-list">${manifest.files.map((f) => `<li data-share-i="${f.i}"><span class="sf-name" title="${esc(f.name)}">${esc(f.name)}</span><span class="sf-size">${fmtSize(f.size)}</span><button class="btn sf-dl" data-sv="one" data-i="${f.i}" ${busy ? 'disabled' : ''}>下载</button></li>`).join('')}</ul>`;
+    }
+    view.innerHTML = `<div class="sv-card">${head}${body}</div>`;
+    if (manifest) manifest.files.forEach((f) => { if (prog.has(f.i)) drawProg(f.i); });
+    drawAll();
+  }
+  view.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-sv]');
+    if (!b) return;
+    const a = b.dataset.sv;
+    if (a === 'close') close();
+    if (a === 'retry') { guest.close(); manifest = null; Object.assign(guest, { closed: false }); guest.connect(); }
+    if (a === 'all' && manifest && !busy) downloadAll();
+    if (a === 'one' && manifest && !busy) downloadOne(+b.dataset.i);
+  });
+  draw();
+  guest.connect();
+  return true;
 }
 
 // ---------- 作品：个人作品 / 网站项目 —— 分类、更新日志（可从 GitHub 同步）、在线预览 ----------
@@ -5991,6 +6173,7 @@ function areaMenu(anchor, a) {
   if (kind === 'folder') {
     items.push({ text: '新建子文件夹…', run: () => addSubfolder(a.id) });
     items.push({ text: '打包下载 zip', run: () => zipFolder(a) });
+    items.push({ text: '分享链接（对方直接下载）…', run: () => startShare(a) });
     if (!isStoredFolder(a)) items.push({ text: parentOf(a) ? '移到云仓库（单独成一个项目）' : '移到云仓库（长期保存）', run: () => setFolderStored(a, true) });
     else if (!parentOf(a)) items.push({ text: '移回已完成项目', run: () => setFolderStored(a, false) });
     if (!parentOf(a)) {
@@ -6012,6 +6195,7 @@ function areaMenu(anchor, a) {
     const others = folders().filter((f) => !blocked.has(f.id));
     if (others.length) { items.push({ label: '合并到…' }); others.forEach((f) => items.push({ text: folderPath(f), run: () => mergeFolders(a.id, f.id) })); }
   }
+  if (kind === 'shelf') items.push({ text: '打包下载 zip', run: () => zipFolder(a) }, { text: '分享链接（对方直接下载）…', run: () => startShare(a) });
   if (kind === 'zone') items.push({ text: a.ttlDays ? `自动清理：${a.ttlDays} 天` : '设置自动清理…', run: () => setZoneTtl(a) });
   if (i > 0) items.push({ text: prev, run: () => moveArea(a, -1) });
   if (i < list.length - 1) items.push({ text: next, run: () => moveArea(a, 1) });
@@ -7337,6 +7521,7 @@ document.addEventListener('click', async (e) => {
     case 'convert': return runConvert(btn);
     case 'zoom-fit': return zoomFit();
     case 'tidy': return tidyCanvas();
+    case 'area-share': return startShare(area(btn.dataset.id));
     case 'shelf-back': state.shelf = null; ls.set('shelf', null); return render();
     case 'add-shelf': return addArea('shelf');
     case 'shelf-menu': { const s = area(btn.dataset.id || openShelf()); return s ? (menuAnchor === btn ? closeMenu() : areaMenu(btn, s)) : undefined; }
@@ -9755,6 +9940,7 @@ async function openBatchRename(cards, contextTitle = '') {
 
 // ---------- 启动 ----------
 (async function init() {
+  initShareFromUrl(); // 别人发来的分享链接：先显示下载页（不依赖本地数据库）
   try {
     await db.open();
     await load();
