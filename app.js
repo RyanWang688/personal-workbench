@@ -3005,7 +3005,7 @@ function shapeHTML(s) {
 }
 // 重绘后的装饰：便签字号自适应、多选外框
 function decorateBoard() {
-  for (const s of boardOf()?.shapes || []) if (s.t === 'sticky' && s.text) { const el = shEl(s.id); if (el) fitSticky(s, el); }
+  fitAllShapeText(); // 所有形状：文字放不下就缩小字号，绝不溢出
   const box = $('#groupBox');
   if (!box) return;
   const ub = selIds().length > 1 ? unionBox(selShapes()) : null;
@@ -3220,13 +3220,24 @@ function startEdit(id, opts = {}) {
   fitShapeText(s, el);
 }
 // 便签：字多了自动缩小字号（不改便签大小）；其他形状：字多了自动长高
+// 文字放不下时自动缩小字号（设置的字号是上限，最小 10px），按各形状实际的内边距算可用高度；
+// 便签、矩形、圆形、菱形都适用，文字框会自己长高、画框的标题在框外，所以不需要
 function fitSticky(s, el) {
-  const tx = el.querySelector('.sh-tx');
-  let fs = s.fs || 18;
+  const tx = el?.querySelector('.sh-tx');
+  if (!tx || s.t === 'text' || s.t === 'frame') return;
+  let fs = s.fs || SH_DEF[s.t]?.fs || 16;
   el.style.setProperty('--fs', `${fs}px`);
-  const avail = el.clientHeight - 36;
-  while (tx.scrollHeight > avail && fs > 10) { fs -= 1; el.style.setProperty('--fs', `${fs}px`); }
+  if (!s.text && !el.classList.contains('editing')) return;
+  const cs = getComputedStyle(el);
+  const avail = el.clientHeight - parseFloat(cs.paddingTop || 0) - parseFloat(cs.paddingBottom || 0);
+  const availW = el.clientWidth - parseFloat(cs.paddingLeft || 0) - parseFloat(cs.paddingRight || 0);
+  const over = () => tx.scrollHeight > avail + 1 || tx.scrollWidth > availW + 1;
+  while (over() && fs > 10) { fs -= 1; el.style.setProperty('--fs', `${fs}px`); }
 }
+const fitAllShapeText = () => { for (const s of boardOf()?.shapes || []) if (s.text && s.t !== 'text' && s.t !== 'frame') fitSticky(s, shEl(s.id)); };
+// 网页字体加载完成后字宽会变，重新量一次，避免文字溢出
+document.fonts?.ready?.then(() => { if (isCanvas(state.view)) fitAllShapeText(); });
+document.fonts?.addEventListener?.('loadingdone', () => { if (isCanvas(state.view)) fitAllShapeText(); });
 function fitShapeText(s, el) {
   if (s.t === 'sticky') { fitSticky(s, el); return; }
   if (s.t === 'frame') return; // 画框的标题在框外，不影响框的大小
@@ -3580,7 +3591,7 @@ function boardMove(e) {
     }
     Object.assign(s, { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) });
     Object.assign(bd.el.style, { left: `${s.x}px`, top: `${s.y}px`, width: `${s.w}px`, height: `${s.h}px` });
-    if (s.t === 'sticky') fitSticky(s, bd.el);
+    fitSticky(s, bd.el); // 缩放时字号跟着适配（文字框、画框会自动跳过）
     showGuides(gx, gy, s);
     showSizeTip(e, s.w, s.h);
     drawLinks();
