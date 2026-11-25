@@ -1714,7 +1714,10 @@ function workMenu(anchor, w) {
   [['auto', '自动'], ['image', '用图片'], ['live', '网站实时画面'], ['mono', '文字']].forEach(([k, t]) => items.push({ text: t, checked: (w.cover || 'auto') === k, run: async () => { if (k === 'auto') delete w.cover; else w.cover = k; await saveArea(w); await changed(); } }));
   items.push({ label: '颜色' });
   FCOLORS.forEach((fc, i) => items.push({ text: fc.n, swatch: fc.c, checked: workColor(w) === fc.c, run: async () => { w.color = i; await saveArea(w); await changed(); } }));
-  items.push('-', { text: '删除作品', danger: true, run: () => deleteArea(w) });
+  const nWorkCards = cardsIn(w.id, false).length;
+  items.push('-');
+  if (nWorkCards) items.push({ text: `清空内容到回收站（${nWorkCards}）`, danger: true, run: () => clearAreaToTrash(w) });
+  items.push({ text: '删除作品', danger: true, run: () => deleteArea(w) });
   openMenu(anchor, items);
 }
 let dragWork = null;
@@ -1794,7 +1797,10 @@ function renderZones() {
   else desc = (z?.desc || '自定义功能区，放什么都行。') + (z?.ttlDays > 0 ? ` 放入超过 ${z.ttlDays} 天会自动移到回收站。` : '');
   $('#draftsDesc').textContent = desc;
   $('#zoneMenuBtn').hidden = state.zone === TRASH;
-  $('#draftsFoot').innerHTML = state.zone === TRASH && nt ? `<button class="btn" data-action="empty-trash">清空回收站</button>` : '';
+  const curZoneCount = state.zone === TRASH ? nt : cardsIn(state.zone, false).length;
+  $('#draftsFoot').innerHTML = state.zone === TRASH
+    ? (nt ? `<button class="btn" type="button" data-action="empty-trash">清空回收站（${nt}）</button>` : '')
+    : (curZoneCount ? `<button class="btn clear-zone-btn" type="button" data-action="clear-zone">清空「${esc(z?.title)}」到回收站（${curZoneCount}）</button>` : '');
   $('#zonesBadge').textContent = fmtZoneCount(zs.reduce((n, z2) => n + cardsIn(z2.id, false).length, 0));
   renderRail(zs, nt);
   syncZoneInk(prevInk);
@@ -4402,6 +4408,66 @@ async function purgeCard(id, anim = true) {
   cleanupCanvasPdf(id);
   state.cards = state.cards.filter((c) => c.id !== id);
 }
+async function purgeMany(ids) {
+  const list = [...new Set(ids || [])];
+  if (!list.length) return;
+  if (list.length <= 40) await Promise.all(list.map((id) => animateOut(id)));
+  await db.deleteCardsBatch(list);
+  for (const id of list) {
+    for (const key of [id, `thumb:${id}`]) {
+      const url = state.urls.get(key);
+      if (url) { URL.revokeObjectURL(url); state.urls.delete(key); }
+    }
+    cleanupCanvasPdf(id);
+    state.selected.delete(id);
+  }
+  const dropSet = new Set(list);
+  state.cards = state.cards.filter((c) => !dropSet.has(c.id));
+}
+async function clearAreaToTrash(a) {
+  if (!a || a.id === TRASH) return;
+  const cards = cardsIn(a.id, false);
+  if (!cards.length) return toast(`「${a.title}」已经是空的`);
+  const kind = kindOf(a);
+  if (cards.length >= 5) {
+    const ok = await confirmBox({
+      title: `清空「${a.title}」到回收站？`,
+      body: `${KIND_LABEL[kind] || '当前区域'}内的 ${cards.length} 张卡片将全部移到回收站，可随时撤销或从回收站恢复。`,
+      ok: '移到回收站',
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  if (cards.length <= 40) await Promise.all(cards.map((c) => animateOut(c.id)));
+  const snap = cards.map((c) => ({ c, prevColumnId: c.prevColumnId, columnId: c.columnId, order: c.order, trashedAt: c.trashedAt }));
+  const now = Date.now();
+  for (const c of cards) {
+    c.prevColumnId = a.id;
+    c.columnId = TRASH;
+    c.trashedAt = now;
+    c.updatedAt = now;
+    state.selected.delete(c.id);
+  }
+  await db.putMany('cards', cards);
+  await changed();
+  if (isCanvas(a.id) && collabSession?.canvasId === a.id) scheduleCollabSync();
+  toast(`已把「${a.title}」的 ${cards.length} 张卡片移到回收站`, {
+    action: '撤销',
+    onAction: async () => {
+      const fallback = area(a.id) ? a.id : defaultTarget();
+      for (const s of snap) {
+        s.c.columnId = area(s.columnId) ? s.columnId : fallback;
+        s.c.prevColumnId = s.prevColumnId;
+        s.c.order = s.order;
+        if (s.trashedAt) s.c.trashedAt = s.trashedAt; else delete s.c.trashedAt;
+        s.c.updatedAt = Date.now();
+      }
+      await db.putMany('cards', snap.map((s) => s.c));
+      await changed();
+      if (isCanvas(a.id) && collabSession?.canvasId === a.id) scheduleCollabSync();
+    },
+  });
+}
 async function download(id) {
   if (!(await ensureAccess())) return;
   const card = findCard(id);
@@ -4472,26 +4538,63 @@ async function deleteArea(a) {
   const kind = kindOf(a);
   if (kind !== 'folder' && kind !== 'work' && areasOf(kind).length <= 1) return toast(`至少保留一个${KIND_LABEL[kind]}`, { error: true });
   const cards = cardsIn(a.id, false);
-  let target = kind === 'zone' ? zones().find((z) => z.id !== a.id)?.id : fallbackZone();
-  if (target === a.id) target = zones().find((z) => z.id !== a.id)?.id;
+  const nextZone = zones().find((z) => z.id !== a.id)?.id || TRASH;
   const kids = kind === 'folder' ? childFolders(a.id) : [];
   const parts = [];
-  if (cards.length) parts.push(`里面的 ${cards.length} 张卡片会移到「${areaName(target)}」`);
+  if (cards.length) parts.push(`里面的 ${cards.length} 张卡片会移到「回收站」`);
   if (kids.length) parts.push(`${kids.length} 个子文件夹会移到${parentOf(a) ? `「${parentOf(a).title}」` : '顶层'}`);
   if (kind === 'work' && visibleLogs(a).length) parts.push(`${visibleLogs(a).length} 条更新日志会一起删除`);
-  const ok = await confirmBox({ title: `删除${KIND_LABEL[kind]}「${a.title}」？`, body: parts.length ? `${parts.join('，')}${kind === 'work' ? (cards.length ? '，文件不会丢失。' : '。') : '，都不会丢失。'}` : `这个${KIND_LABEL[kind]}是空的。`, ok: '删除', danger: true });
+  const ok = await confirmBox({
+    title: `删除${KIND_LABEL[kind]}「${a.title}」？`,
+    body: parts.length ? `${parts.join('，')}，可在回收站随时恢复。` : `这个${KIND_LABEL[kind]}是空的。`,
+    ok: '删除',
+    danger: true,
+  });
   if (!ok) return;
-  if (kids.length) { kids.forEach((k) => { if (a.parentId) k.parentId = a.parentId; else delete k.parentId; }); await db.putMany('columns', kids); }
-  let order = orderAt(target, cardsIn(target, false).length);
-  for (const c of cards) { c.columnId = target; c.order = order; c.enteredAt = Date.now(); order += 1024; }
+  const kidSnap = kids.map((k) => ({ k, parentId: k.parentId }));
+  const cardSnap = cards.map((c) => ({ c, prevColumnId: c.prevColumnId, columnId: c.columnId, order: c.order, trashedAt: c.trashedAt }));
+  if (kids.length) {
+    kids.forEach((k) => { if (a.parentId) k.parentId = a.parentId; else delete k.parentId; });
+    await db.putMany('columns', kids);
+  }
+  const now = Date.now();
+  for (const c of cards) {
+    c.prevColumnId = a.id;
+    c.columnId = TRASH;
+    c.trashedAt = now;
+    c.updatedAt = now;
+    state.selected.delete(c.id);
+  }
   if (cards.length) await db.putMany('cards', cards);
   await db.del('columns', a.id);
   state.areas = state.areas.filter((x) => x !== a);
   if (state.view === a.id) setView(kind === 'canvas' ? CANVASES : BOARD);
   if (state.folder === a.id) { state.folder = a.parentId && area(a.parentId) ? a.parentId : null; ls.set('folder', state.folder); }
   if (state.work === a.id) { state.work = null; ls.set('work', null); }
-  if (state.zone === a.id) { state.zone = target; ls.set('zone', target); }
+  if (state.zone === a.id) { state.zone = nextZone; ls.set('zone', nextZone); }
   await changed();
+  toast(`已删除${KIND_LABEL[kind]}「${a.title}」${cards.length ? `，${cards.length} 张卡片已移到回收站` : ''}`, {
+    action: '撤销',
+    onAction: async () => {
+      await db.put('columns', a);
+      if (!state.areas.includes(a)) state.areas.push(a);
+      if (kidSnap.length) {
+        kidSnap.forEach(({ k, parentId }) => { if (parentId) k.parentId = parentId; else delete k.parentId; });
+        await db.putMany('columns', kidSnap.map((s) => s.k));
+      }
+      if (cardSnap.length) {
+        cardSnap.forEach(({ c, prevColumnId, columnId, order, trashedAt }) => {
+          c.columnId = columnId;
+          c.prevColumnId = prevColumnId;
+          c.order = order;
+          if (trashedAt) c.trashedAt = trashedAt; else delete c.trashedAt;
+          c.updatedAt = Date.now();
+        });
+        await db.putMany('cards', cardSnap.map((s) => s.c));
+      }
+      await changed();
+    },
+  });
 }
 async function setZoneTtl(z) {
   const v = await prompt({ title: `「${z.title}」自动清理`, value: String(z.ttlDays || ''), placeholder: '天数，留空或 0 表示不自动清理', ok: '保存', optional: true });
@@ -4997,7 +5100,13 @@ function areaMenu(anchor, a) {
   if (kind === 'zone') items.push({ text: a.ttlDays ? `自动清理：${a.ttlDays} 天` : '设置自动清理…', run: () => setZoneTtl(a) });
   if (i > 0) items.push({ text: prev, run: () => moveArea(a, -1) });
   if (i < list.length - 1) items.push({ text: next, run: () => moveArea(a, 1) });
-  items.push('-', { text: `删除${KIND_LABEL[kind]}`, danger: true, run: () => deleteArea(a) });
+  const nCards = cardsIn(a.id, false).length;
+  items.push('-');
+  if (nCards) {
+    const clearLabel = kind === 'column' ? `清空此列到回收站（${nCards}）` : kind === 'zone' ? `清空本区到回收站（${nCards}）` : `清空内容到回收站（${nCards}）`;
+    items.push({ text: clearLabel, danger: true, run: () => clearAreaToTrash(a) });
+  }
+  items.push({ text: `删除${KIND_LABEL[kind]}`, danger: true, run: () => deleteArea(a) });
   openMenu(anchor, items);
 }
 
@@ -6289,11 +6398,16 @@ document.addEventListener('click', async (e) => {
       $('.drafts-toggle').setAttribute('aria-expanded', String(open));
       return;
     }
+    case 'clear-zone': {
+      const z = area(state.zone);
+      if (z) return clearAreaToTrash(z);
+      return;
+    }
     case 'empty-trash': {
       const list = cardsIn(TRASH, false);
+      if (!list.length) return;
       if (!(await confirmBox({ title: '清空回收站？', body: `${list.length} 张卡片将被永久删除，无法恢复。建议先备份。`, ok: '永久删除', danger: true }))) return;
-      await Promise.all(list.map((c) => animateOut(c.id)));
-      for (const c of list) await purgeCard(c.id, false);
+      await purgeMany(list.map((c) => c.id));
       toast(`已永久删除 ${list.length} 张卡片`);
       return changed();
     }

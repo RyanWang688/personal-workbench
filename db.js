@@ -309,6 +309,42 @@ export async function deleteCard(id) {
   if (rec?.ext) await removeExternal(rec.ext);
 }
 
+/** 批量彻底删除卡片元数据、附件及缩略图 */
+export async function deleteCardsBatch(ids = []) {
+  const list = [...new Set(ids || [])];
+  if (!list.length) return;
+  const extNames = [];
+  const READ_CHUNK = 128;
+  for (let i = 0; i < list.length; i += READ_CHUNK) {
+    const slice = list.slice(i, i + READ_CHUNK);
+    const recs = await tx(['blobs'], 'readonly', (t) => {
+      const bs = t.objectStore('blobs');
+      return Promise.all(slice.map((id) => wrap(bs.get(id)).catch(() => null)));
+    }).catch(() => []);
+    for (const r of recs) if (r?.ext) extNames.push(r.ext);
+  }
+  const DEL_CHUNK = 200;
+  for (let i = 0; i < list.length; i += DEL_CHUNK) {
+    const slice = list.slice(i, i + DEL_CHUNK);
+    await tx(['cards', 'blobs'], 'readwrite', (t) => {
+      const cs = t.objectStore('cards');
+      const bs = t.objectStore('blobs');
+      for (const id of slice) {
+        cs.delete(id);
+        bs.delete(id);
+        bs.delete(`thumb:${id}`);
+      }
+    }, { relaxed: true });
+  }
+  if (extNames.length) {
+    let idx = 0;
+    const workers = Math.min(extNames.length, 8);
+    await Promise.all(Array.from({ length: workers }, async () => {
+      while (idx < extNames.length) await removeExternal(extNames[idx++]);
+    }));
+  }
+}
+
 /** 统计文件分布：浏览器内 / 文件夹内 */
 export async function storageStats() {
   const recs = await getAll('blobs');
