@@ -1762,15 +1762,28 @@ document.addEventListener('submit', (e) => {
   addLog(w, text, ver, d);
 });
 
+function fmtZoneCount(n) {
+  if (n < 1000) return String(n);
+  if (n < 10000) return `${(Math.floor(n / 100) / 10).toFixed(n % 1000 >= 100 ? 1 : 0).replace(/\.0$/, '')}k`;
+  return `${Math.floor(n / 1000)}k+`;
+}
+function syncZoneScrollState(zt = $('#zoneTabs')) {
+  if (!zt) return;
+  const maxScroll = zt.scrollWidth - zt.clientWidth;
+  zt.classList.toggle('can-scroll-l', zt.scrollLeft > 2);
+  zt.classList.toggle('can-scroll-r', maxScroll > 2 && zt.scrollLeft < maxScroll - 2);
+}
 function renderZones() {
   const zs = zones();
   const nt = cardsIn(TRASH, false).length;
   const zt = $('#zoneTabs');
   const oldTab = zt?.querySelector('.tab[aria-selected="true"]');
   const prevInk = oldTab ? { left: oldTab.offsetLeft, width: oldTab.offsetWidth, zone: oldTab.dataset.zone } : null;
-  zt.innerHTML = zs.map((z) => `<button role="tab" class="tab" data-zone="${z.id}" data-drop="${z.id}" aria-selected="${state.zone === z.id}"><span>${esc(z.title)}</span><b>${cardsIn(z.id, false).length}</b></button>`).join('')
-    + `<button role="tab" class="tab trash-tab" data-zone="${TRASH}" data-drop="${TRASH}" aria-selected="${state.zone === TRASH}" title="回收站"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg><b>${nt}</b></button>`
-    + `<button class="tab add-zone" data-action="add-zone" title="新建功能区" aria-label="新建功能区"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>`
+  zt.innerHTML = zs.map((z) => {
+    const n = cardsIn(z.id, false).length;
+    return `<button role="tab" class="tab" data-zone="${z.id}" data-drop="${z.id}" aria-selected="${state.zone === z.id}" title="${esc(z.title)} · ${n} 个"><span>${esc(z.title)}</span><b>${fmtZoneCount(n)}</b></button>`;
+  }).join('')
+    + `<button role="tab" class="tab trash-tab" data-zone="${TRASH}" data-drop="${TRASH}" aria-selected="${state.zone === TRASH}" title="回收站 · ${nt} 个" aria-label="回收站，${nt} 个"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg><b>${fmtZoneCount(nt)}</b></button>`
     + `<i class="zone-ink" id="zoneInk" aria-hidden="true"></i>`;
   const z = area(state.zone);
   const dl = $('#draftsList');
@@ -1782,13 +1795,19 @@ function renderZones() {
   $('#draftsDesc').textContent = desc;
   $('#zoneMenuBtn').hidden = state.zone === TRASH;
   $('#draftsFoot').innerHTML = state.zone === TRASH && nt ? `<button class="btn" data-action="empty-trash">清空回收站</button>` : '';
-  $('#zonesBadge').textContent = zs.reduce((n, z2) => n + cardsIn(z2.id, false).length, 0);
+  $('#zonesBadge').textContent = fmtZoneCount(zs.reduce((n, z2) => n + cardsIn(z2.id, false).length, 0));
   renderRail(zs, nt);
   syncZoneInk(prevInk);
 }
 function syncZoneInk(prevInk = null) {
   const zt = $('#zoneTabs'), ink = $('#zoneInk'), active = zt?.querySelector('.tab[aria-selected="true"]');
   if (!zt || !ink || !active) return;
+  if (zt.scrollWidth > zt.clientWidth + 2) {
+    const aL = active.offsetLeft, aR = aL + active.offsetWidth;
+    if (aL < zt.scrollLeft) zt.scrollLeft = Math.max(0, aL - 8);
+    else if (aR > zt.scrollLeft + zt.clientWidth) zt.scrollLeft = aR - zt.clientWidth + 8;
+  }
+  syncZoneScrollState(zt);
   const pad = 6;
   const nextLeft = active.offsetLeft + pad;
   const nextW = Math.max(16, active.offsetWidth - pad * 2);
@@ -1944,6 +1963,18 @@ function peekDrafts(on) {
   rz.addEventListener('pointerup', end);
   rz.addEventListener('pointercancel', end);
   rz.addEventListener('dblclick', () => setDraftsCollapsed(!draftsCollapsed()));
+  const ztEl = $('#zoneTabs');
+  if (ztEl) {
+    ztEl.addEventListener('scroll', () => syncZoneScrollState(ztEl), { passive: true });
+    ztEl.addEventListener('wheel', (e) => {
+      if (ztEl.scrollWidth <= ztEl.clientWidth + 2) return;
+      const dx = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (dx) { e.preventDefault(); ztEl.scrollLeft += dx; syncZoneScrollState(ztEl); }
+    }, { passive: false });
+    if (typeof ResizeObserver !== 'undefined') {
+      new ResizeObserver(() => { if (!draftsCollapsed()) { syncZoneInk(); syncZoneScrollState(ztEl); } }).observe(ztEl);
+    }
+  }
   // 侧栏上点某个功能区：展开并切到那个区
   $('#draftsRail').addEventListener('click', (e) => {
     const b = e.target.closest('[data-rail-zone]');

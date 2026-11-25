@@ -13,7 +13,7 @@
     // 尽早应用主题，避免刷新时闪一下
     try { var t = JSON.parse(localStorage.getItem('wb:theme') || '"auto"'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
   </script>
-  <link rel="stylesheet" href="style.css?v=56">
+  <link rel="stylesheet" href="style.css?v=57">
 </head>
 <body>
   <header class="topbar">
@@ -151,7 +151,10 @@
       <div class="drafts-main" id="draftsMain">
         <div class="drafts-head">
           <div class="zone-tabs" id="zoneTabs" role="tablist"></div>
-          <button class="icon-btn close-drafts" data-action="toggle-drafts" aria-label="关闭功能区">
+          <button class="icon-btn add-zone-btn" type="button" data-action="add-zone" title="新建功能区" aria-label="新建功能区">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <button class="icon-btn close-drafts" type="button" data-action="toggle-drafts" aria-label="关闭功能区">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
           </button>
         </div>
@@ -178,6 +181,6 @@
   <input type="file" id="fileInput" multiple hidden>
   <input type="file" id="restoreInput" accept=".wbk" hidden>
   <noscript>此工作台需要启用 JavaScript。</noscript>
-  <script type="module" src="app.js?v=67"></script>
+  <script type="module" src="app.js?v=68"></script>
 </body>
 </html>
