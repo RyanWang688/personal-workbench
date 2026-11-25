@@ -13,7 +13,7 @@
     // 尽早应用主题，避免刷新时闪一下
     try { var t = JSON.parse(localStorage.getItem('wb:theme') || '"auto"'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
   </script>
-  <link rel="stylesheet" href="style.css?v=59">
+  <link rel="stylesheet" href="style.css?v=60">
 </head>
 <body>
   <header class="topbar">
@@ -135,6 +135,7 @@
           <button class="icon-btn" data-action="tidy" aria-label="整理排列" title="整理排列：把文件卡片排成整齐的网格；先框选多个形状再点，则整理这些形状"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg></button>
           <span class="sep"></span>
           <button class="icon-btn canvas-max-btn" data-action="canvas-max" aria-pressed="false" aria-label="最大化工作区（F）" title="最大化工作空间：隐藏顶栏，保留右侧功能区（快捷键 F）"><svg class="ico-max" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg><svg class="ico-min" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg></button>
+          <button class="icon-btn" data-action="canvas-bg" aria-label="画布背景" aria-haspopup="menu" title="画布背景：点阵 / 方格 / 纯色"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="M8 8h.01M12 8h.01M16 8h.01M8 12h.01M12 12h.01M16 12h.01M8 16h.01M12 16h.01M16 16h.01"/></svg></button>
           <button class="icon-btn" data-action="shortcuts" aria-label="快捷键速查" title="快捷键速查（?）"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg></button>
         </div>
       </div>
@@ -182,6 +183,6 @@
   <input type="file" id="dirInput" webkitdirectory directory multiple hidden>
   <input type="file" id="restoreInput" accept=".wbk" hidden>
   <noscript>此工作台需要启用 JavaScript。</noscript>
-  <script type="module" src="app.js?v=70"></script>
+  <script type="module" src="app.js?v=71"></script>
 </body>
 </html>

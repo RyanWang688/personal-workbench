@@ -1021,7 +1021,23 @@ body.board-dragging .comment-pin { transition: none; }
   .collab-room-tag { display: none; }
 }
 .viewport { position: absolute; inset: 0; overflow: hidden; cursor: default; touch-action: none; outline: none;
-  background-image: radial-gradient(circle, color-mix(in srgb, var(--text-3) 45%, transparent) 1px, transparent 1.2px); }
+  --gs: 12px; --gs2: 24px; --gf: 0%;
+  --dot-c: color-mix(in srgb, var(--text-3) 40%, transparent);
+  --line-c: color-mix(in srgb, var(--text-3) 18%, transparent);
+  /* 点阵（默认）：粗的一层始终清晰，细的一层随缩放渐隐渐现 */
+  background-image:
+    radial-gradient(circle, var(--dot-c) 1.1px, transparent 1.4px),
+    radial-gradient(circle, color-mix(in srgb, var(--dot-c) var(--gf), transparent) 1px, transparent 1.3px);
+  background-size: var(--gs2) var(--gs2), var(--gs) var(--gs); }
+/* 方格：同样两层，细线随缩放渐隐 */
+.viewport[data-bg="grid"] {
+  background-image:
+    linear-gradient(to right, var(--line-c) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--line-c) 1px, transparent 1px),
+    linear-gradient(to right, color-mix(in srgb, var(--line-c) calc(var(--gf) * .6), transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--line-c) calc(var(--gf) * .6), transparent) 1px, transparent 1px);
+  background-size: var(--gs2) var(--gs2), var(--gs2) var(--gs2), var(--gs) var(--gs), var(--gs) var(--gs); }
+.viewport[data-bg="none"] { background-image: none; }
 .viewport.panning { cursor: grabbing; }
 .viewport.drop-active { box-shadow: inset 0 0 0 2px var(--accent); }
 .world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }

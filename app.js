@@ -2325,12 +2325,41 @@ function loadThumbs(root = document) {
 const CARD_W = 232;
 const cam = () => state.cams[state.view] || (state.cams[state.view] = { x: 80, y: 60, z: 1 });
 const saveCam = () => ls.set('cams', state.cams);
+// ---------- 画布背景：点阵 / 方格 / 纯色，间距随缩放自适应 ----------
+// 世界坐标里网格是 24 单位；屏幕上的间距始终保持在 12–48px：缩小时自动换到更粗一级的网格，
+// 细的一层随缩放渐隐渐现，切换时不会突然跳变（100% 时和原来一样是 24px）
+const CANVAS_BGS = { dots: '点阵', grid: '方格', none: '纯色' };
+const canvasBg = () => (CANVAS_BGS[area(state.view)?.bg] ? area(state.view).bg : 'dots');
+function applyCanvasBg(vp, c) {
+  let s = 24 * c.z;
+  while (s < 12) s *= 2;
+  while (s >= 24) s /= 2;
+  const f = Math.min(1, Math.max(0, (s - 12) / 12)); // 细的一层：间距越接近 12px 越淡
+  const bg = canvasBg();
+  if (vp.dataset.bg !== bg) vp.dataset.bg = bg;
+  vp.style.setProperty('--gs', `${s}px`);
+  vp.style.setProperty('--gs2', `${s * 2}px`);
+  vp.style.setProperty('--gf', `${Math.round(f * 100)}%`);
+  // 点阵用居中的圆点，偏移半格让两层的点落在同一组网格交点上
+  vp.style.backgroundPosition = bg === 'dots' ? `${c.x - s}px ${c.y - s}px, ${c.x - s / 2}px ${c.y - s / 2}px` : `${c.x}px ${c.y}px`;
+}
+async function setCanvasBg(v) {
+  const a = area(state.view);
+  if (!a || !CANVAS_BGS[v]) return;
+  if (v === 'dots') delete a.bg; else a.bg = v;
+  await saveArea(a);
+  applyCanvasBg($('#viewport'), cam());
+  changed();
+}
+function canvasBgMenu(anchor) {
+  const cur = canvasBg();
+  openMenu(anchor, [{ label: '画布背景' }, ...Object.entries(CANVAS_BGS).map(([k, n]) => ({ text: n, checked: cur === k, run: () => setCanvasBg(k) }))]);
+}
 function applyCam() {
   const c = cam();
   $('#world').style.transform = `translate(${c.x}px, ${c.y}px) scale(${c.z})`;
   const vp = $('#viewport');
-  vp.style.backgroundPosition = `${c.x}px ${c.y}px`;
-  vp.style.backgroundSize = `${24 * c.z}px ${24 * c.z}px`;
+  applyCanvasBg(vp, c);
   $('#zoomLabel').textContent = `${Math.round(c.z * 100)}%`;
   $('#world').style.setProperty('--iz', (1 / c.z).toFixed(4)); // 选框、手柄不随缩放变粗变细
   positionFmt();
@@ -6944,6 +6973,7 @@ document.addEventListener('click', async (e) => {
     case 'zoom-fit': return zoomFit();
     case 'tidy': return tidyCanvas();
     case 'shortcuts': return showShortcuts();
+    case 'canvas-bg': return menuAnchor === btn ? closeMenu() : canvasBgMenu(btn);
     case 'templates': return pickTemplate();
     case 'toggle-theme': return toggleTheme(btn);
     case 'collapse-drafts': return setDraftsCollapsed(true)?.focus({ preventScroll: true });
