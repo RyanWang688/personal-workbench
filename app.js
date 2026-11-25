@@ -1,8 +1,9 @@
-import * as db from './db.js?v=6';
+import * as db from './db.js?v=7';
 import * as pv from './preview.js?v=7';
 import * as collab from './collab.js?v=6';
 import * as rn from './rename.js?v=1';
 import * as cpv from './canvas-preview.js?v=1';
+import * as zip from './zip.js?v=1';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -555,17 +556,18 @@ async function runThumbs() {
 function refreshCard(c) {
   const els = $$(`.card[data-id="${CSS.escape(c.id)}"]`);
   if (!els.length) return;
-  const before = snapshot();
+  const skipFlip = $$('.card').length > 60;
+  const before = skipFlip ? null : snapshot();
   for (const el of els) {
     if (el.matches(':active') || el.classList.contains('dragging') || el.classList.contains('lifting')) { renderSoon(); return; }
     const tpl = document.createElement('template');
     tpl.innerHTML = cardHTML(c, el.classList.contains('on-canvas')).trim();
     const next = tpl.content.firstElementChild;
     el.replaceWith(next);
-    if (!reduceMotion.matches) next.animate([{ opacity: 0.4 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' });
+    if (!skipFlip && !reduceMotion.matches) next.animate([{ opacity: 0.4 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' });
   }
   loadThumbs();
-  playFlip(before);
+  if (before) playFlip(before);
 }
 const CANVAS_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="2"/><circle cx="9" cy="9" r="1"/><circle cx="15" cy="15" r="1"/><circle cx="15" cy="9" r="1"/><circle cx="9" cy="15" r="1"/></svg>`;
 function renderViews() {
@@ -1051,29 +1053,61 @@ async function zipFolder(f) {
   if (!(await ensureAccess())) return;
   const cards = deepCards(f.id);
   if (!cards.length) return toast('文件夹是空的');
-  const t = toast('正在打包…', { sticky: true });
+  const t = toast('正在准备文件…', { sticky: true });
   try {
-    const JSZip = await pv.lib('zip');
-    const z = new JSZip(), used = new Set();
+    const used = new Set();
     const clean = (s) => String(s).replace(/[\\/:*?"<>|]/g, '_');
     // 保留子文件夹结构：zip 里的路径 = 相对当前文件夹的子文件夹路径
     const rel = (folderId) => { const out = []; let x = area(folderId); while (x && x.id !== f.id) { out.unshift(clean(x.title)); x = parentOf(x); } return out.length ? `${out.join('/')}/` : ''; };
-    for (const c of cards) {
+    const mapped = cards.map((c) => {
       const raw = rel(c.columnId) + clean(c.kind === 'note' ? `${c.name || '便签'}.txt` : c.name);
       let name = raw, i = 2;
       while (used.has(name)) name = raw.replace(/(\.[^./]*)?$/, ` (${i++})$1`);
       used.add(name);
-      const data = c.kind === 'note' ? (c.text || '') : await db.getBlob(c.id);
-      if (data != null) z.file(name, data);
+      return { card: c, name };
+    });
+    const fileCards = mapped.filter((x) => x.card.kind !== 'note');
+    let lastTick = 0;
+    const blobs = await db.getBlobsBatch(fileCards.map((x) => x.card.id), {
+      onProgress: ({ done, total, bytesDone }) => {
+        const now = performance.now();
+        if (done === total || now - lastTick >= 80) {
+          lastTick = now;
+          t.set(`正在读取文件 ${done}/${total}${bytesDone ? `（${fmtSize(bytesDone)}）` : ''}…`);
+        }
+      },
+    });
+    const entries = [];
+    for (const { card: c, name } of mapped) {
+      if (c.kind === 'note') {
+        entries.push({ name, data: c.text || '' });
+      } else {
+        const data = blobs.get(c.id);
+        if (data != null) entries.push({ name, size: data.size, data });
+      }
     }
-    const blob = await z.generateAsync({ type: 'blob', compression: 'STORE' }, (m) => t.set(`正在打包 ${Math.round(m.percent)}%…`));
+    if (!entries.length) {
+      t.close();
+      return toast('没有可打包的文件内容', { error: true });
+    }
+    lastTick = 0;
+    const blob = await zip.buildStoreZip(entries, {
+      onProgress: ({ done, total, bytesDone, bytesTotal }) => {
+        const now = performance.now();
+        if (done === total || now - lastTick >= 80) {
+          lastTick = now;
+          const pct = bytesTotal ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100)) : Math.round((done / Math.max(1, total)) * 100);
+          t.set(`正在打包 ${done}/${total}（${pct}%${bytesTotal ? ` · ${fmtSize(bytesDone)} / ${fmtSize(bytesTotal)}` : ''}）…`);
+        }
+      },
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = `${f.title.replace(/[\\/:*?"<>|]/g, '_')}.zip`;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 60000);
     t.close();
-    toast(`已打包 ${cards.length} 个文件（${fmtSize(blob.size)}）`);
+    toast(`已打包 ${entries.length} 个文件（${fmtSize(blob.size)}）`);
   } catch (e) {
     t.close();
     toast(`打包失败：${e.message || e}`, { error: true });
@@ -4132,34 +4166,70 @@ async function addFiles(files, areaId, index = null, pos = null, { quiet = false
   }
   const canvas = isCanvas(areaId);
   if (canvas && !pos) pos = state.view === areaId ? viewCenter() : { x: 0, y: 0 };
-  if (index == null) index = cardsIn(areaId, false).length;
-  let ok = 0;
-  const added = [];
-  const batchId = files.length > 1 ? uid() : undefined; // 同一批拖入的文件，关联算法会加分
-  if (batchId && !extra.batchId) extra = { batchId, ...extra };
-  const t = files.length > 1 ? toast(`正在保存 0/${files.length}…`, { sticky: true }) : null;
-  const perRow = Math.max(1, Math.ceil(Math.sqrt(files.length)));
-  for (const f of files) {
-    const now = Date.now();
-    const card = {
-      id: uid(), kind: 'file', name: f.name || `粘贴的文件-${now}`, type: f.type || '', size: f.size,
-      columnId: areaId, order: canvas ? topOrder(areaId) : orderAt(areaId, index + ok), createdAt: now, updatedAt: now, enteredAt: now, ...extra,
-    };
-    if (canvas) { card.x = pos.x + (ok % perRow) * (CARD_W + 20); card.y = pos.y + Math.floor(ok / perRow) * 120; }
-    try {
-      await db.addFile(card, f);
-      state.cards.push(card);
-      state.fresh.add(card.id);
-      added.push(card);
-      ok++;
-      if (t) t.set(`正在保存 ${ok}/${files.length}…`);
-    } catch (e) {
-      console.error(e);
-      const quota = e && (e.name === 'QuotaExceededError' || /quota/i.test(e.message));
-      toast(quota ? '存储空间不足，请先备份并清理回收站' : `「${card.name}」保存失败：${e.message || e}`, { error: true });
+  const existing = cardsIn(areaId, false);
+  if (index == null) index = existing.length;
+  const n = files.length;
+  const baseCanvasOrder = canvas ? topOrder(areaId) : 0;
+  let orderForIndex;
+  if (canvas) {
+    orderForIndex = (i) => baseCanvasOrder + i;
+  } else {
+    const prev = existing[index - 1];
+    const next = existing[index];
+    if (!prev && !next) orderForIndex = (i) => i * 1024;
+    else if (!prev) orderForIndex = (i) => next.order - (n - i) * 1024;
+    else if (!next) orderForIndex = (i) => prev.order + (i + 1) * 1024;
+    else {
+      const step = (next.order - prev.order) / (n + 1);
+      orderForIndex = (i) => prev.order + step * (i + 1);
     }
   }
+  const batchId = n > 1 ? uid() : undefined; // 同一批拖入的文件，关联算法会加分
+  if (batchId && !extra.batchId) extra = { batchId, ...extra };
+  const totalBytes = files.reduce((s, f) => s + (f.size || 0), 0);
+  const showProgress = n > 1 || totalBytes >= 10 * 1024 * 1024;
+  const t = showProgress
+    ? toast(n === 1 ? `正在保存「${files[0].name || '文件'}」（${fmtSize(totalBytes)}）…` : `正在保存 0/${n}（${fmtSize(totalBytes)}）…`, { sticky: true })
+    : null;
+  const perRow = Math.max(1, Math.ceil(Math.sqrt(n)));
+  const now = Date.now();
+  const entries = files.map((f, i) => {
+    const card = {
+      id: uid(), kind: 'file', name: f.name || `粘贴的文件-${now + i}`, type: f.type || '', size: f.size,
+      columnId: areaId, order: orderForIndex(i), createdAt: now + i, updatedAt: now + i, enteredAt: now + i, ...extra,
+    };
+    if (canvas) { card.x = pos.x + (i % perRow) * (CARD_W + 20); card.y = pos.y + Math.floor(i / perRow) * 120; }
+    return { card, blob: f };
+  });
+  let lastTick = 0;
+  const { ok: added, errors } = await db.addFilesBatch(entries, {
+    onProgress: t ? ({ done, total, bytesDone, bytesTotal }) => {
+      const ts = performance.now();
+      if (done === total || ts - lastTick >= 80) {
+        lastTick = ts;
+        if (total === 1) t.set(`正在写入「${entries[0].card.name}」（${fmtSize(bytesDone)} / ${fmtSize(bytesTotal)}）…`);
+        else t.set(`正在保存 ${done}/${total}（${fmtSize(bytesDone)} / ${fmtSize(bytesTotal)}）…`);
+      }
+    } : undefined,
+  });
   t?.close();
+  for (const card of added) {
+    state.cards.push(card);
+    state.fresh.add(card.id);
+  }
+  if (errors.length) {
+    console.error(errors[0].error);
+    const quota = errors.some(({ error: e }) => e && (e.name === 'QuotaExceededError' || /quota/i.test(e.message)));
+    if (quota) {
+      toast('存储空间不足，请先备份并清理回收站', { error: true });
+    } else if (errors.length === 1) {
+      const { card, error } = errors[0];
+      toast(`「${card.name}」保存失败：${error.message || error}`, { error: true });
+    } else {
+      toast(`有 ${errors.length} 个文件保存失败：${errors[0].error?.message || errors[0].error}`, { error: true });
+    }
+  }
+  const ok = added.length;
   if (ok) {
     if (!quiet) toast(`已保存 ${ok} 个文件到「${areaName(areaId)}」`);
     requestPersist();
@@ -5038,8 +5108,15 @@ async function stopFolder() {
 async function doBackup() {
   if (!(await ensureAccess())) return;
   const t = toast('正在打包备份…', { sticky: true });
+  let lastTick = 0;
   try {
-    const { blob, count, fileCount, missing } = await db.exportBackup();
+    const { blob, count, fileCount, missing } = await db.exportBackup(({ done, total, bytesDone }) => {
+      const now = performance.now();
+      if (done === total || now - lastTick >= 80) {
+        lastTick = now;
+        t.set(`正在打包备份 ${done}/${total}${bytesDone ? `（${fmtSize(bytesDone)}）` : ''}…`);
+      }
+    });
     const d = new Date(), p = (n) => String(n).padStart(2, '0');
     const name = `方寸备份-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.wbk`;
     const url = URL.createObjectURL(blob);
