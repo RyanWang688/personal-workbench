@@ -661,10 +661,10 @@ function renderViews() {
       <svg viewBox="0 0 24 24"><rect x="4" y="4" width="4.5" height="16" rx="1"/><rect x="10" y="4" width="4.5" height="11" rx="1"/><rect x="16" y="4" width="4" height="7" rx="1"/></svg>看板<b>${boardCount}</b></button>
     <button role="tab" class="view-tab archive-tab" data-view="${ARCHIVE}" data-drop="${PICK}" aria-selected="${state.view === ARCHIVE}" title="彻底完成的项目归档在这里；把卡片拖到这里即可归档">
       ${FOLDER_SVG}已完成项目<b>${folders().filter((f) => !isStoredFolder(f)).length}</b></button>
-    <button role="tab" class="view-tab works-tab" data-view="${WORKS}" aria-selected="${state.view === WORKS}" title="个人作品：网站、设计、项目，含更新日志和在线预览">
-      ${WORK_SVG}作品<b>${works().length}</b></button>
     <button role="tab" class="view-tab store-tab" data-view="${STORE}" data-drop="${esc(shelves()[0]?.id || '')}" aria-selected="${state.view === STORE}" title="云仓库：长期保存的文件，不会被自动清理；把卡片或文件拖到这里即可存入">
       ${STORE_SVG}云仓库<b>${shelfCards().length + storedFolders().reduce((n, f) => n + deepCards(f.id).length, 0)}</b></button>
+    <button role="tab" class="view-tab works-tab" data-view="${WORKS}" aria-selected="${state.view === WORKS}" title="个人作品：网站、设计、项目，含更新日志和在线预览">
+      ${WORK_SVG}作品<b>${works().length}</b></button>
     <span class="view-sep" aria-hidden="true"></span>
     <button role="tab" class="view-tab canvas-tab" data-view="${CANVASES}" data-drop="${CANVAS_PICK}" aria-selected="${state.view === CANVASES || isCanvas(state.view)}" aria-controls="${isCanvas(state.view) ? 'canvasWorkspace' : 'canvasDirectory'}" title="查看全部画布工作区">
       ${CANVAS_SVG}画布<b>${canvases().length}</b>${unreadCm ? `<span class="tab-unread-badge" title="${unreadCm} 条未读备注">${unreadCm}</span>` : ''}</button>`;
