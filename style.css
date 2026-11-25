@@ -1291,7 +1291,22 @@ body.board-dragging .shape { transition: none; }
 .st-ellipse.editing::after { border-radius: 50%; }
 .shape.editing .sh-h { display: none; }
 .group-box { position: absolute; pointer-events: none; z-index: 99990; outline: calc(1.5px * var(--iz, 1)) dashed var(--accent); outline-offset: calc(8px * var(--iz, 1)); border-radius: 2px; }
-body.board-dragging .group-box { display: none; }
+body.board-dragging .group-box:not(.scaling), body.is-dragging-card .group-box { display: none; }
+/* 多选整体缩放：四个角点（随缩放保持屏幕上同样大小） */
+.group-box .gb-h { display: none; position: absolute; width: calc(12px * var(--iz, 1)); height: calc(12px * var(--iz, 1)); margin: calc(-6px * var(--iz, 1));
+  background: var(--surface); border: calc(1.5px * var(--iz, 1)) solid var(--accent); border-radius: calc(3px * var(--iz, 1)); pointer-events: auto; }
+.group-box.can-scale .gb-h { display: block; }
+.group-box .gb-h::before { content: ''; position: absolute; inset: calc(-8px * var(--iz, 1)); } /* 放大感应区 */
+.gb-nw { left: calc(-8px * var(--iz, 1)); top: calc(-8px * var(--iz, 1)); cursor: nwse-resize; }
+.gb-ne { right: calc(-8px * var(--iz, 1)); top: calc(-8px * var(--iz, 1)); cursor: nesw-resize; }
+.gb-se { right: calc(-8px * var(--iz, 1)); bottom: calc(-8px * var(--iz, 1)); cursor: nwse-resize; }
+.gb-sw { left: calc(-8px * var(--iz, 1)); bottom: calc(-8px * var(--iz, 1)); cursor: nesw-resize; }
+/* 锁定：右上角小锁，鼠标是默认箭头 */
+.shape.locked, .card.on-canvas.locked { cursor: default; }
+.lock-badge { position: absolute; top: calc(-10px * var(--iz, 1)); right: calc(-10px * var(--iz, 1)); width: calc(20px * var(--iz, 1)); height: calc(20px * var(--iz, 1));
+  display: grid; place-items: center; border-radius: 50%; background: var(--surface); border: 1px solid var(--border); color: var(--text-2); box-shadow: var(--shadow); z-index: 5; pointer-events: none; opacity: 0; transition: opacity .15s; }
+.lock-badge svg { width: 62%; height: 62%; fill: none; stroke: currentColor; stroke-width: 2; }
+.shape.locked:hover .lock-badge, .shape.locked.picked .lock-badge, .card.locked:hover .lock-badge, .card.locked.picked .lock-badge, .card.locked.selected .lock-badge { opacity: 1; }
 .guides { position: absolute; left: 0; top: 0; pointer-events: none; z-index: 99997; }
 .guides .gl { position: absolute; background: #f2643b; }
 .guides .gx { width: calc(1px * var(--iz, 1)); }

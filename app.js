@@ -352,8 +352,8 @@ function cardHTML(c, onCanvas = false) {
   const attrs = onCanvas
     ? `draggable="false" style="left:${Math.round(c.x || 0)}px;top:${Math.round(c.y || 0)}px;width:${cw}px;z-index:${Math.max(1, Math.round(c.order) || 1)}"`
     : `draggable="${IS_TOUCH ? 'false' : 'true'}"`;
-  const cls = `card${onCanvas ? ' on-canvas' : ''}${onCanvas && state.pickedCard === c.id ? ' picked' : ''}${isCanvasImg ? ' canvas-hd-card' : ''}${isCanvasPdf ? ' canvas-pdf-card' : ''}${onCanvas && !matches(c) ? ' dim' : ''}${state.selected.has(c.id) ? ' selected' : ''}${PRIO[c.prio] ? ` prio-${c.prio}` : ''}`;
-  const extra = (onCanvas ? HANDLE + EXPAND_BTN(c.id) + CARD_HANDLES : '') + (c.columnId !== TRASH ? selBtn(c) + RENAME_BTN : '');
+  const cls = `card${onCanvas ? ' on-canvas' : ''}${onCanvas && c.locked ? ' locked' : ''}${onCanvas && state.pickedCard === c.id ? ' picked' : ''}${isCanvasImg ? ' canvas-hd-card' : ''}${isCanvasPdf ? ' canvas-pdf-card' : ''}${onCanvas && !matches(c) ? ' dim' : ''}${state.selected.has(c.id) ? ' selected' : ''}${PRIO[c.prio] ? ` prio-${c.prio}` : ''}`;
+  const extra = (onCanvas ? HANDLE + EXPAND_BTN(c.id) + (c.locked ? `<i class="lock-badge" title="已锁定">${LOCK_SVG}</i>` : CARD_HANDLES) : '') + (c.columnId !== TRASH ? selBtn(c) + RENAME_BTN : '');
   if (c.kind === 'note') {
     return `<article class="${cls} note" ${attrs} tabindex="0" data-id="${c.id}" aria-label="便签 ${esc(c.name)}">
       <div class="body"><div class="name">${prioTag(c)}${highlight(c.name || '便签')}</div>
@@ -2710,15 +2710,16 @@ vp.addEventListener('pointerdown', (e) => {
   if (cardEl && !e.target.closest('.more, .export-handle, .card-expand-btn, .pdf-page-bar, .quick-rename-btn, .inline-rn-wrap, .canvas-card-hud, [data-card-handle]')) {
     const card = findCard(cardEl.dataset.id);
     if (cardEl.classList.contains('on-canvas')) pickCanvasCard(card.id);
+    if (card?.locked && cardEl.classList.contains('on-canvas')) { decorateBoard(); return; } // 锁定的卡片：只能选中，不能拖
     const isMulti = cardEl.classList.contains('on-canvas') && !e.altKey && state.selected.has(card.id) && (state.selected.size > 1 || selShapes().length > 0);
     const groupCards = isMulti
-      ? [...state.selected].map(findCard).filter((c) => c && c.columnId === state.view)
+      ? [...state.selected].map(findCard).filter((c) => c && c.columnId === state.view && !c.locked)
       : [card];
     const items = groupCards.map((c) => {
       const el = $(`#world .card[data-id="${CSS.escape(c.id)}"]`) || (c.id === card.id ? cardEl : null);
       return el ? { card: c, el, x: c.x || 0, y: c.y || 0, w: el.offsetWidth || canvasCardW(c), h: el.offsetHeight || 120 } : null;
     }).filter(Boolean);
-    const shapeItems = isMulti ? selShapes().map((s) => ({ s, el: shEl(s.id), x: s.x, y: s.y, w: s.w, h: s.h })) : [];
+    const shapeItems = isMulti ? freeShapes(selShapes()).map((s) => ({ s, el: shEl(s.id), x: s.x, y: s.y, w: s.w, h: s.h })) : [];
     cardDrag = {
       mode: 'move', el: cardEl, card, items, shapeItems,
       sx: e.clientX, sy: e.clientY, x: card.x || 0, y: card.y || 0,
@@ -3128,6 +3129,19 @@ const unionBox = (list) => {
   return { x: x1, y: y1, w: Math.max(...list.map((b) => b.x + b.w)) - x1, h: Math.max(...list.map((b) => b.y + b.h)) - y1 };
 };
 const shEl = (id) => $(`#world .shape[data-sid="${CSS.escape(id)}"]`);
+// ---- 锁定：锁住的形状 / 卡片不能拖动、缩放、编辑、删除，框选也选不到（单击仍可选中，用来解锁） ----
+const LOCK_SVG = '<svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
+const isLocked = (x) => !!(x && (x.lk || x.locked));
+const freeShapes = (list) => list.filter((s) => !s.lk);
+async function toggleLock(on) {
+  const shapes = selShapes(), cards = [...new Set([...selectedCanvasCards(), ...(state.pickedCard ? [findCard(state.pickedCard)] : [])])].filter((c) => c && c.columnId === state.view);
+  if (!shapes.length && !cards.length) return;
+  if (on == null) on = ![...shapes, ...cards].every(isLocked); // 有没锁的 → 全部锁上；全锁着 → 全部解锁
+  if (shapes.length) { record(); shapes.forEach((s) => { if (on) s.lk = true; else delete s.lk; }); await saveArea(boardOf()); }
+  if (cards.length) { cards.forEach((c) => { if (on) c.locked = true; else delete c.locked; c.updatedAt = Date.now(); }); await db.putMany('cards', cards); }
+  await changed();
+  toast(`${on ? '已锁定' : '已解锁'} ${shapes.length + cards.length} 个对象${on ? '（Ctrl + Shift + L 解锁）' : ''}`);
+}
 
 function shapeHTML(s) {
   const col = shColor(s);
@@ -3140,18 +3154,37 @@ function shapeHTML(s) {
     ? '<svg class="sh-bg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1.5 98.5,50 50,98.5 1.5,50" vector-effect="non-scaling-stroke"/></svg>'
     : '<div class="sh-bg"></div>';
   // 整条边都能拖（看不见的感应条），四个角另有放大的感应区；看得见的小方块只是提示
-  const handles = single ? ['n', 'e', 's', 'w'].map((k) => `<i class="sh-edge se-${k}" data-handle="${k}"></i>`).join('')
+  const handles = single && !s.lk ? ['n', 'e', 's', 'w'].map((k) => `<i class="sh-edge se-${k}" data-handle="${k}"></i>`).join('')
     + ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((k) => `<i class="sh-h h-${k}" data-handle="${k}"></i>`).join('') : '';
-  return `<div class="shape st-${s.t}${col ? '' : ' nofill'}${sel ? ' picked' : ''}${s.b ? ' bold' : ''}${s.frame ? ' frame' : ''}${s.va === 'top' ? ' va-top' : ''}" data-sid="${s.id}" style="${style}">${bg}<div class="sh-tx" data-ph="${s.t === 'text' ? '输入文字' : isFrame(s) ? '画框' : '双击输入'}">${esc(s.text || '')}</div>${handles}</div>`;
+  return `<div class="shape st-${s.t}${col ? '' : ' nofill'}${sel ? ' picked' : ''}${s.b ? ' bold' : ''}${s.frame ? ' frame' : ''}${s.va === 'top' ? ' va-top' : ''}${s.lk ? ' locked' : ''}" data-sid="${s.id}" style="${style}">${bg}<div class="sh-tx" data-ph="${s.t === 'text' ? '输入文字' : isFrame(s) ? '画框' : '双击输入'}">${esc(s.text || '')}</div>${handles}${s.lk ? `<i class="lock-badge" title="已锁定">${LOCK_SVG}</i>` : ''}</div>`;
 }
 // 重绘后的装饰：便签字号自适应、多选外框
 function decorateBoard() {
   fitAllShapeText(); // 所有形状：文字放不下就缩小字号，绝不溢出
   const box = $('#groupBox');
   if (!box) return;
-  const ub = selIds().length > 1 ? unionBox(selShapes()) : null;
+  // 多选外框：形状 + 卡片一起算；没锁的对象有 2 个以上时，四个角可以拖动整体等比缩放
+  const g = groupItems();
+  const all = [...g.shapes.map((x) => x.o), ...g.cards.map((x) => x.o)];
+  const n = selShapes().length + selectedCanvasCards().length;
+  const ub = n > 1 ? unionBox([...selShapes(), ...selectedCanvasCards().map(cardBox).filter(Boolean)]) : null;
   box.hidden = !ub;
+  box.classList.toggle('can-scale', all.length > 1);
+  if (!box.firstElementChild) box.innerHTML = ['nw', 'ne', 'se', 'sw'].map((k) => `<i class="gb-h gb-${k}" data-ghandle="${k}" title="拖动角点：整体等比缩放（Alt 以中心缩放）"></i>`).join('');
   if (ub) Object.assign(box.style, { left: `${ub.x}px`, top: `${ub.y}px`, width: `${ub.w}px`, height: `${ub.h}px` });
+}
+function cardBox(c) {
+  const el = $(`#world .card[data-id="${CSS.escape(c.id)}"]`);
+  return el ? { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight } : null;
+}
+// 参与整体缩放的对象（锁定的不动）
+function groupItems() {
+  const shapes = freeShapes(selShapes()).map((s) => ({ s, o: { x: s.x, y: s.y, w: s.w, h: s.h, fs: s.fs || SH_DEF[s.t]?.fs || 16 } }));
+  const cards = selectedCanvasCards().filter((c) => !c.locked).map((c) => {
+    const el = $(`#world .card[data-id="${CSS.escape(c.id)}"]`);
+    return el ? { card: c, el, o: { x: c.x || 0, y: c.y || 0, w: el.offsetWidth, h: el.offsetHeight } } : null;
+  }).filter(Boolean);
+  return { shapes, cards };
 }
 
 // ---- 撤销 / 重做（每个画布各自一份历史） ----
@@ -3342,6 +3375,7 @@ function commitEditingText() {
 }
 function startEdit(id, opts = {}) {
   if (!shapeById(id)) return;
+  if (shapeById(id).lk) { toast('已锁定：先解锁（Ctrl + Shift + L）才能编辑文字'); return; }
   if (editingShape && editingShape !== id) commitEditingText();
   // 先确保它是唯一选中的（只重绘一次，不递归）
   if (!(isPicked(id) && selIds().length === 1)) { state.bsel = pickShapes([id]); renderCanvas(); }
@@ -3587,8 +3621,22 @@ function boardDown(e) {
     e.preventDefault();
     return true;
   }
+  const gh = e.target.closest('[data-ghandle]');
+  if (gh && e.button === 0) {
+    const g = groupItems();
+    const ob = unionBox([...g.shapes.map((x) => x.o), ...g.cards.map((x) => x.o)]);
+    if (ob && g.shapes.length + g.cards.length > 1) {
+      const k = gh.dataset.ghandle;
+      // 锚点 = 对角（Alt：中心）；拖动的角点沿对角线投影得到缩放比例
+      const corner = { x: k.includes('w') ? ob.x : ob.x + ob.w, y: k.includes('n') ? ob.y : ob.y + ob.h };
+      bd = { ...base, mode: 'gresize', g, ob, k, corner };
+      $('#groupBox')?.classList.add('scaling');
+      capture(); e.preventDefault(); return true;
+    }
+  }
   if (handle && shapeEl) {
     const s = shapeById(shapeEl.dataset.sid);
+    if (s?.lk) return true;
     bd = { ...base, mode: 'resize', s, el: shapeEl, k: handle.dataset.handle, o: { x: s.x, y: s.y, w: s.w, h: s.h } };
     capture(); return true;
   }
@@ -3617,9 +3665,9 @@ function boardDown(e) {
       fmtPop = null;
       renderCanvas();
     }
-    const items = selShapes().map((s) => ({ s, o: { x: s.x, y: s.y } }));
+    const items = freeShapes(selShapes()).map((s) => ({ s, o: { x: s.x, y: s.y } }));
     const cardItems = (!e.altKey && state.selected.size)
-      ? selectedCanvasCards().map((c) => {
+      ? selectedCanvasCards().filter((c) => !c.locked).map((c) => {
         const el = $(`#world .card[data-id="${CSS.escape(c.id)}"]`);
         return el ? { card: c, el, x: c.x || 0, y: c.y || 0, w: el.offsetWidth || canvasCardW(c), h: el.offsetHeight || 120 } : null;
       }).filter(Boolean)
@@ -3627,14 +3675,20 @@ function boardDown(e) {
     // 拖动画框：完全在框里的形状、文件卡片一起移动（Alt 复制时只复制画框和里面的形状）
     for (const f of items.map((it) => it.s).filter(isFrame)) {
       const have = new Set(items.map((it) => it.s.id));
-      for (const s of boardOf().shapes) if (!have.has(s.id) && s !== f && insideBox(f, s)) items.push({ s, o: { x: s.x, y: s.y } });
+      for (const s of boardOf().shapes) if (!have.has(s.id) && s !== f && !s.lk && insideBox(f, s)) items.push({ s, o: { x: s.x, y: s.y } });
       if (e.altKey) continue;
       const haveCards = new Set(cardItems.map((c) => c.card.id));
       for (const el of $$('#world .card.on-canvas')) {
         const c = findCard(el.dataset.id);
         const box = { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight };
-        if (c && !haveCards.has(c.id) && insideBox(f, box)) { cardItems.push({ card: c, el, x: c.x || 0, y: c.y || 0, w: box.w, h: box.h }); haveCards.add(c.id); }
+        if (c && !c.locked && !haveCards.has(c.id) && insideBox(f, box)) { cardItems.push({ card: c, el, x: c.x || 0, y: c.y || 0, w: box.w, h: box.h }); haveCards.add(c.id); }
       }
+    }
+    if (!items.length && !cardItems.length) {
+      // 全是锁定的：只选中，不拖动；单击已选中的锁定对象提示怎么解锁
+      if (was && !e.shiftKey && shapeById(id)?.lk) toast('已锁定：先解锁（Ctrl + Shift + L 或格式条上的锁）才能移动和编辑');
+      bd = { ...base, mode: 'locked', clicked: id, shiftToggle: e.shiftKey && was };
+      capture(); return true;
     }
     bd = { ...base, mode: 'move', items, cardItems, clicked: id, was: was && !e.shiftKey && selIds().length === 1 && !cardItems.length, shiftToggle: e.shiftKey && was, alt: e.altKey };
     if (e.altKey) e.preventDefault();
@@ -3745,6 +3799,35 @@ function boardMove(e) {
     showSizeTip(e, s.w, s.h);
     drawLinks();
     sendCollabShapeLive([s], '正在缩放形状');
+  } else if (bd.mode === 'gresize') {
+    // 整体等比缩放：位置、大小、字号一起按比例变化
+    const { ob, corner, g } = bd, center = e.altKey;
+    const A = center ? { x: ob.x + ob.w / 2, y: ob.y + ob.h / 2 } : { x: corner.x === ob.x ? ob.x + ob.w : ob.x, y: corner.y === ob.y ? ob.y + ob.h : ob.y };
+    const vx = corner.x - A.x, vy = corner.y - A.y, len2 = vx * vx + vy * vy || 1;
+    const k = Math.max(0.05, Math.min(20, ((corner.x + dx - A.x) * vx + (corner.y + dy - A.y) * vy) / len2));
+    const sc = (o) => ({ x: A.x + (o.x - A.x) * k, y: A.y + (o.y - A.y) * k, w: o.w * k, h: o.h * k });
+    for (const it of g.shapes) {
+      const n = sc(it.o);
+      Object.assign(it.s, { x: Math.round(n.x), y: Math.round(n.y), w: Math.max(8, Math.round(n.w)), h: Math.max(8, Math.round(n.h)), fs: Math.max(4, Math.round(it.o.fs * k * 2) / 2) });
+      const el = shEl(it.s.id);
+      if (el) {
+        Object.assign(el.style, { left: `${it.s.x}px`, top: `${it.s.y}px`, width: `${it.s.w}px`, height: `${it.s.h}px` });
+        el.style.setProperty('--fs', `${it.s.fs}px`);
+        fitSticky(it.s, el);
+      }
+    }
+    for (const it of g.cards) {
+      const n = sc(it.o);
+      it.nx = Math.round(n.x); it.ny = Math.round(n.y); it.nw = Math.max(120, Math.round(n.w));
+      Object.assign(it.el.style, { left: `${it.nx}px`, top: `${it.ny}px`, width: `${it.nw}px` });
+    }
+    const nb = sc(ob), box = $('#groupBox');
+    if (box) Object.assign(box.style, { left: `${nb.x}px`, top: `${nb.y}px`, width: `${nb.w}px`, height: `${nb.h}px` });
+    bd.k2 = k;
+    showSizeTip(e, nb.w, nb.h, `${Math.round(k * 100)}%`);
+    drawLinks();
+    if (g.shapes.length) sendCollabShapeLive(g.shapes.map((it) => it.s), '正在缩放');
+    if (g.cards.length) sendCollabCardLive(g.cards.map((it) => ({ ...it.card, x: it.nx, y: it.ny, w: it.nw })), '正在缩放');
   } else if (bd.mode === 'create') {
     const p = toWorld(e.clientX, e.clientY);
     let w = Math.abs(p.x - bd.p0.x), h = Math.abs(p.y - bd.p0.y);
@@ -3760,10 +3843,10 @@ function boardMove(e) {
     const r = { x: Math.min(p.x, bd.p0.x), y: Math.min(p.y, bd.p0.y), w: Math.abs(p.x - bd.p0.x), h: Math.abs(p.y - bd.p0.y) };
     if (!bd.ghost) { bd.ghost = document.createElement('div'); bd.ghost.className = 'marquee'; $('#world').appendChild(bd.ghost); }
     Object.assign(bd.ghost.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
-    const hit = boardOf().shapes.filter((s) => s.x < r.x + r.w && s.x + s.w > r.x && s.y < r.y + r.h && s.y + s.h > r.y).map((s) => s.id);
+    const hit = boardOf().shapes.filter((s) => !s.lk && s.x < r.x + r.w && s.x + s.w > r.x && s.y < r.y + r.h && s.y + s.h > r.y).map((s) => s.id);
     bd.hits = [...new Set([...bd.base, ...hit])];
     $$('#world .shape').forEach((el) => el.classList.toggle('picked', bd.hits.includes(el.dataset.sid)));
-    const hitCards = $$('#world .card.on-canvas').filter((el) => {
+    const hitCards = $$('#world .card.on-canvas:not(.locked)').filter((el) => {
       const cx = el.offsetLeft, cy = el.offsetTop, cw = el.offsetWidth, ch = el.offsetHeight;
       return cx < r.x + r.w && cx + cw > r.x && cy < r.y + r.h && cy + ch > r.y;
     }).map((el) => el.dataset.id);
@@ -3797,6 +3880,27 @@ async function boardUp(e) {
   if (e.type === 'pointercancel') { renderCanvas(); return true; }
   if (d.moved) { suppressClick = true; setTimeout(() => { suppressClick = false; }, 0); }
   const b = boardOf();
+  if (d.mode === 'gresize') {
+    $('#groupBox')?.classList.remove('scaling');
+    if (!d.moved) return true;
+    if (d.g.shapes.length) record(d.snap);
+    if (d.g.cards.length) {
+      const before = d.g.cards.map((it) => ({ c: it.card, x: it.card.x, y: it.card.y, w: it.card.w }));
+      d.g.cards.forEach((it) => { if (it.nx != null) Object.assign(it.card, { x: it.nx, y: it.ny, w: it.nw, updatedAt: Date.now() }); });
+      await db.putMany('cards', d.g.cards.map((it) => it.card));
+      if (!d.g.shapes.length) toast(`已缩放 ${d.g.cards.length} 张卡片`, { action: '撤销', onAction: async () => {
+        before.forEach(({ c, x, y, w }) => { c.x = x; c.y = y; if (w === undefined) delete c.w; else c.w = w; });
+        await db.putMany('cards', before.map((p) => p.c)); await changed();
+      } });
+    }
+    await saveBoard();
+    return true;
+  }
+  if (d.mode === 'locked') {
+    if (d.shiftToggle && !d.moved) selectBoard(pickShapes(selIds().filter((x) => x !== d.clicked)));
+    else { decorateBoard(); positionFmt(); }
+    return true;
+  }
   if (d.mode === 'move' || d.mode === 'resize') {
     if (d.moved) {
       record(d.snap);
@@ -3902,10 +4006,12 @@ async function boardUp(e) {
 async function deleteBoardSel() {
   const b = boardOf(), sel = state.bsel;
   if (!b || !sel) return;
+  if (sel.type === 'shape' && !freeShapes(selShapes()).length) return toast('选中的对象已锁定，先解锁才能删除');
   record();
   let n = 1;
   if (sel.type === 'shape') {
-    const ids = new Set(sel.ids); n = ids.size;
+    const ids = new Set(freeShapes(selShapes()).map((s) => s.id)); n = ids.size; // 锁定的留下
+    if (ids.size < sel.ids.length) setTimeout(() => toast(`${sel.ids.length - ids.size} 个锁定的对象没有删除`), 1200);
     b.shapes = b.shapes.filter((s) => !ids.has(s.id));
     b.links = b.links.filter((l) => !ids.has(l.from.id) && !ids.has(l.to.id));
   } else b.links = b.links.filter((l) => l.id !== sel.id);
@@ -4177,7 +4283,7 @@ const FI = {
   front: '<rect x="8" y="8" width="12" height="12" rx="1.5"/><path d="M4 16V5a1 1 0 0 1 1-1h11"/>', copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
   trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>', label: '<path d="M5 6V4h14v2M12 4v16M9 20h6"/>',
   dash: '<path d="M3 12h4M10 12h4M17 12h4"/>', curve: '<path d="M4 18C10 18 14 6 20 6"/>', swap: '<path d="M4 8h14l-3-3M20 16H6l3 3"/>',
-  chev: '<path d="m7 10 5 5 5-5"/>',
+  chev: '<path d="m7 10 5 5 5-5"/>', lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
   back: '<rect x="4" y="4" width="12" height="12" rx="1.5"/><path d="M20 8v11a1 1 0 0 1-1 1H8"/>',
 };
 const fbtn = (act, icon, tip, on) => `<button type="button" class="icon-btn${on ? ' on' : ''}" data-fmt="${act}" data-tip="${tip}" aria-label="${tip}"${on != null ? ` aria-pressed="${!!on}"` : ''}><svg viewBox="0 0 24 24">${FI[icon]}</svg></button>`;
@@ -4205,7 +4311,7 @@ function positionFmt() {
         ${fbtn('bold', 'bold', '加粗 · Ctrl+B', items.every((x) => x.b))}${fbtn('align', s.al === 'left' ? 'left' : 'center', s.al === 'left' ? '左对齐' : '居中')}
         ${many ? `<span class="sep"></span><select data-fmt="arrange" aria-label="对齐与分布" data-tip="对齐与分布"><option value="" selected>对齐…</option>${Object.entries(ALIGN_OPS).filter(([k]) => items.length > 2 || !k.startsWith('d')).map(([k, n]) => `<option value="${k}">${n}</option>`).join('')}</select>` : ''}
         <span class="sep"></span>
-        ${fbtn('front', 'front', '置于顶层 · Ctrl+]')}${fbtn('back', 'back', '置于底层 · Ctrl+[')}${fbtn('dup', 'copy', '复制一份 · Ctrl+D')}${fbtn('del', 'trash', '删除 · Delete')}
+        ${fbtn('front', 'front', '置于顶层 · Ctrl+]')}${fbtn('back', 'back', '置于底层 · Ctrl+[')}${fbtn('dup', 'copy', '复制一份 · Ctrl+D')}${fbtn('lock', 'lock', items.every((x) => x.lk) ? '解锁 · Ctrl+Shift+L' : '锁定 · Ctrl+Shift+L', items.every((x) => x.lk))}${fbtn('del', 'trash', '删除 · Delete')}
         ${fmtPop === 'fill' ? `<div class="fb-pop" role="menu">${SH_COLORS.map((c, k) => `<button type="button" class="sw${col && s.fill === k ? ' on' : ''}" data-fmt="fill" data-v="${k}" style="--c:${c.bg};--d:${c.bd}" data-tip="${c.n}" aria-label="${c.n}"></button>`).join('')}<button type="button" class="sw none${col ? '' : ' on'}" data-fmt="fill" data-v="none" data-tip="无填充" aria-label="无填充"></button></div>` : ''}`;
     } else {
       const l = items[0];
@@ -4238,6 +4344,7 @@ async function applyFmt(act, v) {
   if (act === 'pop') { fmtPop = fmtPop === v ? null : v; return positionFmt(); }
   if (act === 'del') return deleteBoardSel();
   if (act === 'dup') return duplicateSel();
+  if (act === 'lock') return toggleLock();
   if (act === 'arrange') return v && alignSel(v);
   if (act === 'label') return editLinkLabel(sel.id);
   if (act === 'shape' && !v) return;
@@ -4500,7 +4607,7 @@ const SHORTCUTS = [
   ['工具', [['V', '选择'], ['N', '便签'], ['T', '文字'], ['R', '矩形'], ['O', '圆形'], ['D', '菱形'], ['L', '箭头连线'], ['C', '备注评论'], ['双击工具', '锁定工具，连续放置'], ['Esc', '退出工具 / 取消选中']]],
   ['拖动', [['Shift + 拖动', '只水平或只垂直移动'], ['Alt + 拖动', '复制一份拖走（形状、文件卡片都可以）'], ['Ctrl + 拖动', '暂时关闭对齐吸附（文件卡片上是转换圆环）'], ['Shift + 拖角', '等比缩放'], ['Alt + 拖边 / 角', '以中心对称缩放'], ['Shift / Alt + 画形状', '画正方形 / 从中心向外画'], ['拖连接点到空白处', '新建一个相连的形状']]],
   ['选择', [['左键拖空白处', '拉出多选框（框选卡片与形状）'], ['Shift + 点击', '加选 / 减选'], ['Ctrl + A', '全选画布内容'], ['Enter / 双击', '编辑文字 / 预览卡片'], ['Esc / Ctrl + Enter', '结束编辑']]],
-  ['编辑', [['Ctrl + Z', '撤销'], ['Ctrl + Y / Ctrl + Shift + Z', '重做'], ['Ctrl + C / X / V', '复制 / 剪切 / 粘贴'], ['Ctrl + D', '原地复制'], ['Delete', '删除'], ['方向键', '微移（Shift 每次 40）'], ['Ctrl + 方向键', '在该方向新建相连形状'], ['Ctrl + ] / [', '置于顶层 / 底层'], ['Ctrl + B', '加粗'], ['Ctrl + Shift + . / ,', '放大 / 缩小字号']]],
+  ['编辑', [['Ctrl + Z', '撤销'], ['Ctrl + Y / Ctrl + Shift + Z', '重做'], ['Ctrl + C / X / V', '复制 / 剪切 / 粘贴'], ['Ctrl + D', '原地复制'], ['Ctrl + Shift + L', '锁定 / 解锁'], ['多选后拖外框角点', '整体等比缩放（Alt 以中心）'], ['Delete', '删除'], ['方向键', '微移（Shift 每次 40）'], ['Ctrl + 方向键', '在该方向新建相连形状'], ['Ctrl + ] / [', '置于顶层 / 底层'], ['Ctrl + B', '加粗'], ['Ctrl + Shift + . / ,', '放大 / 缩小字号']]],
   ['视图', [['F', '最大化工作空间 / 沉浸模式'], ['鼠标中键 + 拖动', '平移画布（或空格 + 拖动），快速甩动松手会惯性滑动'], ['滚轮', '缩放（以鼠标位置为中心）'], ['Shift + 滚轮', '左右平移'], ['触控板双指滑动', '平移'], ['Shift + 1', '显示全部'], ['Shift + 2', '缩放到选中'], ['Shift + 0', '回到 100%'], ['?', '打开这张速查表']]],
 ];
 function showShortcuts() {
@@ -4533,10 +4640,12 @@ document.addEventListener('keydown', (e) => {
     state.selected = new Set(cIds);
     document.body.classList.toggle('selecting', state.selected.size > 0);
     renderSelBar();
-    state.bsel = pickShapes(boardOf().shapes.map((s) => s.id));
+    state.bsel = pickShapes(boardOf().shapes.filter((s) => !s.lk).map((s) => s.id)); // 全选不含锁定的（和 Miro 一样）
     renderCanvas();
     return;
   }
+  // Ctrl + Shift + L：锁定 / 解锁选中的形状和卡片
+  if (mod && e.shiftKey && (e.code === 'KeyL' || k === 'l')) { e.preventDefault(); toggleLock(); return; }
   // 视图：F 最大化工作区，Shift+1 显示全部，Shift+2 缩放到选中，Shift+0 回到 100%；? 打开快捷键速查
   if (!mod && !e.shiftKey && k === 'f' && !onCard) { e.preventDefault(); toggleCanvasMax(); return; }
   if (!mod && e.shiftKey && e.code === 'Digit1') { e.preventDefault(); zoomFit(); return; }
@@ -4571,7 +4680,7 @@ document.addEventListener('keydown', (e) => {
     if (mod && list.length === 1) { createConnected(list[0], e.key); return; }
     const st = e.shiftKey ? 40 : 10;
     if (!list[0]._t) record();
-    for (const s of list) {
+    for (const s of freeShapes(list)) {
       s.x += e.key === 'ArrowLeft' ? -st : e.key === 'ArrowRight' ? st : 0;
       s.y += e.key === 'ArrowUp' ? -st : e.key === 'ArrowDown' ? st : 0;
       const el = shEl(s.id);
@@ -5840,6 +5949,11 @@ function cardMenu(anchor, card) {
     { text: '重命名', run: () => startInlineRename(card.id) });
   if (isCanvas(card.columnId)) {
     items.push({ text: '添加备注评论…', run: () => openCommentDraftOnTarget(card.id) });
+    items.push({ text: card.locked ? '解锁（Ctrl + Shift + L）' : '锁定位置（Ctrl + Shift + L）', run: async () => {
+      if (card.locked) delete card.locked; else card.locked = true;
+      await saveCard(card); await changed();
+      toast(card.locked ? `已锁定「${card.name}」` : `已解锁「${card.name}」`);
+    } });
   }
   if (isCanvas(card.columnId) && card.w) {
     items.push({ text: '重置画布卡片大小', run: async () => { delete card.w; await saveCard(card); await changed(); } });
