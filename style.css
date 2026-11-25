@@ -1026,8 +1026,8 @@ body.board-dragging .comment-pin { transition: none; }
 .card.on-canvas { position: absolute; width: 232px; cursor: grab; touch-action: none; }
 .card.on-canvas:not(.has-img) { padding-right: 92px; }
 .card.on-canvas .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.card.on-canvas.has-img { width: 260px; overflow: visible; }
-.card.on-canvas.has-img .body { padding-right: 92px; }
+.card.on-canvas.has-img { width: 260px; overflow: visible; background: transparent; }
+.card.on-canvas.has-img .thumb { border-radius: 9px; }
 .card.on-canvas.canvas-hd-card, .card.on-canvas.canvas-pdf-card { width: 360px; }
 .card.on-canvas .thumb { height: auto; min-height: 80px; border-radius: 9px 9px 0 0; overflow: hidden; }
 .card.on-canvas .thumb-img { width: 100%; height: auto; max-height: none; object-fit: contain; image-rendering: auto; }
@@ -1062,7 +1062,56 @@ body.board-dragging .comment-pin { transition: none; }
 .card-expand-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .card:hover .export-handle, .card:hover .card-expand-btn, .card.picked .export-handle, .card.picked .card-expand-btn { opacity: 1; }
 .export-handle:hover, .card-expand-btn:hover { background: var(--surface-3); color: var(--text); }
-.card.has-img .export-handle, .card.has-img .card-expand-btn { top: auto; bottom: 6px; }
+.card.has-img:not(.on-canvas) .export-handle, .card.has-img:not(.on-canvas) .card-expand-btn { top: auto; bottom: 6px; }
+/* 画布媒体卡悬浮顶部操作条（仅选中时以透明背景呈现于图片上方） */
+.card.on-canvas.has-img .canvas-card-hud {
+  position: absolute; left: 0; right: 0; bottom: calc(100% + 10px); z-index: 6;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px;
+  padding: 0 2px; background: transparent;
+  opacity: 0; pointer-events: none; transform: translateY(4px);
+  transition: opacity .15s ease, transform .15s ease;
+}
+.card.on-canvas.has-img.picked .canvas-card-hud,
+.card.on-canvas.has-img.selected .canvas-card-hud,
+.card.on-canvas.has-img.is-renaming .canvas-card-hud,
+.card.on-canvas.has-img:has(.more[aria-expanded="true"]) .canvas-card-hud {
+  opacity: 1; pointer-events: auto; transform: translateY(0);
+}
+.card.on-canvas.has-img.lifting .canvas-card-hud,
+.card.on-canvas.has-img.resizing .canvas-card-hud {
+  opacity: 0; pointer-events: none;
+}
+.card.on-canvas.has-img .canvas-card-hud .body {
+  padding: 0; min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px;
+}
+.card.on-canvas.has-img .canvas-card-hud .name {
+  font-size: 12.5px; font-weight: 600; line-height: 1.25; color: var(--text);
+}
+.card.on-canvas.has-img .canvas-card-hud .meta {
+  font-size: 11px; line-height: 1.25; color: var(--text-3); margin-top: 0;
+}
+.card.on-canvas.has-img .canvas-card-actions {
+  display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; background: transparent;
+}
+.card.on-canvas.has-img .canvas-card-actions .quick-rename-btn,
+.card.on-canvas.has-img .canvas-card-actions .card-expand-btn,
+.card.on-canvas.has-img .canvas-card-actions .export-handle,
+.card.on-canvas.has-img .canvas-card-actions .more {
+  position: static; top: auto; right: auto; bottom: auto;
+  opacity: 1; background: transparent; backdrop-filter: none; color: var(--text-2);
+}
+.card.on-canvas.has-img .canvas-card-actions .quick-rename-btn:hover,
+.card.on-canvas.has-img .canvas-card-actions .card-expand-btn:hover,
+.card.on-canvas.has-img .canvas-card-actions .export-handle:hover,
+.card.on-canvas.has-img .canvas-card-actions .more:hover,
+.card.on-canvas.has-img .canvas-card-actions .more[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--surface-3) 72%, transparent);
+  color: var(--text);
+}
+.card.on-canvas.has-img .canvas-card-actions .quick-rename-btn:hover { color: var(--accent); }
+.card.on-canvas.has-img.is-renaming .canvas-card-actions,
+.card.on-canvas.has-img.is-renaming .canvas-card-hud .meta { display: none; }
+.card.on-canvas.has-img.is-renaming .canvas-card-hud .body { padding-right: 0 !important; }
 /* 画布内嵌 PDF 高清预览与翻页控制栏 */
 .canvas-pdf-stage { position: relative; background: #fff; min-height: 180px; }
 .canvas-pdf-stage.pdf-loading::before {
@@ -1353,7 +1402,7 @@ body.board-dragging .group-box { display: none; }
 .more { position: absolute; top: 6px; right: 4px; width: 28px; height: 28px; border: 0; background: transparent; border-radius: 7px; color: var(--text-3); display: grid; place-items: center; opacity: 0; }
 .card:hover .more, .card:focus-within .more, .more[aria-expanded="true"] { opacity: 1; }
 .more:hover { background: var(--surface-3); color: var(--text); }
-.card.has-img .more { top: auto; bottom: 6px; }
+.card.has-img:not(.on-canvas) .more { top: auto; bottom: 6px; }
 .quick-rename-btn {
   position: absolute; top: 6px; right: 60px; z-index: 3;
   width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px;
@@ -1364,9 +1413,8 @@ body.board-dragging .group-box { display: none; }
 .quick-rename-btn svg { width: 14px; height: 14px; }
 .card:hover .quick-rename-btn, .card:focus-within .quick-rename-btn { opacity: 1; }
 .quick-rename-btn:hover { background: var(--surface-3); color: var(--accent); }
-.card.has-img .quick-rename-btn { top: auto; bottom: 6px; right: 32px; }
+.card.has-img:not(.on-canvas) .quick-rename-btn { top: auto; bottom: 6px; right: 32px; }
 .card.on-canvas:not(.has-img) .quick-rename-btn { right: 118px; }
-.card.on-canvas.has-img .quick-rename-btn { top: auto; bottom: 6px; right: 90px; }
 .card.is-renaming { padding-right: 12px !important; cursor: default; }
 .card.is-renaming.has-img .body { padding-right: 10px !important; }
 .card.is-renaming .quick-rename-btn,

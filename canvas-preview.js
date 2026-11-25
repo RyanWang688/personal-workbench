@@ -29,10 +29,10 @@ export function estimateCardHeight(card, w = 232) {
   const iw = num(card?.info?.w, 0);
   const ih = num(card?.info?.h, 0);
   if (iw > 0 && ih > 0) {
-    return clamp(Math.round(width * (ih / iw)) + 54, 110, 520);
+    return clamp(Math.round(width * (ih / iw)), 90, 480);
   }
   if (looksVisualFile(card)) {
-    return Math.round(width * 0.72) + 52;
+    return Math.round(width * 0.72);
   }
   return 84;
 }

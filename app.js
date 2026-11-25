@@ -390,13 +390,22 @@ function cardHTML(c, onCanvas = false) {
   const meta = metaText(c, t) + linkBadge(c);
   const ext = extOf(c.name).slice(0, 5) || t.label;
   const name = `<div class="name" title="${esc(c.name)}&#10;添加于 ${fmtDate(c.createdAt)}">${prioTag(c)}${highlight(c.name)}</div>`;
+  const mediaCard = (media) => {
+    const body = `<div class="body">${name}<div class="meta">${meta}</div></div>`;
+    if (onCanvas) {
+      const cardExtra = CARD_HANDLES + (c.columnId !== TRASH ? selBtn(c) : '');
+      const actions = `${c.columnId !== TRASH ? RENAME_BTN : ''}${EXPAND_BTN(c.id)}${HANDLE}${MORE}`;
+      return `<article class="${cls} has-img" ${attrs} tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
+        ${media}<div class="canvas-card-hud">${body}<div class="canvas-card-actions">${actions}</div></div>${cardExtra}</article>`;
+    }
+    return `<article class="${cls} has-img" ${attrs} tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
+      ${media}${body}${extra}${MORE}</article>`;
+  };
   if (isCanvasImg) {
     const fullUrl = state.urls.get(c.id);
     const tUrl = state.urls.get(`thumb:${c.id}`);
     const src = fullUrl || tUrl || '';
-    const media = `<div class="thumb fit-cover canvas-img-stage"><img class="thumb-img canvas-hd-img${src ? ' loaded' : ''}" data-canvas-img="${c.id}" ${fullUrl ? 'data-hd-ready="1"' : ''} ${src ? `src="${src}"` : ''} alt="${esc(c.name)}" draggable="false"></div>`;
-    return `<article class="${cls} has-img" ${attrs} tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
-      ${media}<div class="body">${name}<div class="meta">${meta}</div></div>${extra}${MORE}</article>`;
+    return mediaCard(`<div class="thumb fit-cover canvas-img-stage"><img class="thumb-img canvas-hd-img${src ? ' loaded' : ''}" data-canvas-img="${c.id}" ${fullUrl ? 'data-hd-ready="1"' : ''} ${src ? `src="${src}"` : ''} alt="${esc(c.name)}" draggable="false"></div>`);
   }
   if (isCanvasPdf) {
     const doc = pdfDocs.get(c.id);
@@ -409,9 +418,7 @@ function cardHTML(c, onCanvas = false) {
       <button type="button" class="pdf-page-num" data-action="pdf-jump" data-id="${c.id}" title="点击输入页码跳转"><b class="pdf-cur">${page}</b><span>/</span><span class="pdf-tot">${total || '…'}</span></button>
       <button type="button" class="pdf-nav-btn" data-action="pdf-next" data-id="${c.id}" ${total && page >= total ? 'disabled' : ''} title="下一页" aria-label="下一页"><svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
     </div>`;
-    const media = `<div class="thumb fit-page canvas-pdf-stage"><img class="thumb-img canvas-pdf-img${hdUrl ? ' loaded' : ''}" data-canvas-pdf="${c.id}" data-page="${page}" ${hdUrl ? `src="${hdUrl}"` : ''} alt="${esc(c.name)} 第 ${page} 页" draggable="false">${badge}${nav}</div>`;
-    return `<article class="${cls} has-img" ${attrs} tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
-      ${media}<div class="body">${name}<div class="meta">${meta}</div></div>${extra}${MORE}</article>`;
+    return mediaCard(`<div class="thumb fit-page canvas-pdf-stage"><img class="thumb-img canvas-pdf-img${hdUrl ? ' loaded' : ''}" data-canvas-pdf="${c.id}" data-page="${page}" ${hdUrl ? `src="${hdUrl}"` : ''} alt="${esc(c.name)} 第 ${page} 页" draggable="false">${badge}${nav}</div>`);
   }
   const st = thumbStateOf(c);
   if (st !== 'none') {
@@ -420,8 +427,7 @@ function cardHTML(c, onCanvas = false) {
     const media = st === 'ok'
       ? `<div class="thumb fit-${c.thumbFit || 'cover'}"><img class="thumb-img${url ? ' loaded' : ''}" data-thumb="${c.id}" ${url ? `src="${url}"` : ''} alt="" draggable="false">${t.k === 'video' ? PLAY : ''}${badge}</div>`
       : `<div class="thumb skel" aria-label="正在生成预览">${badge}</div>`;
-    return `<article class="${cls} has-img" ${attrs} tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
-      ${media}<div class="body">${name}<div class="meta">${meta}</div></div>${extra}${MORE}</article>`;
+    return mediaCard(media);
   }
   return `<article class="${cls}" ${attrs} tabindex="0" data-id="${c.id}" aria-label="${esc(c.name)}">
     <div class="type-icon" style="--c:${t.c}">${esc(ext.slice(0, 4))}</div>
@@ -2306,7 +2312,7 @@ vp.addEventListener('pointerdown', (e) => {
   }
   if (!forcePan && pointers.size === 0 && boardDown(e)) return; // 白板：形状、连线、工具、左键空白处框选
   const cardEl = forcePan ? null : e.target.closest('.card');
-  if (cardEl && !e.target.closest('.more, .export-handle, .card-expand-btn, .pdf-page-bar, .quick-rename-btn, .inline-rn-wrap, [data-card-handle]')) {
+  if (cardEl && !e.target.closest('.more, .export-handle, .card-expand-btn, .pdf-page-bar, .quick-rename-btn, .inline-rn-wrap, .canvas-card-hud, [data-card-handle]')) {
     const card = findCard(cardEl.dataset.id);
     if (cardEl.classList.contains('on-canvas')) pickCanvasCard(card.id);
     const isMulti = cardEl.classList.contains('on-canvas') && !e.altKey && state.selected.has(card.id) && (state.selected.size > 1 || selShapes().length > 0);
@@ -2643,7 +2649,7 @@ vp.addEventListener('dblclick', async (e) => {
   if (hit.closest('.comment-pin, .comment-thread-pop, .comments-popover') || e.target.closest('.comment-pin, .comment-thread-pop, .comments-popover')) return;
   const hitCard = hit.closest('.card.on-canvas') || e.target.closest('.card.on-canvas');
   if (hitCard) {
-    if (hit.closest('.pdf-page-bar, [data-card-handle], .more, .sel, .export-handle, .card-expand-btn, .quick-rename-btn, .inline-rn-wrap')) return;
+    if (hit.closest('.pdf-page-bar, [data-card-handle], .more, .sel, .export-handle, .card-expand-btn, .quick-rename-btn, .inline-rn-wrap, .canvas-card-hud')) return;
     return preview(hitCard.dataset.id);
   }
   if (hit.closest('.card, .fmt-bar, .canvas-palette, .canvas-tools, .canvas-workspace-head') || e.target.closest('.card, .fmt-bar')) return;
@@ -3142,7 +3148,7 @@ function boardDown(e) {
     bd = { ...base, mode: 'link', lid: l.id, end: lend.dataset.lend, from: lend.dataset.lend === 'from' ? l.to : l.from, cur: p };
     capture(); hideDots(); return true;
   }
-  if (dot || (state.tool === 'arrow' && !e.target.closest('.more, .export-handle, .sel, .quick-rename-btn, .inline-rn-wrap'))) {
+  if (dot || (state.tool === 'arrow' && !e.target.closest('.more, .export-handle, .sel, .quick-rename-btn, .inline-rn-wrap, .canvas-card-hud'))) {
     const owner = dot ? hoverRef : (shapeEl?.dataset.sid || (cardEl && cardEl.classList.contains('on-canvas') ? cardEl.dataset.id : null));
     bd = { ...base, mode: 'link', fromDot: !!dot, from: owner ? { id: owner } : { x: Math.round(p.x), y: Math.round(p.y) }, cur: p };
     capture(); hideDots(); e.preventDefault(); return true;
@@ -5100,7 +5106,7 @@ document.addEventListener('pointerdown', (e) => {
   pressFired = false;
   if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
   const el = e.target.closest?.('.card');
-  if (!el || e.target.closest('.more, .export-handle, .card-expand-btn, .sel, .suggest-badge, .pdf-page-bar, .quick-rename-btn, .inline-rn-wrap, [data-card-handle]')) return;
+  if (!el || e.target.closest('.more, .export-handle, .card-expand-btn, .sel, .suggest-badge, .pdf-page-bar, .quick-rename-btn, .inline-rn-wrap, .canvas-card-hud, [data-card-handle]')) return;
   const card = findCard(el.dataset.id);
   if (!card || !isActive(card)) return;
   cancelPress();
