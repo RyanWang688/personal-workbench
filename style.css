@@ -1209,8 +1209,8 @@ svg.sh-bg polygon { fill: var(--sb); stroke: var(--sd); stroke-width: 1.5; strok
 .st-frame.picked::after { border-radius: 12px; }
 .shape-ghost.st-frame { border-radius: 10px; border-style: solid; background: color-mix(in srgb, var(--accent) 5%, transparent); }
 .st-text .sh-bg { border: 0; }
-.shape.nofill:not(.st-text) .sh-bg { border-color: var(--text-3); }
-.shape.nofill.st-diamond polygon { stroke: var(--text-3); }
+.shape.nofill:not(.st-text) .sh-bg { border-color: var(--sd-auto, var(--text-3)); }
+.shape.nofill.st-diamond polygon { stroke: var(--sd-auto, var(--text-3)); }
 .shape.bold { font-weight: 700; }
 .sh-tx { position: relative; width: 100%; max-height: 100%; white-space: pre-wrap; overflow-wrap: anywhere; outline: none; cursor: inherit; }
 .shape.editing .sh-tx { cursor: text; user-select: text; max-height: none; }

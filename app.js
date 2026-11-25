@@ -3231,15 +3231,16 @@ vp.addEventListener('wheel', (e) => {
   // 鼠标滚轮直接缩放（以鼠标位置为中心）；触控板双指滑动仍然是平移，Shift + 滚轮左右平移
   // 区分方法：鼠标滚轮按「格」滚 —— Chrome / Edge / Safari 里每格 wheelDelta 是 120 的整数倍，Firefox 里按「行」滚；
   // 触控板滑动的数值是连续的小步，通常不是 120 的倍数，还常带横向分量（系统缩放、浏览器缩放不影响这个判断）
-  const lineMode = e.deltaMode === 1, wd = e.wheelDeltaY || e.wheelDelta || 0;
-  const mouseWheel = lineMode || (e.deltaX === 0 && wd !== 0 && Math.abs(wd) % 120 === 0);
-  const trackpad = !mouseWheel;
-  if (!e.shiftKey && !trackpad && e.deltaY) {
-    const d = Math.max(-150, Math.min(150, e.deltaY * (lineMode ? 40 : 1)));
+  // 上下滚动一律是缩放（不再猜是鼠标还是触控板：高精度滚轮、平滑滚动的鼠标以前会被误判成触控板而变成上下平移）；
+  // 只有明显的横向滑动（触控板左右滑）或 Shift + 滚轮才平移画面
+  const lineMode = e.deltaMode === 1, pageMode = e.deltaMode === 2;
+  const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+  if (!e.shiftKey && !horizontal && e.deltaY) {
+    const d = Math.max(-150, Math.min(150, e.deltaY * (lineMode ? 40 : pageMode ? 400 : 1)));
     return zoomAt(Math.exp(-d * 0.0018), e.clientX, e.clientY);
   }
   const c = cam();
-  if (e.shiftKey && !e.deltaX) { c.x -= e.deltaY; } else { c.x -= e.deltaX; c.y -= e.deltaY; }
+  if (e.shiftKey && !e.deltaX) { c.x -= e.deltaY; } else { c.x -= e.deltaX; } // 横向平移（纵向交给缩放）
   applyCam();
   clearTimeout(vp._t); vp._t = setTimeout(saveCam, 200);
 }, { passive: false });
@@ -3342,6 +3343,7 @@ function shapeHTML(s) {
 }
 // 重绘后的装饰：便签字号自适应、多选外框
 function decorateBoard() {
+  autoContrast(); // 文字 / 边框 / 箭头颜色按实际背景自动取对比色，不会出现灰字压灰底
   fitAllShapeText(); // 所有形状：文字放不下就缩小字号，绝不溢出
   const box = $('#groupBox');
   if (!box) return;
@@ -3355,6 +3357,80 @@ function decorateBoard() {
   if (!box.firstElementChild) box.innerHTML = ['nw', 'ne', 'se', 'sw'].map((k) => `<i class="gb-h gb-${k}" data-ghandle="${k}" title="拖动角点：整体等比缩放（Alt 以中心缩放）"></i>`).join('');
   if (ub) Object.assign(box.style, { left: `${ub.x}px`, top: `${ub.y}px`, width: `${ub.w}px`, height: `${ub.h}px` });
 }
+// ---- 自动对比度 ----
+// 每个形状的文字颜色按「它实际压在什么上面」来选：自己的填充色 → 下面最上层的有色形状 / 画框 → 画布底色，
+// 在深色 / 浅色两种字色里挑对比度高的（WCAG 对比度），箭头颜色在画布底色上对比不足 3:1 时自动提亮 / 压暗
+const TXT_DARK = [31, 32, 35], TXT_LIGHT = [241, 241, 243];
+function parseRGB(str) {
+  const s = String(str || '').trim();
+  let m = s.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (m) { const h = m[1].length === 3 ? m[1].replace(/./g, '$&$&') : m[1]; return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)); }
+  m = s.match(/rgba?\(([^)]+)\)/i);
+  if (m) { const p = m[1].split(/[\s,/]+/).filter(Boolean).map(parseFloat); if (p.length >= 3 && (p[3] == null || p[3] > 0.05)) return p.slice(0, 3); }
+  return null;
+}
+const lum = (c) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); };
+const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+const mixRGB = (a, b, t) => a.map((v, i) => Math.round(v * (1 - t) + b[i] * t));
+const rgbStr = (c) => `rgb(${c.map(Math.round).join(',')})`;
+function canvasBgRGB() {
+  for (let el = $('#viewport'); el; el = el.parentElement) {
+    const c = parseRGB(getComputedStyle(el).backgroundColor);
+    if (c) return c;
+  }
+  return parseRGB(getComputedStyle(document.body).backgroundColor) || [255, 255, 255];
+}
+// 在背景 bg 上可读的文字色
+const readableOn = (bg) => (contrast(TXT_DARK, bg) >= contrast(TXT_LIGHT, bg) ? TXT_DARK : TXT_LIGHT);
+// 颜色 c 放在背景 bg 上对比不足 min 时，往白或黑一点点推，直到够清楚
+function ensureContrast(c, bg, min = 3) {
+  if (contrast(c, bg) >= min) return c;
+  const to = lum(bg) < 0.4 ? [255, 255, 255] : [0, 0, 0];
+  for (let t = 0.1; t <= 1; t += 0.1) { const m = mixRGB(c, to, t); if (contrast(m, bg) >= min) return m; }
+  return to;
+}
+let contrastCanvasBg = null;
+function autoContrast() {
+  const b = boardOf();
+  if (!b) return;
+  const base = canvasBgRGB();
+  contrastCanvasBg = base;
+  const zOf = (s) => (isFrame(s) ? -1e6 + (Number.isFinite(s.z) ? s.z : 0) : (Number.isFinite(s.z) ? s.z : 1));
+  // 每个形状自身的「底色」（不透明的有色形状直接用填充色；画框是淡淡的一层，按 24% 混到画布色上）
+  const own = (s) => {
+    const col = shColor(s);
+    if (!col) return null;
+    const c = parseRGB(col.bg);
+    return isFrame(s) ? mixRGB(base, c, 0.24) : c;
+  };
+  const filled = b.shapes.filter((s) => own(s)).sort((x, y) => zOf(y) - zOf(x)); // 上层在前
+  for (const s of b.shapes) {
+    const el = shEl(s.id);
+    if (!el) continue;
+    let bg = isFrame(s) ? null : own(s);
+    if (!bg) {
+      // 画框标题在框外面，压在画布上；其他没有填充的形状找它中心点下面最上层的有色形状
+      const cx = s.x + s.w / 2, cy = s.y + s.h / 2;
+      const under = isFrame(s) ? null : filled.find((u) => u !== s && zOf(u) < zOf(s) && cx >= u.x && cx <= u.x + u.w && cy >= u.y && cy <= u.y + u.h);
+      bg = under ? own(under) : base;
+    }
+    const tc = readableOn(bg);
+    el.style.setProperty('--tc', rgbStr(tc));
+    // 没有填充的形状：边框也按底色取一个看得清的中间灰
+    if (!shColor(s)) el.style.setProperty('--sd-auto', rgbStr(mixRGB(tc, bg, 0.45)));
+    else el.style.removeProperty('--sd-auto');
+  }
+}
+// 切换深色 / 浅色主题时重新计算（画布底色变了）
+const recontrast = () => requestAnimationFrame(() => { if (isCanvas(state.view)) { autoContrast(); drawLinks(); } });
+new MutationObserver(recontrast).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'class'] });
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', recontrast);
+// 箭头颜色：在画布底色上不够清楚时自动调整（默认色用主题文字色，本来就清楚）
+const linkColorFor = (color) => {
+  if (!color) return 'var(--text-2)';
+  const c = parseRGB(color), bg = contrastCanvasBg || canvasBgRGB();
+  return c ? rgbStr(ensureContrast(c, bg, 3)) : color;
+};
 function cardBox(c) {
   const el = $(`#world .card[data-id="${CSS.escape(c.id)}"]`);
   return el ? { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight } : null;
@@ -3443,7 +3519,7 @@ function arrowHead(tip, from, size = 13) {
 }
 function linkSVG(l, g, { temp = false } = {}) {
   const sel = !temp && state.bsel?.type === 'link' && state.bsel.id === l.id;
-  const color = l.color || 'var(--text-2)';
+  const color = linkColorFor(l.color);
   // 缩小时箭头按比例放大，屏幕上始终清楚（最多放大 4 倍）
   const ah = 13 * Math.min(4, Math.max(1, 1 / (cam().z || 1)));
   const heads = (l.end !== 'none' ? `<path class="ah" d="${arrowHead(g.p2, g.c2 === g.p2 ? g.p1 : g.c2, ah)}"/>` : '')
@@ -4790,7 +4866,7 @@ const SHORTCUTS = [
   ['拖动', [['Shift + 拖动', '只水平或只垂直移动'], ['Alt + 拖动', '复制一份拖走（形状、文件卡片都可以）'], ['Ctrl + 拖动', '暂时关闭对齐吸附（文件卡片上是转换圆环）'], ['Shift + 拖角', '等比缩放'], ['Alt + 拖边 / 角', '以中心对称缩放'], ['Shift / Alt + 画形状', '画正方形 / 从中心向外画'], ['拖连接点到空白处', '新建一个相连的形状']]],
   ['选择', [['左键拖空白处', '拉出多选框（框选卡片与形状）'], ['Shift + 点击', '加选 / 减选'], ['Ctrl + A', '全选画布内容'], ['Enter / 双击', '编辑文字 / 预览卡片'], ['Esc / Ctrl + Enter', '结束编辑']]],
   ['编辑', [['Ctrl + Z', '撤销'], ['Ctrl + Y / Ctrl + Shift + Z', '重做'], ['Ctrl + C / X / V', '复制 / 剪切 / 粘贴'], ['Ctrl + D', '原地复制'], ['Ctrl + Shift + L', '锁定 / 解锁'], ['多选后拖外框角点', '整体等比缩放（Alt 以中心）'], ['Delete', '删除'], ['方向键', '微移（Shift 每次 40）'], ['Ctrl + 方向键', '在该方向新建相连形状'], ['Ctrl + ] / [', '置于顶层 / 底层'], ['Ctrl + B', '加粗'], ['Ctrl + Shift + . / ,', '放大 / 缩小字号']]],
-  ['视图', [['F', '最大化工作空间 / 沉浸模式'], ['鼠标中键 + 拖动', '平移画布（或空格 + 拖动），快速甩动松手会惯性滑动'], ['滚轮', '缩放（以鼠标位置为中心）'], ['Shift + 滚轮', '左右平移'], ['触控板双指滑动', '平移'], ['Shift + 1', '显示全部'], ['Shift + 2', '缩放到选中'], ['Shift + 0', '回到 100%'], ['?', '打开这张速查表']]],
+  ['视图', [['F', '最大化工作空间 / 沉浸模式'], ['鼠标中键 + 拖动', '平移画布（或空格 + 拖动），快速甩动松手会惯性滑动'], ['滚轮', '缩放（以鼠标位置为中心）'], ['Shift + 滚轮', '左右平移'], ['触控板双指上下滑 / 左右滑', '缩放 / 左右平移'], ['Shift + 1', '显示全部'], ['Shift + 2', '缩放到选中'], ['Shift + 0', '回到 100%'], ['?', '打开这张速查表']]],
 ];
 function showShortcuts() {
   const m = $('#modal');
