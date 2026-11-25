@@ -4,6 +4,7 @@ import * as collab from './collab.js?v=6';
 import * as rn from './rename.js?v=1';
 import * as cpv from './canvas-preview.js?v=1';
 import * as zip from './zip.js?v=1';
+import * as assoc from './assoc.js?v=1';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -26,6 +27,7 @@ const state = {
   areas: [], cards: [], query: '', urls: new Map(), dragId: null,
   view: ls.get('view', BOARD), zone: ls.get('zone', 'drafts'), cams: ls.get('cams', {}),
   fresh: new Set(), // 新加入的卡片，渲染时播放入场动画
+  listLimits: new Map(), // 列表区域当前渲染上限（按区域窗口化渲染，避免千卡级 DOM 卡顿）
   folder: ls.get('folder', null), // 「已完成项目」里当前打开的文件夹
   selected: new Set(), // 多选中的卡片
   archCat: ls.get('archCat', 'all'), // 已完成项目的分类筛选
@@ -78,28 +80,51 @@ function ago(ts) {
 
 // ---------- 数据 ----------
 const byOrder = (a, b) => a.order - b.order;
+let areaById = new Map();
+let cardById = new Map();
+let cardsByCol = new Map();
+let indexesDirty = true;
+const invalidateIndexes = () => { indexesDirty = true; };
+function ensureIndexes() {
+  if (!indexesDirty && cardById.size === state.cards.length && areaById.size === state.areas.length) return;
+  areaById = new Map(state.areas.map((a) => [a.id, a]));
+  cardById = new Map(state.cards.map((c) => [c.id, c]));
+  cardsByCol = new Map();
+  for (const c of state.cards) {
+    let arr = cardsByCol.get(c.columnId);
+    if (!arr) cardsByCol.set(c.columnId, (arr = []));
+    arr.push(c);
+  }
+  for (const [colId, arr] of cardsByCol) {
+    if (colId === TRASH) arr.sort((a, b) => (b.trashedAt || 0) - (a.trashedAt || 0));
+    else arr.sort(byOrder);
+  }
+  indexesDirty = false;
+}
 const kindOf = (a) => a.kind || 'column';
 const areasOf = (kind) => state.areas.filter((a) => kindOf(a) === kind).sort(byOrder);
 const columns = () => areasOf('column');
 const zones = () => areasOf('zone');
 const canvases = () => areasOf('canvas');
-const area = (id) => state.areas.find((a) => a.id === id);
+const area = (id) => { ensureIndexes(); return areaById.get(id) || state.areas.find((a) => a.id === id); };
 const isCanvas = (id) => area(id)?.kind === 'canvas';
 const areaName = (id) => id === TRASH ? '回收站' : (area(id)?.title || '未知区域');
 const fallbackZone = () => (area('drafts') ? 'drafts' : zones()[0]?.id);
-const findCard = (id) => state.cards.find((c) => c.id === id);
+const findCard = (id) => { ensureIndexes(); return cardById.get(id) || state.cards.find((c) => c.id === id); };
 const matches = (c) => {
   if (!state.query) return true;
   const q = state.query.toLowerCase();
   return (c.name || '').toLowerCase().includes(q) || (c.text || '').toLowerCase().includes(q);
 };
 function cardsIn(areaId, filtered = true) {
-  let list = state.cards.filter((c) => c.columnId === areaId);
-  if (filtered) list = list.filter(matches);
-  return areaId === TRASH ? list.sort((a, b) => (b.trashedAt || 0) - (a.trashedAt || 0)) : list.sort(byOrder);
+  ensureIndexes();
+  const sorted = cardsByCol.get(areaId) || [];
+  if (!filtered || !state.query) return sorted;
+  const q = state.query.toLowerCase();
+  return sorted.filter((c) => (c.name || '').toLowerCase().includes(q) || (c.text || '').toLowerCase().includes(q));
 }
 function orderAt(areaId, index, excludeId) {
-  const list = cardsIn(areaId, false).filter((c) => c.id !== excludeId);
+  const list = excludeId ? cardsIn(areaId, false).filter((c) => c.id !== excludeId) : cardsIn(areaId, false);
   const prev = list[index - 1], next = list[index];
   if (!prev && !next) return 0;
   if (!prev) return next.order - 1024;
@@ -121,9 +146,10 @@ async function load() {
   const [areas, cards] = await Promise.all([db.getAll('columns'), db.getAll('cards')]);
   state.areas = areas;
   state.cards = cards;
-  const live = new Set(cards.map((c) => c.id));
-  for (const [key, url] of state.urls) if (!live.has(key.replace(/^thumb:/, ''))) { URL.revokeObjectURL(url); state.urls.delete(key); }
-  for (const id of [...pdfDocs.keys()]) if (!live.has(id)) cleanupCanvasPdf(id);
+  invalidateIndexes();
+  ensureIndexes();
+  for (const [key, url] of state.urls) if (!cardById.has(key.replace(/^thumb:/, ''))) { URL.revokeObjectURL(url); state.urls.delete(key); }
+  for (const id of [...pdfDocs.keys()]) if (!cardById.has(id)) cleanupCanvasPdf(id);
   if (state.view !== BOARD && state.view !== ARCHIVE && state.view !== WORKS && state.view !== CANVASES && !isCanvas(state.view)) state.view = BOARD;
   if (state.folder && !area(state.folder)) state.folder = null;
   if (state.work && area(state.work)?.kind !== 'work') state.work = null;
@@ -134,6 +160,7 @@ async function load() {
 let suppressCollabDepth = 0;
 const isCollabSuppressed = () => suppressCollabDepth > 0;
 async function changed() {
+  invalidateIndexes();
   await db.setMeta('lastChange', Date.now());
   if (!isCollabSuppressed() && !collabSession) channel?.postMessage('changed');
   render();
@@ -210,108 +237,25 @@ function metaText(c, t) {
 // 去掉「-预览 / 封面 / 第N页 / 终稿 / v2 / (2) / 日期」等后缀后，名称相同或以「名称 + 分隔符」开头即视为同一项目；
 // 转换生成的文件通过 sourceId 关联到原文件。
 const SEP = '[\\s_\\-–—.·]';
-const SUFFIX = new RegExp(`(${SEP}*(预览图?|封面|缩略图|第\\s*\\d+\\s*页|终稿|定稿|最终版?|修改版|初稿|final|copy|副本|v\\d+(\\.\\d+)*|\\(\\d+\\)|（\\d+）|\\d{8}|\\d{4}-\\d{1,2}-\\d{1,2}))+$`, 'i');
-function baseTitle(c) {
-  let s = (c.name || '').replace(/\.[a-z0-9]{1,6}$/i, '').trim(), prev;
-  do { prev = s; s = s.replace(SUFFIX, '').trim(); } while (s !== prev && s);
-  return s.replace(new RegExp(`${SEP}+$`), '') || (c.name || '').replace(/\.[^.]+$/, '');
-}
+const baseTitle = assoc.baseTitle;
 const isActive = (c) => c.columnId !== TRASH && !['folder', 'work'].includes(area(c.columnId)?.kind);
-
-// ===== 名称关联算法 =====
-// 每两张卡片算一个 0~1 的关联分：
-//   名称分 = 相同 1.0 ｜ 包含（≥3 字）0.92、（2 字）0.7 ｜ 否则 0.45×字符二元组 Dice + 0.55×最长公共片段占比
-//   情境分 = 同一批拖入 +0.15 ｜ 10 分钟内先后加入 +0.05
-// 「IMG_1234 / 截图 / 微信图片 / 未命名」等通用文件名不参与名称匹配。
-const GENERIC = /^(img|dsc|dcim|pxl|mvimg|vid|video|image|photo|scan|screenshot|screen ?shot|截图|屏幕截图|微信图片|未命名|untitled|新建|文档|document|file)[\s_\-]*\d*$/i;
-const normTitle = (c) => baseTitle(c).toLowerCase().replace(new RegExp(SEP, 'g'), '');
-const bigrams = (s) => { const set = new Set(); if (s.length < 2) { if (s) set.add(s); return set; } for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2)); return set; };
-function dice(a, b) { let n = 0; for (const x of a) if (b.has(x)) n++; return a.size + b.size ? (2 * n) / (a.size + b.size) : 0; }
-function lcsLen(a, b) {
-  let best = 0; const prev = new Array(b.length + 1).fill(0);
-  for (let i = 1; i <= a.length; i++) {
-    let diag = 0;
-    for (let j = 1; j <= b.length; j++) {
-      const tmp = prev[j];
-      prev[j] = a[i - 1] === b[j - 1] ? diag + 1 : 0;
-      if (prev[j] > best) best = prev[j];
-      diag = tmp;
-    }
-  }
-  return best;
-}
-function nameScore(a, b) {
-  if (!a || !b) return 0;
-  if (a === b) return 1;
-  const [s, l] = a.length <= b.length ? [a, b] : [b, a];
-  if (s.length >= 2 && l.includes(s)) return s.length >= 3 ? 0.92 : 0.7;
-  const k = lcsLen(a, b);
-  const d = dice(bigrams(a), bigrams(b));
-  return k >= 2 ? 0.45 * d + 0.55 * (k / s.length) : 0.6 * d;
-}
-function pairScore(A, B) {
-  let name = 0;
-  if (!A.generic && !B.generic) name = nameScore(A.key, B.key);
-  let ctx = 0;
-  if (A.c.batchId && A.c.batchId === B.c.batchId) ctx += 0.15;
-  else if (Math.abs((A.c.createdAt || 0) - (B.c.createdAt || 0)) < 10 * 60e3) ctx += 0.05;
-  return name > 0 ? Math.min(0.99, name + ctx) : 0;
-}
-// 灵敏度：自动关联阈值 / 建议阈值
-const SENS = { strict: { auto: 0.95, hint: 0.62, label: '严格' }, normal: { auto: 0.8, hint: 0.5, label: '标准' }, loose: { auto: 0.66, hint: 0.4, label: '宽松' } };
-const sens = () => SENS[ls.get('assoc', 'normal')] || SENS.normal;
+const SENS = assoc.SENS;
+const sensKey = () => (SENS[ls.get('assoc', 'normal')] ? ls.get('assoc', 'normal') : 'normal');
 const dismissed = new Set(ls.get('dismissed', []));
-const pairKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+const pairKey = assoc.pairKey;
+let lastAssocSig = '';
 
-function buildGroups() {
+function buildGroups(force = false) {
+  ensureIndexes();
   const live = state.cards.filter(isActive);
-  const parent = new Map(live.map((c) => [c.id, c.id]));
-  const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
-  const union = (a, b) => { if (parent.has(a) && parent.has(b)) parent.set(find(a), find(b)); };
-  const { auto, hint } = sens();
-  // noAuto：用户手动「从关联中移除」的卡片，不再参与自动匹配
-  const items = live.filter((c) => !c.noAuto).map((c) => { const key = normTitle(c); return { c, key, generic: GENERIC.test(key) || key.length < 2 }; });
-  const hints = [];
-  for (let i = 0; i < items.length; i++) {
-    for (let j = i + 1; j < items.length; j++) {
-      const s = pairScore(items[i], items[j]);
-      if (s >= auto) union(items[i].c.id, items[j].c.id);
-      else if (s >= hint && !dismissed.has(pairKey(items[i].c.id, items[j].c.id))) hints.push([items[i].c.id, items[j].c.id, s]);
-    }
-  }
-  for (const c of live) if (c.sourceId && !c.noAuto && !findCard(c.sourceId)?.noAuto) union(c.id, c.sourceId);
-  // 手动关联：同一个 projectId 一定是同一项目
-  const firstOfProject = new Map();
-  for (const c of live) {
-    if (!c.projectId) continue;
-    if (firstOfProject.has(c.projectId)) union(c.id, firstOfProject.get(c.projectId));
-    else firstOfProject.set(c.projectId, c.id);
-  }
-  const groups = new Map();
-  for (const c of live) { const r = find(c.id); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(c.id); }
-  state.groups = new Map();
-  for (const ids of groups.values()) for (const id of ids) state.groups.set(id, ids);
-
-  // 建议：把「中等分数」连接起来的不同组合并成一条建议
-  const gp = new Map(), gfind = (x) => { while (gp.get(x) !== x) x = gp.get(x); return x; };
-  const best = new Map();
-  for (const [a, b, s] of hints) {
-    const ra = find(a), rb = find(b);
-    if (ra === rb) continue;
-    if (!gp.has(ra)) gp.set(ra, ra);
-    if (!gp.has(rb)) gp.set(rb, rb);
-    const x = gfind(ra), y = gfind(rb);
-    if (x !== y) gp.set(x, y);
-    best.set(ra, Math.max(best.get(ra) || 0, s)); best.set(rb, Math.max(best.get(rb) || 0, s));
-  }
-  const clusters = new Map();
-  for (const r of gp.keys()) { const k = gfind(r); if (!clusters.has(k)) clusters.set(k, []); clusters.get(k).push(r); }
-  state.suggestions = [...clusters.values()].filter((rs) => rs.length > 1).map((rs) => ({
-    ids: rs.flatMap((r) => groups.get(r)),
-    score: Math.max(...rs.map((r) => best.get(r) || 0)),
-  })).sort((a, b) => b.score - a.score);
-  state.suggestOf = new Map();
-  state.suggestions.forEach((s, i) => s.ids.forEach((id) => state.suggestOf.set(id, i)));
+  const key = sensKey();
+  const sig = assoc.computeAssocSignature(live, key, dismissed.size);
+  if (!force && sig === lastAssocSig && state.groups) return;
+  const res = assoc.buildAssocGroups(live, { sensKey: key, dismissed, cardById });
+  state.groups = res.groups;
+  state.suggestions = res.suggestions;
+  state.suggestOf = res.suggestOf;
+  lastAssocSig = sig;
 }
 const suggestionFor = (id) => { const i = state.suggestOf?.get(id); return i == null ? null : state.suggestions[i]; };
 const relatedIds = (id) => state.groups?.get(id) || [id];
@@ -434,15 +378,37 @@ function cardHTML(c, onCanvas = false) {
     <div class="type-icon" style="--c:${t.c}">${esc(ext.slice(0, 4))}</div>
     <div class="body">${name}<div class="meta">${meta}</div></div>${extra}${MORE}</article>`;
 }
+const LIST_PAGE_SIZE = 60;
 function listHTML(areaId, emptyText) {
   const list = cardsIn(areaId);
   if (!list.length) return `<div class="empty">${state.query ? '没有匹配的内容' : emptyText}</div>`;
-  return list.map((c) => cardHTML(c)).join('');
+  const limit = state.listLimits.get(areaId) || LIST_PAGE_SIZE;
+  const slice = list.length > limit ? list.slice(0, limit) : list;
+  const more = list.length > limit
+    ? `<button type="button" class="load-more-cards" data-action="load-more-cards" data-area="${esc(areaId)}">已显示 ${slice.length} / ${list.length} 项 · 向下滚动或点击加载更多</button>`
+    : '';
+  return slice.map((c) => cardHTML(c)).join('') + more;
+}
+function appendMoreCards(areaId, btnEl) {
+  const list = cardsIn(areaId);
+  if (!list.length || !btnEl?.isConnected) return;
+  const prevLimit = state.listLimits.get(areaId) || LIST_PAGE_SIZE;
+  if (prevLimit >= list.length) { btnEl.remove(); return; }
+  const nextLimit = Math.min(list.length, prevLimit + LIST_PAGE_SIZE);
+  state.listLimits.set(areaId, nextLimit);
+  const chunkHTML = list.slice(prevLimit, nextLimit).map((c) => cardHTML(c)).join('');
+  btnEl.insertAdjacentHTML('beforebegin', chunkHTML);
+  const parent = btnEl.parentElement;
+  if (nextLimit >= list.length) btnEl.remove();
+  else btnEl.textContent = `已显示 ${nextLimit} / ${list.length} 项 · 向下滚动或点击加载更多`;
+  loadThumbs(parent || document);
 }
 
 // ---------- 渲染 ----------
 const DOTS = `<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>`;
 function render() {
+  invalidateIndexes();
+  ensureIndexes();
   const before = snapshot();
   buildGroups();
   renderViews();
@@ -485,14 +451,18 @@ function renderSoon() {
 // ---------- 智能动画（FLIP）：卡片移动、排序、尺寸变化时平滑过渡，新卡片入场 ----------
 function snapshot() {
   const m = new Map();
-  if (reduceMotion.matches) return m;
-  $$('.card[data-id]').forEach((el) => { if (el.offsetParent) m.set(el.dataset.id, el.getBoundingClientRect()); });
+  if (reduceMotion.matches || state.cards.length > 120) return m;
+  const mounted = $$('.card[data-id]');
+  if (mounted.length > 60) return m;
+  mounted.forEach((el) => { if (el.offsetParent) m.set(el.dataset.id, el.getBoundingClientRect()); });
   return m;
 }
 function playFlip(before) {
-  if (reduceMotion.matches) { state.fresh.clear(); return; }
+  if (reduceMotion.matches || state.cards.length > 120) { state.fresh.clear(); return; }
+  const mounted = $$('.card[data-id]');
+  if (mounted.length > 60) { state.fresh.clear(); return; }
   let n = 0;
-  $$('.card[data-id]').forEach((el) => {
+  mounted.forEach((el) => {
     if (!el.offsetParent) return;
     const id = el.dataset.id, old = before.get(id);
     const ease = 'cubic-bezier(.2,.8,.2,1)';
@@ -511,52 +481,82 @@ function playFlip(before) {
 }
 async function animateOut(id) {
   const el = $(`.card[data-id="${CSS.escape(id)}"]`);
-  if (!el || !el.offsetParent || reduceMotion.matches) return;
+  if (!el || !el.offsetParent || reduceMotion.matches || state.cards.length > 120) return;
   await el.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(.9)' }], { duration: 170, easing: 'ease-in', fill: 'forwards' }).finished.catch(() => {});
 }
 
-// ---------- 缩略图队列 ----------
+// ---------- 缩略图队列（当前视图优先 + 让出主线程帧预算 + 批量落盘） ----------
 const thumbQ = [], queued = new Set();
 let thumbBusy = false;
 function queueThumbs() {
+  const curFolder = openFolder();
+  const onBoard = state.view === BOARD;
+  const front = [], back = [];
   for (const c of state.cards) {
-    if (c.kind === 'file' && !c.thumb && c.columnId !== TRASH && !queued.has(c.id)) { queued.add(c.id); thumbQ.push(c.id); }
+    if (c.kind === 'file' && !c.thumb && c.columnId !== TRASH && !queued.has(c.id)) {
+      queued.add(c.id);
+      const isCur = c.columnId === state.view || c.columnId === curFolder
+        || (onBoard && area(c.columnId)?.kind === 'column') || c.columnId === state.zone;
+      if (isCur) front.push(c.id);
+      else back.push(c.id);
+    }
   }
+  if (front.length) thumbQ.unshift(...front);
+  if (back.length) thumbQ.push(...back);
   runThumbs();
 }
 const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('超时')), ms))]);
+const THUMB_BATCH = 8;
+const yieldFrame = () => new Promise((r) => setTimeout(r, 20));
 async function runThumbs() {
   if (thumbBusy) return;
   thumbBusy = true;
-  while (thumbQ.length) {
-    const id = thumbQ.shift();
-    queued.delete(id);
-    const c = findCard(id);
-    if (!c || c.thumb) continue;
-    try {
-      const blob = await db.getBlob(id);
-      if (!blob) continue;
-      const r = await withTimeout(pv.makeThumb(c, blob), 45000);
-      if (r?.blob) { await db.putThumb(id, r.blob); c.thumb = 'ok'; c.thumbFit = r.fit; c.info = r.info; }
-      else c.thumb = 'none';
-    } catch (e) {
-      console.warn('预览生成失败', c.name, e);
-      // 离线 / 存储文件夹尚未授权：先停，下次再试，不把卡片标记成「无预览」
-      if (/组件加载失败/.test(e.message) || e.code === 'NEED_PERMISSION') { thumbQ.length = 0; queued.clear(); break; }
-      c.thumb = 'none';
+  const pendingCards = [];
+  let collabNeedSync = false;
+  const flushCards = async () => {
+    if (!pendingCards.length) return;
+    const batch = pendingCards.splice(0, pendingCards.length);
+    await db.putMany('cards', batch);
+    if (collabNeedSync && !isCollabSuppressed()) {
+      collabNeedSync = false;
+      scheduleCollabSync();
     }
-    if (!findCard(id)) continue;
-    await db.put('cards', c);
-    refreshCard(c);
-    if (!isCollabSuppressed() && isCanvas(c.columnId)) scheduleCollabSync();
+  };
+  try {
+    while (thumbQ.length) {
+      const id = thumbQ.shift();
+      queued.delete(id);
+      const c = findCard(id);
+      if (!c || c.thumb) continue;
+      try {
+        const blob = await db.getBlob(id);
+        if (!blob) continue;
+        const r = await withTimeout(pv.makeThumb(c, blob), 15000);
+        if (r?.blob) { await db.putThumb(id, r.blob); c.thumb = 'ok'; c.thumbFit = r.fit; c.info = r.info; }
+        else c.thumb = 'none';
+      } catch (e) {
+        console.warn('预览生成失败', c.name, e);
+        // 离线 / 存储文件夹尚未授权：先停，下次再试，不把卡片标记成「无预览」
+        if (/组件加载失败/.test(e.message) || e.code === 'NEED_PERMISSION') { thumbQ.length = 0; queued.clear(); break; }
+        c.thumb = 'none';
+      }
+      if (!findCard(id)) continue;
+      pendingCards.push(c);
+      if (isCanvas(c.columnId)) collabNeedSync = true;
+      refreshCard(c);
+      if (pendingCards.length >= THUMB_BATCH) await flushCards();
+      await yieldFrame();
+    }
+  } finally {
+    await flushCards().catch(() => {});
+    thumbBusy = false;
   }
-  thumbBusy = false;
 }
 // 只替换这一张卡片的 DOM（不整页重绘，不会打断用户点击 / 悬停），周围卡片用 FLIP 平滑让位
 function refreshCard(c) {
   const els = $$(`.card[data-id="${CSS.escape(c.id)}"]`);
   if (!els.length) return;
-  const skipFlip = $$('.card').length > 60;
+  const skipFlip = state.cards.length > 120 || $$('.card[data-id]').length > 60;
   const before = skipFlip ? null : snapshot();
   for (const el of els) {
     if (el.matches(':active') || el.classList.contains('dragging') || el.classList.contains('lifting')) { renderSoon(); return; }
@@ -2143,14 +2143,58 @@ function scheduleCanvasPdfSharpen() {
     if (isCanvas(state.view)) $$('#world img[data-canvas-pdf]').forEach((img) => ensureCanvasPdf(img));
   }, 220);
 }
-function loadThumbs() {
-  $$('img[data-thumb]:not([src])').forEach(async (img) => {
-    const url = await thumbUrl(img.dataset.thumb);
-    if (!url) return;
-    img.onload = () => img.classList.add('loaded');
-    img.src = url;
+const thumbHydrateQ = [];
+let thumbHydrateActive = 0;
+const THUMB_CONCURRENCY = 6;
+function drainThumbHydrate() {
+  while (thumbHydrateActive < THUMB_CONCURRENCY && thumbHydrateQ.length) {
+    const img = thumbHydrateQ.shift();
+    if (!img || !img.isConnected || img.getAttribute('src')) continue;
+    thumbHydrateActive++;
+    thumbUrl(img.dataset.thumb).then((url) => {
+      if (!url || !img.isConnected) return;
+      img.onload = () => img.classList.add('loaded');
+      img.src = url;
+    }).catch(() => {}).finally(() => {
+      thumbHydrateActive--;
+      drainThumbHydrate();
+    });
+  }
+}
+function enqueueThumbHydrate(img) {
+  if (!img || img._thumbQueued || img.getAttribute('src')) return;
+  img._thumbQueued = true;
+  thumbHydrateQ.push(img);
+  drainThumbHydrate();
+}
+const thumbIO = typeof IntersectionObserver === 'function'
+  ? new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        thumbIO.unobserve(entry.target);
+        enqueueThumbHydrate(entry.target);
+      }
+    }, { rootMargin: '320px' })
+  : null;
+function loadThumbs(root = document) {
+  const scope = root && typeof root.querySelectorAll === 'function' ? root : document;
+  scope.querySelectorAll('img[data-thumb]:not([src])').forEach((img) => {
+    const cached = state.urls.get(`thumb:${img.dataset.thumb}`);
+    if (cached) {
+      img.src = cached;
+      img.classList.add('loaded');
+      return;
+    }
+    if (!thumbIO || img.closest('#modal, #viewer, #world')) {
+      enqueueThumbHydrate(img);
+      return;
+    }
+    if (!img._thumbObserved) {
+      img._thumbObserved = true;
+      thumbIO.observe(img);
+    }
   });
-  loadCanvasMedia();
+  if (scope === document) loadCanvasMedia();
 }
 
 // ---------- 无限画布 ----------
@@ -5153,11 +5197,10 @@ async function doRestore(file) {
 // ---------- 悬停：高亮同项目的关联文件 ----------
 let hoverGroup = null;
 function highlightGroup(id, cls = 'related') {
-  $$(`.card.${cls}`).forEach((el) => el.classList.remove(cls));
-  if (!id) return;
+  if (!id) return highlightIds([], cls);
   const ids = relatedIds(id);
-  if (ids.length < 2 && cls === 'related') return;
-  for (const rid of ids) $$(`.card[data-id="${CSS.escape(rid)}"]`).forEach((el) => el.classList.add(cls));
+  if (ids.length < 2 && cls === 'related') return highlightIds([], cls);
+  highlightIds(ids, cls);
 }
 document.addEventListener('pointerover', (e) => {
   if (e.pointerType !== 'mouse' || press) return;
@@ -5583,8 +5626,11 @@ function pressTargets(id) {
   return relatedIds(id);
 }
 function highlightIds(ids, cls) {
-  $$(`.card.${cls}`).forEach((el) => el.classList.remove(cls));
-  for (const id of ids) $$(`.card[data-id="${CSS.escape(id)}"]`).forEach((el) => el.classList.add(cls));
+  const set = ids.length ? new Set(ids) : null;
+  $$('.card[data-id]').forEach((el) => {
+    const on = Boolean(set && set.has(el.dataset.id));
+    if (el.classList.contains(cls) !== on) el.classList.toggle(cls, on);
+  });
 }
 // 多个名称的公共部分作为默认项目名
 function commonTitle(cards) {
@@ -5833,7 +5879,13 @@ async function acceptSuggestion(id) {
   await linkCards(sg.ids, commonTitle(sg.ids.map(findCard).filter(Boolean)));
 }
 function dismissSuggestion(sg) {
-  for (let i = 0; i < sg.ids.length; i++) for (let j = i + 1; j < sg.ids.length; j++) dismissed.add(pairKey(sg.ids[i], sg.ids[j]));
+  let added = 0;
+  for (let i = 0; i < sg.ids.length && added < 250; i++) {
+    for (let j = i + 1; j < sg.ids.length && added < 250; j++) {
+      dismissed.add(pairKey(sg.ids[i], sg.ids[j]));
+      added++;
+    }
+  }
   ls.set('dismissed', [...dismissed].slice(-3000));
 }
 async function unlinkGroup(ids) {
@@ -6116,6 +6168,7 @@ document.addEventListener('click', async (e) => {
       return;
     }
     case 'accept-suggest': return acceptSuggestion(btn.dataset.id);
+    case 'load-more-cards': return appendMoreCards(btn.dataset.area, btn);
     case 'assoc-panel': return openAssocPanel();
     case 'select': return toggleSelect(cardEl.dataset.id, rangeList);
     case 'sel-done': return completeCards([...state.selected]);
@@ -6333,8 +6386,23 @@ document.addEventListener('paste', async (e) => {
 let searchTimer;
 $('#search').addEventListener('input', (e) => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { state.query = e.target.value.trim(); render(); }, 120);
+  searchTimer = setTimeout(() => { state.query = e.target.value.trim(); state.listLimits.clear(); render(); }, 120);
 });
+let scrollExpandRaf = 0;
+document.addEventListener('scroll', (e) => {
+  const scroller = e.target;
+  if (!scroller?.querySelector) return;
+  if (!scroller.matches('.list, #archiveView, #worksView')) return;
+  if (scrollExpandRaf) return;
+  scrollExpandRaf = requestAnimationFrame(() => {
+    scrollExpandRaf = 0;
+    const btn = scroller.querySelector('.load-more-cards');
+    if (!btn || !btn.isConnected) return;
+    const sr = scroller.getBoundingClientRect();
+    const br = btn.getBoundingClientRect();
+    if (br.top <= sr.bottom + 320) appendMoreCards(btn.dataset.area, btn);
+  });
+}, { passive: true, capture: true });
 $('#fileInput').addEventListener('change', (e) => { addFiles([...e.target.files]); e.target.value = ''; });
 $('#restoreInput').addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) doRestore(f); });
 window.addEventListener('resize', closeMenu);
