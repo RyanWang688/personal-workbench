@@ -311,39 +311,96 @@ body.dragging-folder .cat-chip[data-catdrop] { border-style: dashed; }
 .canvas-directory-head h2 { font-size: 20px; }
 .canvas-directory-head > .btn, .canvas-workspace-head > button { flex: none; }
 .canvas-directory-list {
-  list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
-  gap: 14px; margin: 0; padding: 0;
+  list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+  gap: 16px; margin: 0; padding: 0;
 }
 .canvas-directory-item {
-  display: flex; align-items: center; gap: 4px; min-width: 0; padding-right: 8px;
-  border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+  position: relative; display: flex; flex-direction: column; min-width: 0;
+  border: 1px solid var(--border); border-radius: 14px; background: var(--surface); overflow: hidden;
+  box-shadow: var(--shadow);
   transition: border-color .15s, background .15s, transform .15s, box-shadow .15s;
 }
-.canvas-directory-item:has(.canvas-directory-open:hover) { background: var(--surface-2); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); transform: translateY(-1px); box-shadow: var(--shadow); }
-.canvas-directory-item.canvas-directory-add {
-  border-style: dashed; background: transparent; padding-right: 0;
+.canvas-directory-item:has(.canvas-directory-open:hover) {
+  background: var(--surface-2); border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  transform: translateY(-2px); box-shadow: var(--shadow-lg);
 }
+.canvas-directory-open {
+  display: flex; flex-direction: column; flex: 1; width: 100%; min-width: 0;
+  padding: 0; border: 0; border-radius: 13px; text-align: left; background: transparent;
+}
+.cd-stage {
+  position: relative; display: block; width: 100%; aspect-ratio: 16 / 10; overflow: hidden;
+  background: var(--surface-2);
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--text-3) 34%, transparent) 1px, transparent 1.1px);
+  background-size: 14px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.cd-stage.is-empty { display: grid; place-items: center; }
+.cd-empty-state {
+  display: inline-flex; flex-direction: column; align-items: center; gap: 6px;
+  color: var(--text-3); font-size: 12px; pointer-events: none;
+}
+.cd-empty-state svg {
+  width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.5;
+  stroke-linecap: round; stroke-linejoin: round; opacity: .72;
+}
+.cd-svg, .cd-cards { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.cd-svg { display: block; overflow: hidden; stroke: none; stroke-width: 0; fill: none; }
+.cd-svg text { stroke: none; font-family: inherit; }
+.cd-cards { display: block; overflow: hidden; }
+.cd-mini-card {
+  position: absolute; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--surface); border: 1px solid color-mix(in srgb, var(--border) 90%, var(--text-3));
+  border-radius: 4px; overflow: hidden; box-shadow: 0 1px 3px rgba(0, 0, 0, .14);
+}
+.cd-mini-card.is-img { background: var(--surface-3); }
+.cd-mini-img {
+  display: block; width: 100%; height: 100%; object-fit: cover; opacity: 0;
+  transition: opacity .15s;
+}
+.cd-mini-img.loaded { opacity: 1; }
+.cd-mini-card.is-note { padding: 3px 4px; gap: 2px; background: color-mix(in srgb, #fff1a6 20%, var(--surface)); }
+.cd-mini-note-bar { display: block; width: 42%; height: 2.5px; border-radius: 99px; background: var(--accent); flex: none; }
+.cd-mini-note-tx, .cd-mini-file-tx {
+  display: block; font-size: 8px; line-height: 1.25; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.cd-mini-card.is-file {
+  flex-direction: row; align-items: center; gap: 4px; padding: 2px 4px;
+}
+.cd-mini-dot { width: 6px; height: 6px; border-radius: 2px; background: var(--c, var(--accent)); flex: none; }
+.canvas-directory-foot {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-width: 0;
+  padding: 11px 44px 11px 12px;
+}
+.cd-menu-btn { position: absolute; right: 8px; bottom: 11px; z-index: 2; }
+.canvas-directory-item.canvas-directory-add {
+  border-style: dashed; background: transparent; box-shadow: none;
+}
+.canvas-directory-item.canvas-directory-add .canvas-directory-open {
+  justify-content: center; align-items: center; text-align: center; gap: 10px;
+  padding: 20px 16px; min-height: 220px;
+}
+.canvas-directory-item.canvas-directory-add .canvas-directory-info { justify-items: center; }
 .canvas-directory-item.canvas-directory-add .canvas-directory-icon {
   background: var(--surface-2); color: var(--text-2);
 }
 .canvas-directory-item.canvas-directory-add:has(.canvas-directory-open:hover) {
-  border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); transform: translateY(-2px);
 }
 .canvas-directory-item.canvas-directory-add:has(.canvas-directory-open:hover) .canvas-directory-icon {
   background: var(--accent-soft); color: var(--accent);
 }
 .canvas-directory-item.drop-active { border-color: var(--accent); background: var(--accent-soft); }
-.canvas-directory-item > .icon-btn { flex: none; }
-.canvas-directory-open {
-  display: flex; flex: 1; min-width: 0; align-items: center; gap: 12px;
-  min-height: 78px; padding: 12px; border: 0; border-radius: 11px; text-align: left; background: transparent;
-}
 .canvas-directory-icon {
-  display: grid; flex: none; width: 36px; height: 36px; place-items: center;
+  display: grid; flex: none; width: 34px; height: 34px; place-items: center;
   border-radius: 8px; background: var(--accent-soft); color: var(--accent);
 }
 .canvas-directory-info { display: grid; min-width: 0; gap: 3px; }
-.canvas-directory-info strong { overflow-wrap: anywhere; font-size: 15px; }
+.canvas-directory-info strong {
+  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  overflow-wrap: anywhere; font-size: 15px;
+}
 .canvas-directory-info > span { color: var(--text-2); font-size: 12px; }
 .canvas-workspace { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 /* 画布标题栏：不再单独占一行，浮在画布左上角 */
@@ -359,7 +416,7 @@ body.dragging-folder .cat-chip[data-catdrop] { border-style: dashed; }
   .canvas-workspace-head { left: 28px; top: 10px; max-width: calc(100% - 44px); }
   .canvas-workspace .canvas-palette { top: 58px; }
   .canvas-workspace-head h2 { max-width: 38vw; }
-  .canvas-directory-open { min-height: 66px; }
+  .canvas-directory-item.canvas-directory-add .canvas-directory-open { min-height: 180px; }
 }
 
 /* ---------- 无限画布 ---------- */

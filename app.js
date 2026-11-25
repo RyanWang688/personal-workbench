@@ -2,6 +2,7 @@ import * as db from './db.js?v=6';
 import * as pv from './preview.js?v=7';
 import * as collab from './collab.js?v=6';
 import * as rn from './rename.js?v=1';
+import * as cpv from './canvas-preview.js?v=1';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -576,6 +577,73 @@ function renderViews() {
     <button role="tab" class="view-tab canvas-tab" data-view="${CANVASES}" data-drop="${CANVAS_PICK}" aria-selected="${state.view === CANVASES || isCanvas(state.view)}" aria-controls="${isCanvas(state.view) ? 'canvasWorkspace' : 'canvasDirectory'}" title="查看全部画布工作区">
       ${CANVAS_SVG}画布<b>${canvases().length}</b>${unreadCm ? `<span class="tab-unread-badge" title="${unreadCm} 条未读备注">${unreadCm}</span>` : ''}</button>`;
 }
+function renderCanvasMiniPreview(cv, cards) {
+  const layout = cpv.computeCanvasPreviewLayout(cards, cv.shapes || [], cv.links || [], {
+    getCardWidth: canvasCardW,
+  });
+  if (layout.empty) {
+    return `<span class="cd-empty-state"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>空白画布</span></span>`;
+  }
+
+  const shapesSVG = layout.shapes.map((s) => {
+    const col = (s.fill === 'none' || s.fill == null) ? null : (SH_COLORS[s.fill] || SH_COLORS[0]);
+    const fill = col ? col.bg : 'none';
+    const stroke = col ? col.bd : (s.t === 'text' ? 'none' : 'var(--text-3)');
+    const sw = s.t === 'text' ? 0 : (s.frame ? 1 : 0.9);
+    const dash = s.frame ? ' stroke-dasharray="3 2"' : '';
+    const x = s.x.toFixed(1), y = s.y.toFixed(1), w = s.w.toFixed(1), h = s.h.toFixed(1);
+    const cx = (s.x + s.w / 2).toFixed(1), cy = (s.y + s.h / 2).toFixed(1);
+
+    let body = '';
+    if (s.t === 'diamond') {
+      body = `<polygon points="${cx},${y} ${(s.x + s.w).toFixed(1)},${cy} ${cx},${(s.y + s.h).toFixed(1)} ${x},${cy}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"${dash}/>`;
+    } else if (s.t === 'ellipse') {
+      body = `<ellipse cx="${cx}" cy="${cy}" rx="${(s.w / 2).toFixed(1)}" ry="${(s.h / 2).toFixed(1)}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"${dash}/>`;
+    } else if (s.t !== 'text') {
+      const rx = s.t === 'round' ? Math.min(8, Math.min(s.w, s.h) * 0.22) : (s.t === 'sticky' ? 2.5 : 2);
+      body = `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${rx.toFixed(1)}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"${dash}/>`;
+    }
+
+    let labelSVG = '';
+    const rawLine = String(s.text || '').trim().split(/\r?\n/)[0].trim();
+    if (rawLine && s.w >= 14 && s.h >= 6) {
+      const fs = Math.max(4.5, Math.min(11, s.fs || 6.5));
+      const maxChars = Math.max(2, Math.floor((s.w - 4) / Math.max(3.8, fs * 0.65)));
+      const label = rawLine.length > maxChars ? `${rawLine.slice(0, maxChars - 1)}…` : rawLine;
+      const anchor = s.al === 'left' ? 'start' : 'middle';
+      const tx = (s.al === 'left' ? s.x + 3 : s.x + s.w / 2).toFixed(1);
+      const topAlign = s.va === 'top' || s.frame;
+      const ty = (topAlign ? s.y + fs + 2 : s.y + s.h / 2).toFixed(1);
+      const tc = col ? '#1f2023' : 'var(--text)';
+      labelSVG = `<text x="${tx}" y="${ty}" fill="${tc}" stroke="none" font-size="${fs.toFixed(1)}" font-weight="${s.b || s.frame ? 700 : 500}" text-anchor="${anchor}" dominant-baseline="${topAlign ? 'auto' : 'central'}">${esc(label)}</text>`;
+    }
+    return body + labelSVG;
+  }).join('');
+
+  const linksSVG = layout.links.map((l) => {
+    const stroke = l.color || 'var(--text-2)';
+    const dash = l.dash ? ' stroke-dasharray="3 2"' : '';
+    const heads = l.heads.map((hd) => `<path d="${hd}" fill="${esc(stroke)}" stroke="none"/>`).join('');
+    return `<path d="${l.d}" fill="none" stroke="${esc(stroke)}" stroke-width="1.2" stroke-linecap="round"${dash}/>${heads}`;
+  }).join('');
+
+  const cardsHTML = layout.cards.map((c) => {
+    const pos = `left:${c.leftPct.toFixed(3)}%;top:${c.topPct.toFixed(3)}%;width:${c.widthPct.toFixed(3)}%;height:${c.heightPct.toFixed(3)}%`;
+    if (c.card.kind === 'note') {
+      const tx = (c.card.name || c.card.text || '便签').trim().slice(0, 18);
+      return `<span class="cd-mini-card is-note" style="${pos}"><span class="cd-mini-note-bar"></span><span class="cd-mini-note-tx">${esc(tx)}</span></span>`;
+    }
+    const fam = pv.family(c.card);
+    const cachedSrc = state.urls.get(`thumb:${c.id}`) || (fam === 'image' ? state.urls.get(c.id) : null) || '';
+    if (cachedSrc || c.card.thumb === 'ok') {
+      return `<span class="cd-mini-card is-img" style="${pos}"><img class="cd-mini-img${cachedSrc ? ' loaded' : ''}" ${cachedSrc ? `src="${cachedSrc}"` : `data-thumb="${c.id}"`} alt="" draggable="false"></span>`;
+    }
+    const t = typeOf(c.card);
+    return `<span class="cd-mini-card is-file" style="${pos}"><span class="cd-mini-dot" style="--c:${t.c}"></span><span class="cd-mini-file-tx">${esc((c.card.name || '').slice(0, 16))}</span></span>`;
+  }).join('');
+
+  return `<svg class="cd-svg" viewBox="0 0 ${layout.width} ${layout.height}" preserveAspectRatio="xMidYMid meet">${shapesSVG}${linksSVG}</svg><span class="cd-cards">${cardsHTML}</span>`;
+}
 function renderCanvasDirectory() {
   const list = canvases();
   const totalCards = list.reduce((n, cv) => n + cardsIn(cv.id, false).length, 0);
@@ -588,16 +656,23 @@ function renderCanvasDirectory() {
     </div>
     <button type="button" class="btn primary" data-action="add-canvas"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新建画布</span></button>
     </header>
-    <ul class="canvas-directory-list">${list.map((cv) => `<li class="canvas-directory-item" data-drop="${esc(cv.id)}">
+    <ul class="canvas-directory-list">${list.map((cv) => {
+      const cvCards = cardsIn(cv.id, false);
+      const isEmpty = !cvCards.length && !(cv.shapes?.length) && !(cv.links?.length);
+      return `<li class="canvas-directory-item" data-drop="${esc(cv.id)}">
       <button type="button" class="canvas-directory-open" data-view="${esc(cv.id)}" aria-label="打开画布 ${esc(cv.title)}">
-        <span class="canvas-directory-icon">${CANVAS_SVG}</span>
-        <span class="canvas-directory-info">
-          <strong>${esc(cv.title)}${collabSession?.canvasId === cv.id ? '<span class="canvas-live-pill">多人协作中</span>' : ''}</strong>
-          <span>${cardsIn(cv.id, false).length} 张卡片${cv.shapes?.length ? ` · ${cv.shapes.length} 个白板对象` : ''}${cv.comments?.length ? ` · ${cv.comments.length} 条备注` : ''}</span>
+        <span class="cd-stage${isEmpty ? ' is-empty' : ''}" aria-hidden="true">${renderCanvasMiniPreview(cv, cvCards)}</span>
+        <span class="canvas-directory-foot">
+          <span class="canvas-directory-icon">${CANVAS_SVG}</span>
+          <span class="canvas-directory-info">
+            <strong>${esc(cv.title)}${collabSession?.canvasId === cv.id ? '<span class="canvas-live-pill">多人协作中</span>' : ''}</strong>
+            <span>${cvCards.length} 张卡片${cv.shapes?.length ? ` · ${cv.shapes.length} 个白板对象` : ''}${cv.comments?.length ? ` · ${cv.comments.length} 条备注` : ''}</span>
+          </span>
         </span>
       </button>
-      <button type="button" class="icon-btn" data-action="canvas-menu" data-id="${esc(cv.id)}" aria-label="管理画布 ${esc(cv.title)}" aria-haspopup="menu">${DOTS}</button>
-    </li>`).join('')}
+      <button type="button" class="icon-btn cd-menu-btn" data-action="canvas-menu" data-id="${esc(cv.id)}" aria-label="管理画布 ${esc(cv.title)}" aria-haspopup="menu">${DOTS}</button>
+    </li>`;
+    }).join('')}
     <li class="canvas-directory-item canvas-directory-add">
       <button type="button" class="canvas-directory-open" data-action="add-canvas" aria-label="新建画布">
         <span class="canvas-directory-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></span>
@@ -607,6 +682,7 @@ function renderCanvasDirectory() {
         </span>
       </button>
     </li></ul>`;
+  loadThumbs();
 }
 function renderBoard() {
   const board = $('#board');
