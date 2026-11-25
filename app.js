@@ -2886,16 +2886,13 @@ vp.addEventListener('dblclick', async (e) => {
   }
   if (hit.closest('.card, .fmt-bar, .canvas-palette, .canvas-tools, .canvas-workspace-head') || e.target.closest('.card, .fmt-bar')) return;
   const sh = hit.closest('.shape') || e.target.closest('.shape');
-  // 画框：双击标题改名；双击框内空白处 → 在那里贴一张便签
+  // 画框：只有双击标题才改名；双击框内空白处不做任何事
   const inFrameBody = sh?.classList.contains('st-frame') && !hit.closest('.sh-tx');
   if (sh && !inFrameBody) return editingShape === sh.dataset.sid ? undefined : startEdit(sh.dataset.sid);
   if (editingShape) return;
   const ln = hit.closest('[data-lid]') || e.target.closest('[data-lid]');
   if (ln) return editLinkLabel(ln.dataset.lid);
-  const p = toWorld(e.clientX, e.clientY);
-  // 双击点落在某个形状范围内（比如刚重绘过）也不新建
-  if (boardOf()?.shapes.some((s) => !isFrame(s) && p.x >= s.x && p.x <= s.x + s.w && p.y >= s.y && p.y <= s.y + s.h)) return;
-  await createShape('sticky', p.x - 100, p.y - 100);
+  // 双击空白处不再自动新建便签（用左侧工具栏的便签工具或按 N）
 });
 
 // ---------- 画布白板：便签、形状、文字、箭头连线（存于画布区域的 shapes / links） ----------
