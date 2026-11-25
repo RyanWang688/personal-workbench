@@ -199,6 +199,9 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .archive-tab svg { color: var(--ok); }
 .store-tab svg { color: #1098ad; }
 .store-tab.drop-active { background: color-mix(in srgb, #1098ad 18%, var(--surface)); border-color: #1098ad; }
+/* 拖着项目文件夹经过顶部标签：放大提示可以松手移过去 */
+.view-tab.folder-drop { transform: scale(1.08); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent); transition: transform .15s ease; }
+.store-hint { margin: 18px 2px 0; padding: 12px 14px; border: 1px dashed var(--border); border-radius: 10px; color: var(--text-3); font-size: 13px; line-height: 1.6; }
 .archive-view { flex: 1; min-width: 0; overflow-y: auto; padding: 14px 20px 32px; }
 .archive-head { display: flex; align-items: center; gap: 12px; margin: 0 0 20px; }
 .archive-head .crumb { margin-bottom: 2px; }

@@ -151,7 +151,16 @@ function orderAt(areaId, index, excludeId) {
 const topOrder = (areaId) => Math.max(0, ...cardsIn(areaId, false).map((c) => c.order), ...(area(areaId)?.shapes || []).map((s) => s.z || 0)) + 1;
 // 当前「默认投放位置」：看板 → 第一列；画布 → 画布视野中央
 const folders = () => areasOf('folder');
-const openFolder = () => (state.view === ARCHIVE && area(state.folder)?.kind === 'folder' ? state.folder : null);
+// 项目文件夹可以整个移进云仓库：根文件夹带 stored 标记，子文件夹跟着根走
+const rootFolderOf = (f) => { let r = f, i = 0; for (let p = parentOf(r); p && i < 50; p = parentOf(r), i++) r = p; return r; };
+const isStoredFolder = (f) => f?.kind === 'folder' && !!rootFolderOf(f)?.stored;
+const openFolder = () => {
+  const f = area(state.folder);
+  if (f?.kind !== 'folder') return null;
+  if (state.view === ARCHIVE && !isStoredFolder(f)) return f.id;
+  if (state.view === STORE && isStoredFolder(f)) return f.id;
+  return null;
+};
 function defaultTarget() {
   if (isCanvas(state.view)) return state.view;
   if (openFolder()) return openFolder();
@@ -528,7 +537,7 @@ function visibleThumbCandidates() {
   };
   if (state.view === BOARD) {
     for (const col of columns()) takeArea(col.id, state.listLimits.get(col.id) || LIST_PAGE_SIZE, true);
-  } else if (state.view === ARCHIVE) {
+  } else if (state.view === ARCHIVE || (state.view === STORE && openFolder())) {
     const fid = openFolder();
     if (fid) {
       const subs = childFolders(fid);
@@ -538,7 +547,7 @@ function visibleThumbCandidates() {
       }
       takeArea(fid, state.listLimits.get(fid) || LIST_PAGE_SIZE, true);
     } else {
-      const roots = rootFolders();
+      const roots = rootFolders().filter((f) => !f.stored);
       for (let i = 0; i < Math.min(roots.length, 60); i++) {
         const dc = deepCards(roots[i].id);
         for (let j = 0; j < Math.min(dc.length, 4); j++) pushCard(dc[j], true);
@@ -557,7 +566,10 @@ function visibleThumbCandidates() {
     // 云仓库：打开的文件夹 → 它的文件；首页 → 每个文件夹前 4 个（封面）
     const sid = area(state.shelf)?.kind === 'shelf' ? state.shelf : null;
     if (sid) takeArea(sid, state.listLimits.get(sid) || LIST_PAGE_SIZE, true);
-    else for (const s of areasOf('shelf').slice(0, 60)) takeArea(s.id, 4, true);
+    else {
+      for (const s of areasOf('shelf').slice(0, 60)) takeArea(s.id, 4, true);
+      for (const f of storedFolders().slice(0, 60)) { const dc = deepCards(f.id); for (let j = 0; j < Math.min(dc.length, 4); j++) pushCard(dc[j], true); }
+    }
   }
   const draftsOpen = !draftsCollapsed() || document.body.classList.contains('drafts-open');
   if (draftsOpen && state.zone !== TRASH) {
@@ -648,11 +660,11 @@ function renderViews() {
     <button role="tab" class="view-tab" data-view="${BOARD}" aria-selected="${state.view === BOARD}">
       <svg viewBox="0 0 24 24"><rect x="4" y="4" width="4.5" height="16" rx="1"/><rect x="10" y="4" width="4.5" height="11" rx="1"/><rect x="16" y="4" width="4" height="7" rx="1"/></svg>看板<b>${boardCount}</b></button>
     <button role="tab" class="view-tab archive-tab" data-view="${ARCHIVE}" data-drop="${PICK}" aria-selected="${state.view === ARCHIVE}" title="彻底完成的项目归档在这里；把卡片拖到这里即可归档">
-      ${FOLDER_SVG}已完成项目<b>${folders().length}</b></button>
+      ${FOLDER_SVG}已完成项目<b>${folders().filter((f) => !isStoredFolder(f)).length}</b></button>
     <button role="tab" class="view-tab works-tab" data-view="${WORKS}" aria-selected="${state.view === WORKS}" title="个人作品：网站、设计、项目，含更新日志和在线预览">
       ${WORK_SVG}作品<b>${works().length}</b></button>
     <button role="tab" class="view-tab store-tab" data-view="${STORE}" data-drop="${esc(shelves()[0]?.id || '')}" aria-selected="${state.view === STORE}" title="云仓库：长期保存的文件，不会被自动清理；把卡片或文件拖到这里即可存入">
-      ${STORE_SVG}云仓库<b>${shelfCards().length}</b></button>
+      ${STORE_SVG}云仓库<b>${shelfCards().length + storedFolders().reduce((n, f) => n + deepCards(f.id).length, 0)}</b></button>
     <span class="view-sep" aria-hidden="true"></span>
     <button role="tab" class="view-tab canvas-tab" data-view="${CANVASES}" data-drop="${CANVAS_PICK}" aria-selected="${state.view === CANVASES || isCanvas(state.view)}" aria-controls="${isCanvas(state.view) ? 'canvasWorkspace' : 'canvasDirectory'}" title="查看全部画布工作区">
       ${CANVAS_SVG}画布<b>${canvases().length}</b>${unreadCm ? `<span class="tab-unread-badge" title="${unreadCm} 条未读备注">${unreadCm}</span>` : ''}</button>`;
@@ -849,10 +861,16 @@ function folderTile(f) {
 function renderArchive() {
   const el = $('#archiveView');
   const fid = openFolder();
-  if (fid) {
+  if (fid) return renderFolderPage(el, fid);
+  return renderArchiveRoot(el);
+}
+// 文件夹详情页：已完成项目和云仓库共用（云仓库里的项目文件夹面包屑根是「云仓库」）
+function renderFolderPage(el, fid) {
+  {
     const f = area(fid), n = deepCards(fid).length, subs = childFolders(fid);
     const own = cardsIn(fid, false).length;
-    const crumbs = [`<button class="crumb-link" data-goto="" data-folderdrop="">已完成项目</button>`,
+    const stored = isStoredFolder(f);
+    const crumbs = [`<button class="crumb-link" data-goto="" data-folderdrop="">${stored ? '云仓库' : '已完成项目'}</button>`,
       ...ancestors(f).map((a) => `<button class="crumb-link" data-goto="${a.id}" data-folderdrop="${a.id}">${esc(a.title)}</button>`)].join('<span>/</span>') + '<span>/</span>';
     el.innerHTML = `
       <header class="archive-head" style="--fc:${folderColor(f)}">
@@ -860,7 +878,7 @@ function renderArchive() {
         <div class="ah-text">
           <div class="crumb">${crumbs}</div>
           <h2><span class="title-sw" aria-hidden="true"></span>${esc(f.title)}</h2>
-          <div class="meta">${folderMeta(f)} · 归档于 ${fmtDate(f.doneAt || Date.now())}</div>
+          <div class="meta">${folderMeta(f)} · ${stored ? '长期保存 · ' : ''}归档于 ${fmtDate(f.doneAt || Date.now())}</div>
         </div>
         <button class="btn primary" data-action="add-files"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0-4 4m4-4 4 4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg><span>上传文件 / 文件夹</span></button>
         <button class="btn" data-action="batch-rename-folder" ${own ? '' : 'disabled'} title="逐张预览或按序号一键批量重命名当前文件夹内的文件（F2）"><svg viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="m13.5 6.5 3 3"/></svg><span>快速重命名</span></button>
@@ -871,11 +889,12 @@ function renderArchive() {
       ${subs.length ? `<section class="cat-sec"><h3 class="cat-h"><span>子文件夹</span><b>${subs.length}</b></h3><div class="folder-grid">${subs.map(folderTile).join('')}</div></section>` : ''}
       <section class="cat-sec"><h3 class="cat-h"><span>文件</span><b>${own}</b></h3>
       <div class="list folder-list" data-col="${fid}">${listHTML(fid, subs.length ? '把卡片拖到这里，或拖到上面的子文件夹里' : '把卡片或文件拖到这里归档；也可以「新建子文件夹」再细分')}</div></section>`;
-    return;
   }
+}
+function renderArchiveRoot(el) {
   const q = state.query.toLowerCase();
-  // 顶层只显示根文件夹；搜索时子文件夹里的名称 / 文件命中也算
-  const all = rootFolders().filter((f) => !q || [f, ...descendantIds(f.id).map(area)].some((x) => x.title.toLowerCase().includes(q) || cardsIn(x.id).length));
+  // 顶层只显示根文件夹（移进云仓库的不算）；搜索时子文件夹里的名称 / 文件命中也算
+  const all = rootFolders().filter((f) => !f.stored).filter((f) => !q || [f, ...descendantIds(f.id).map(area)].some((x) => x.title.toLowerCase().includes(q) || cardsIn(x.id).length));
   const cats = allCats();
   const cur = state.archCat === '__none' || cats.includes(state.archCat) ? state.archCat : 'all';
   const inCat = (name) => all.filter((f) => (name === '__none' ? !f.category || !cats.includes(f.category) : f.category === name));
@@ -911,7 +930,27 @@ const shelves = () => areasOf('shelf');
 const openShelf = () => (state.view === STORE && area(state.shelf)?.kind === 'shelf' ? state.shelf : null);
 const shelfCards = () => shelves().flatMap((s) => cardsIn(s.id, false));
 const shelfColor = (s) => FCOLORS[(s.color ?? Math.max(0, shelves().indexOf(s)) + 1) % FCOLORS.length].c;
-const inStore = (c) => area(c?.columnId)?.kind === 'shelf';
+const storedFolders = () => rootFolders().filter((f) => f.stored);
+const inStore = (c) => { const a = area(c?.columnId); return a?.kind === 'shelf' || isStoredFolder(a); };
+// 已完成项目 ⇄ 云仓库：整个文件夹（连同子文件夹和全部文件）一起移动，可撤销
+async function setFolderStored(f, on) {
+  if (!f || f.kind !== 'folder') return;
+  const prevParent = f.parentId, prevStored = !!f.stored;
+  if (on) { delete f.parentId; f.stored = true; } else delete f.stored;
+  if ((prevParent || null) === (f.parentId || null) && prevStored === !!f.stored) return;
+  await saveArea(f);
+  if (state.folder === f.id || descendantIds(f.id).includes(state.folder)) { state.folder = null; ls.set('folder', null); }
+  await changed();
+  const tab = $(on ? '.store-tab' : '.archive-tab');
+  if (tab && !reduceMotion.matches) tab.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.14)', offset: 0.35 }, { transform: 'scale(1)' }], { duration: 480, easing: 'ease-out' });
+  toast(on ? `「${f.title}」已移到云仓库（${deepCards(f.id).length} 个文件）` : `「${f.title}」已移回已完成项目`, {
+    action: '撤销', onAction: async () => {
+      if (prevParent) f.parentId = prevParent; else delete f.parentId;
+      if (prevStored) f.stored = true; else delete f.stored;
+      await saveArea(f); await changed();
+    },
+  });
+}
 function shelfTile(s) {
   const list = cardsIn(s.id, false), size = list.reduce((n, c) => n + (c.size || 0), 0);
   return `<div class="folder shelf" role="button" tabindex="0" data-shelf="${s.id}" data-drop="${s.id}" style="--fc:${shelfColor(s)}" aria-label="云仓库文件夹 ${esc(s.title)}，${list.length} 个文件" title="点开查看；把卡片或文件拖到这里即可存入">
@@ -925,6 +964,8 @@ function shelfTile(s) {
 function renderStore() {
   const el = $('#storeView');
   const UPLOAD = `<svg viewBox="0 0 24 24"><path d="M12 16V4m0 0-4 4m4-4 4 4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg>`;
+  const fid = openFolder(); // 从已完成项目移过来的项目文件夹
+  if (fid) return renderFolderPage(el, fid);
   const sid = openShelf();
   if (sid) {
     const s = area(sid), list = cardsIn(sid, false), size = list.reduce((n, c) => n + (c.size || 0), 0);
@@ -943,9 +984,10 @@ function renderStore() {
       <div class="list folder-list store-list" data-col="${sid}">${listHTML(sid, '把文件或卡片拖到这里长期保存；也可以点右上角「存入文件」')}</div>`;
     return;
   }
-  const all = shelfCards(), size = all.reduce((n, c) => n + (c.size || 0), 0);
   const q = state.query.toLowerCase();
   const list = shelves().filter((s) => !q || s.title.toLowerCase().includes(q) || cardsIn(s.id).length);
+  const projs = storedFolders().filter((f) => !q || [f, ...descendantIds(f.id).map(area)].some((x) => x.title.toLowerCase().includes(q) || cardsIn(x.id).length));
+  const all = [...shelfCards(), ...storedFolders().flatMap((f) => deepCards(f.id))], size = all.reduce((n, c) => n + (c.size || 0), 0);
   el.innerHTML = `
     <header class="archive-head">
       <div class="ah-text">
@@ -955,7 +997,9 @@ function renderStore() {
       <button class="btn" data-action="add-files">${UPLOAD}<span>存入文件</span></button>
       <button class="btn primary" data-action="add-shelf"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>新建文件夹</span></button>
     </header>
-    ${list.length ? `<div class="folder-grid">${list.map(shelfTile).join('')}</div>` : `<div class="archive-empty slim"><b>没有匹配的文件夹</b></div>`}`;
+    ${list.length ? `<div class="folder-grid">${list.map(shelfTile).join('')}</div>` : `<div class="archive-empty slim"><b>没有匹配的文件夹</b></div>`}
+    ${projs.length ? `<section class="cat-sec"><h3 class="cat-h"><span>项目文件夹</span><b>${projs.length}</b></h3><div class="folder-grid">${projs.map(folderTile).join('')}</div></section>`
+      : (!q && rootFolders().length ? `<div class="store-hint">提示：在「已完成项目」里把项目文件夹拖到顶部「云仓库」标签上（或在文件夹菜单里选「移到云仓库」），整个项目连同子文件夹会一起移过来。</div>` : '')}`;
 }
 // 从云仓库删除文件：再确认一次（几秒内的连续删除只问一次）
 let storeDeleteOkAt = 0;
@@ -1054,14 +1098,15 @@ async function nestFolder(srcId, dstId, dEl) {
   const src = area(srcId), dst = dstId ? area(dstId) : null;
   if (!src || src === dst) return;
   if (dst && descendantIds(srcId).includes(dstId)) return toast('不能把文件夹放进它自己的子文件夹里', { error: true });
-  const prevParent = src.parentId;
+  const prevParent = src.parentId, prevStored = !!src.stored, wasStored = isStoredFolder(src);
   if ((prevParent || null) === (dstId || null)) return;
   await flyInto($(`.folder[data-folder="${CSS.escape(srcId)}"]`), dEl || (dstId && $(`.folder[data-folder="${CSS.escape(dstId)}"]`)));
-  if (dstId) src.parentId = dstId; else delete src.parentId;
+  if (dstId) { src.parentId = dstId; delete src.stored; } // 放进别的文件夹：跟着新上级走
+  else { delete src.parentId; if (wasStored) src.stored = true; } // 移到顶层：留在原来所在的那一边
   await saveArea(src);
   await changed();
   toast(dst ? `「${src.title}」已放进「${dst.title}」` : `「${src.title}」已移到顶层`, {
-    action: '撤销', onAction: async () => { if (prevParent) src.parentId = prevParent; else delete src.parentId; await saveArea(src); await changed(); },
+    action: '撤销', onAction: async () => { if (prevParent) src.parentId = prevParent; else delete src.parentId; if (prevStored) src.stored = true; else delete src.stored; await saveArea(src); await changed(); },
   });
 }
 async function mergeFolders(srcId, dstId) {
@@ -1106,6 +1151,15 @@ async function mergeFolders(srcId, dstId) {
   });
 }
 let dragFolder = null;
+// 拖文件夹到顶部标签：未入库的 → 「云仓库」，云仓库里的 → 「已完成项目」；还有云仓库首页的仓库文件夹也能接住项目文件夹
+function folderSideTab(target) {
+  const f = area(dragFolder);
+  if (!f) return null;
+  const stored = isStoredFolder(f);
+  const tab = target.closest?.('.view-tab.store-tab, .view-tab.archive-tab');
+  if (tab) return tab.classList.contains('store-tab') !== stored ? tab : null;
+  return null;
+}
 document.addEventListener('dragstart', (e) => {
   const f = e.target.closest?.('.folder[data-folder]');
   if (!f || e.target.closest('.card')) return;
@@ -1122,8 +1176,10 @@ document.addEventListener('dragover', (e) => {
   const t = e.target.closest?.('.folder[data-folder]');
   const chipEl = e.target.closest?.('.cat-chip[data-catdrop]');
   const crumb = e.target.closest?.('[data-folderdrop]');
+  const sideTab = folderSideTab(e.target);
   $$('.folder.merge-target').forEach((el) => { if (el !== t) el.classList.remove('merge-target', 'nest-mode'); });
-  $$('.cat-chip.drop-active, .crumb-link.drop-active').forEach((el) => { if (el !== chipEl && el !== crumb) el.classList.remove('drop-active'); });
+  $$('.cat-chip.drop-active, .crumb-link.drop-active, .view-tab.folder-drop').forEach((el) => { if (el !== chipEl && el !== crumb && el !== sideTab) el.classList.remove('drop-active', 'folder-drop'); });
+  if (sideTab) { e.preventDefault(); e.stopImmediatePropagation(); e.dataTransfer.dropEffect = 'move'; sideTab.classList.add('drop-active', 'folder-drop'); return; }
   if (chipEl && !parentOf(area(dragFolder))) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; chipEl.classList.add('drop-active'); return; }
   if (crumb) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; crumb.classList.add('drop-active'); return; }
   if (!t || t.dataset.folder === dragFolder) return;
@@ -1138,6 +1194,8 @@ document.addEventListener('dragover', (e) => {
 document.addEventListener('drop', (e) => {
   if (!dragFolder) return;
   const src = dragFolder;
+  const sideTab = folderSideTab(e.target);
+  if (sideTab) { e.preventDefault(); e.stopImmediatePropagation(); sideTab.classList.remove('drop-active', 'folder-drop'); return setFolderStored(area(src), sideTab.classList.contains('store-tab')); }
   const chipEl = e.target.closest?.('.cat-chip[data-catdrop]');
   if (chipEl && !parentOf(area(src))) { e.preventDefault(); const f = area(src); if (f) setFolderCat(f, chipEl.dataset.catdrop || null); return; }
   const crumb = e.target.closest?.('[data-folderdrop]');
@@ -1152,7 +1210,7 @@ document.addEventListener('dragend', () => {
   if (!dragFolder) return;
   dragFolder = null;
   document.body.classList.remove('dragging-folder');
-  $$('.folder-dragging, .merge-target, .cat-chip.drop-active, .crumb-link.drop-active').forEach((el) => el.classList.remove('folder-dragging', 'merge-target', 'nest-mode', 'drop-active'));
+  $$('.folder-dragging, .merge-target, .cat-chip.drop-active, .crumb-link.drop-active, .view-tab.folder-drop').forEach((el) => el.classList.remove('folder-dragging', 'merge-target', 'nest-mode', 'drop-active', 'folder-drop'));
 });
 
 async function addSubfolder(parentId) {
@@ -5817,6 +5875,8 @@ function areaMenu(anchor, a) {
   if (kind === 'folder') {
     items.push({ text: '新建子文件夹…', run: () => addSubfolder(a.id) });
     items.push({ text: '打包下载 zip', run: () => zipFolder(a) });
+    if (!isStoredFolder(a)) items.push({ text: parentOf(a) ? '移到云仓库（单独成一个项目）' : '移到云仓库（长期保存）', run: () => setFolderStored(a, true) });
+    else if (!parentOf(a)) items.push({ text: '移回已完成项目', run: () => setFolderStored(a, false) });
     if (!parentOf(a)) {
       items.push({ label: '分类' });
       allCats().forEach((c) => items.push({ text: c, checked: a.category === c, run: () => setFolderCat(a, c) }));
@@ -6564,7 +6624,7 @@ async function completeCards(ids, title) {
     if (!title) return;
   }
   clearSelection();
-  let folder = rootFolders().find((f) => f.title === title);
+  let folder = rootFolders().find((f) => f.title === title && !f.stored); // 已移进云仓库的不再并入
   const isNew = !folder;
   await playPackAnimation(cards, title);
   if (!folder) folder = await createFolder(title);
@@ -7011,7 +7071,7 @@ document.addEventListener('click', async (e) => {
   if (viewTab && !btn) {
     if (viewTab.dataset.view === ARCHIVE && state.view === ARCHIVE) { state.folder = null; ls.set('folder', null); }
     if (viewTab.dataset.view === WORKS && state.view === WORKS) { state.work = null; ls.set('work', null); }
-    if (viewTab.dataset.view === STORE && state.view === STORE) { state.shelf = null; ls.set('shelf', null); }
+    if (viewTab.dataset.view === STORE && state.view === STORE) { state.shelf = null; ls.set('shelf', null); if (openFolder()) { state.folder = null; ls.set('folder', null); } }
     const next = viewTab.dataset.view;
     setView(next);
     render();
