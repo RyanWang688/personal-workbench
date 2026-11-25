@@ -997,9 +997,11 @@ function renderStore() {
       <button class="btn" data-action="add-files">${UPLOAD}<span>存入文件</span></button>
       <button class="btn primary" data-action="add-shelf"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>新建文件夹</span></button>
     </header>
-    ${list.length ? `<div class="folder-grid">${list.map(shelfTile).join('')}</div>` : `<div class="archive-empty slim"><b>没有匹配的文件夹</b></div>`}
-    ${projs.length ? `<section class="cat-sec"><h3 class="cat-h"><span>项目文件夹</span><b>${projs.length}</b></h3><div class="folder-grid">${projs.map(folderTile).join('')}</div></section>`
-      : (!q && rootFolders().length ? `<div class="store-hint">提示：在「已完成项目」里把项目文件夹拖到顶部「云仓库」标签上（或在文件夹菜单里选「移到云仓库」），整个项目连同子文件夹会一起移过来。</div>` : '')}`;
+    ${list.length || projs.length
+      // 项目文件夹和仓库文件夹放在同一个网格里，不再分成两块；有内容的排前面，空的默认文件夹排最后
+      ? `<div class="folder-grid">${[...projs.map(folderTile), ...list.filter((s) => cardsIn(s.id, false).length).map(shelfTile), ...list.filter((s) => !cardsIn(s.id, false).length).map(shelfTile)].join('')}</div>`
+      : `<div class="archive-empty slim"><b>没有匹配的文件夹</b></div>`}
+    ${!q && !projs.length && rootFolders().length ? `<div class="store-hint">提示：在「已完成项目」里把项目文件夹拖到顶部「云仓库」标签上（或在文件夹菜单里选「移到云仓库」），整个项目连同子文件夹会一起移过来。</div>` : ''}`;
 }
 // 从云仓库删除文件：再确认一次（几秒内的连续删除只问一次）
 let storeDeleteOkAt = 0;
