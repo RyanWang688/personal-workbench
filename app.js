@@ -1345,6 +1345,87 @@ async function zipFolder(f) {
   }
 }
 
+// ---------- 发给 Agent：把文件以原名写进本地「导出文件夹」，并把完整路径复制到剪贴板 ----------
+// 网页拖出去的只是浏览器里的数据，Claude Code / Codex / Antigravity 这些桌面 Agent 要的是硬盘上的真实路径，
+// 所以先写到磁盘，再给路径（在 Agent 里 Ctrl+V 粘贴即可）。文件夹句柄和它的完整路径存在 meta 'agentOut'。
+const AGENT_SVG = '<svg viewBox="0 0 24 24"><path d="M4 12h11m-4-4 4 4-4 4"/><rect x="15" y="5" width="5" height="14" rx="1.5"/></svg>';
+let agentOut; // { handle, path } | null
+const agentCfg = async () => { if (agentOut === undefined) agentOut = await db.getMeta('agentOut', null).catch(() => null); return agentOut; };
+async function setupAgentFolder() {
+  if (typeof window.showDirectoryPicker !== 'function') { toast('当前浏览器不支持写入本地文件夹，请用 Chrome 或 Edge', { error: true }); return null; }
+  let handle = agentOut?.handle || null;
+  const path = await dialog(`<h3>设置「发给 Agent」的文件夹</h3>
+    <p class="stor-note">「发给 Agent」会把文件以原名存进这个文件夹，并把它的完整路径复制到剪贴板；在 Claude Code、Codex、Antigravity 里按 <b>Ctrl+V</b> 粘贴路径，它们就能直接读取文件。建议新建一个专用文件夹，例如「桌面\\方寸导出」（同名文件会被覆盖）。</p>
+    <p><button type="button" class="btn" id="agentPick">${handle ? '重新选择文件夹…' : '① 选择文件夹…'}</button> <span id="agentPicked" class="stor-note">${handle ? `已选：${esc(handle.name)}` : '还没选'}</span></p>
+    <label class="stor-note" for="agentPath">② 这个文件夹的完整路径（浏览器不允许网页自己读取完整路径；在资源管理器地址栏复制后粘贴到这里，只需设置一次）</label>
+    <input type="text" id="agentPath" name="path" required placeholder="例如 C:\\Users\\你的用户名\\Desktop\\方寸导出" value="${esc(agentOut?.path || '')}">
+    ${actions('保存')}`, (f) => f.path.value.trim().replace(/^"(.*)"$/, '$1').replace(/[\\/]+$/, ''));
+  if (!path) return null;
+  handle = agentOut?.handle || handle; // 对话框里点「选择文件夹」后更新过
+  if (!handle) { toast('还没有选择文件夹', { error: true }); return null; }
+  const base = path.split(/[\\/]/).pop();
+  if (base && base !== handle.name) toast(`提示：路径的最后一级「${base}」和选择的文件夹「${handle.name}」不一样，请确认路径填对了`, { error: true });
+  agentOut = { handle, path };
+  await db.setMeta('agentOut', agentOut);
+  return agentOut;
+}
+document.addEventListener('click', async (e) => {
+  if (!e.target.closest?.('#agentPick')) return;
+  try {
+    const h = await window.showDirectoryPicker({ id: 'fangcun-agent', mode: 'readwrite', startIn: 'desktop' });
+    agentOut = { ...(agentOut || {}), handle: h };
+    const s = $('#agentPicked'); if (s) s.textContent = `已选：${h.name}`;
+    const p = $('#agentPath'); if (p && !p.value) { p.placeholder = `…\\${h.name}`; p.focus(); }
+  } catch {}
+});
+async function sendToAgent(ids) {
+  const cards = [...new Set(ids)].map(findCard).filter((c) => c && c.columnId !== TRASH && (c.kind === 'file' || c.kind === 'note'));
+  if (!cards.length) return toast('没有可以发送的文件');
+  let cfg = await agentCfg();
+  if (!cfg?.handle || !cfg.path) { cfg = await setupAgentFolder(); if (!cfg) return; }
+  const h = cfg.handle;
+  let perm = (await h.queryPermission?.({ mode: 'readwrite' })) || 'granted';
+  if (perm !== 'granted') perm = await h.requestPermission({ mode: 'readwrite' }).catch(() => 'denied');
+  if (perm !== 'granted') return toast('没有获得导出文件夹的写入权限', { error: true, action: '重新设置', onAction: () => setupAgentFolder() });
+  if (!(await ensureAccess())) return;
+  const sep = cfg.path.includes('\\') || !cfg.path.includes('/') ? '\\' : '/';
+  const clean = (s) => String(s || '文件').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').slice(0, 150);
+  const t = cards.length > 1 || cards.some((c) => (c.size || 0) > 20e6) ? toast('正在导出…', { sticky: true }) : null;
+  const paths = [], failed = [];
+  try {
+    for (let i = 0; i < cards.length; i++) {
+      const c = cards[i];
+      const name = c.kind === 'note' ? `${clean(c.name || '便签')}.txt` : clean(c.name);
+      t?.set(`正在导出 ${i + 1}/${cards.length}：${name}`);
+      try {
+        const data = c.kind === 'note' ? new Blob([c.text || ''], { type: 'text/plain' }) : await db.getBlob(c.id);
+        if (!data) throw new Error('读取失败');
+        const fh = await h.getFileHandle(name, { create: true });
+        const w = await fh.createWritable();
+        try { await w.write(data); await w.close(); } catch (err) { await w.abort?.().catch(() => {}); throw err; }
+        paths.push(`${cfg.path}${sep}${name}`);
+      } catch { failed.push(name); }
+    }
+  } finally { t?.close(); }
+  if (!paths.length) return toast(`导出失败：${failed.join('、')}`, { error: true });
+  const text = paths.map((p) => (/\s/.test(p) ? `"${p}"` : p)).join(' ');
+  let copied = false;
+  try { await navigator.clipboard.writeText(text); copied = true; } catch {}
+  const msg = `${paths.length > 1 ? `已导出 ${paths.length} 个文件` : `已导出「${paths[0].split(sep).pop()}」`}${copied ? '，路径已复制 —— 在 Agent 里按 Ctrl+V 粘贴' : ''}${failed.length ? `（${failed.length} 个失败）` : ''}`;
+  toast(msg, copied ? { duration: 6000 } : { action: '复制路径', onAction: () => copyTextWithToast(text, '路径已复制，在 Agent 里按 Ctrl+V 粘贴') });
+}
+let hoverCardId = null;
+document.addEventListener('pointerover', (e) => { const c = e.target.closest?.('.card'); hoverCardId = c ? c.dataset.id : null; });
+// Ctrl + Shift + E：把已选 / 鼠标下的卡片发给 Agent
+document.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey || (e.code !== 'KeyE' && e.key.toLowerCase() !== 'e')) return;
+  if (isTypingTarget(e.target) || $('#modal').open) return;
+  const ids = state.selected.size ? [...state.selected] : state.pickedCard ? [state.pickedCard] : hoverCardId ? [hoverCardId] : [];
+  if (!ids.length) return;
+  e.preventDefault(); e.stopPropagation();
+  sendToAgent(ids);
+}, true);
+
 // ---------- 分享链接：对方打开链接直接从这台电脑下载（浏览器直连，不上传到任何服务器） ----------
 const SHARE_SVG = '<svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="m8.3 10.8 7.4-4.4M8.3 13.2l7.4 4.4"/></svg>';
 let activeShare = null; // { host, area, url, files }
@@ -6204,6 +6285,8 @@ function cardMenu(anchor, card) {
   } });
   items.push({ text: card.kind === 'note' ? '编辑' : '预览', run: () => preview(card.id) },
     { text: '下载', run: () => download(card.id) },
+    { text: '发给 Agent（导出并复制路径）  Ctrl+Shift+E', run: () => sendToAgent(state.selected.has(card.id) && state.selected.size > 1 ? [...state.selected] : [card.id]) },
+    ...(agentOut?.path ? [{ text: '更换「发给 Agent」的文件夹…', run: () => setupAgentFolder() }] : []),
     { text: '重命名', run: () => startInlineRename(card.id) });
   if (isCanvas(card.columnId)) {
     items.push({ text: '添加备注评论…', run: () => openCommentDraftOnTarget(card.id) });
@@ -7119,6 +7202,7 @@ function renderSelBar() {
   bar.innerHTML = `<span class="sel-count">已选 <b>${ids.length}</b> 个</span>
     <button class="sel-btn" data-action="sel-clear" title="取消勾选（Esc）">取消勾选</button>
     <button class="sel-btn primary" data-action="sel-done" ${active.length ? '' : 'disabled'}>${CHECK_SVG}<span>一起完成并打包</span></button>
+    <button class="sel-btn" data-action="sel-agent" title="导出到本地并复制路径，在 Claude Code / Codex / Antigravity 里 Ctrl+V 粘贴（Ctrl+Shift+E）">${AGENT_SVG}<span>发给 Agent</span></button>
     <button class="sel-btn" data-action="sel-rename" title="快速批量重命名已选文件（F2）"><svg viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="m13.5 6.5 3 3"/></svg><span>快速重命名</span></button>
     ${canvasSel.length >= 2 ? `<button class="sel-btn" data-action="sel-align" aria-haspopup="menu" title="对齐与分布选中的画布卡片"><svg viewBox="0 0 24 24"><path d="M4 4v16M8 7h12v4H8zM8 14h8v4H8z"/></svg><span>自动对齐…</span></button>` : ''}
     <button class="sel-btn" data-action="sel-link" ${active.length > 1 ? '' : 'disabled'} title="以后长按其中任意一个都会整组打包">${LINK_SVG}<span>关联为一个项目</span></button>
@@ -7530,6 +7614,7 @@ document.addEventListener('click', async (e) => {
       return fid && openBatchRename(cardsIn(fid, false), area(fid)?.title);
     }
     case 'sel-rename': return openBatchRename([...state.selected].map(findCard).filter(Boolean), '已选文件');
+    case 'sel-agent': return sendToAgent([...state.selected]);
     case 'card-preview': return preview(btn.dataset.id || cardEl?.dataset.id);
     case 'pdf-prev': {
       const c = findCard(btn.dataset.id || cardEl?.dataset.id);
@@ -10053,6 +10138,7 @@ async function openBatchRename(cards, contextTitle = '') {
     await ensureDefaults();
     render();
     refreshStatus();
+    agentCfg(); // 先读出「发给 Agent」的设置，点按钮时少等一步（浏览器的授权弹窗需要紧跟点击）
     if (state.cards.length) requestPersist();
     addReposFromLink();
     await initCollabFromUrl();
