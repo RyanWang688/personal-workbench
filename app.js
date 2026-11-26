@@ -7,6 +7,7 @@ import * as zip from './zip.js?v=1';
 import * as assoc from './assoc.js?v=1';
 import * as upTree from './upload-tree.js?v=1';
 import * as share from './share.js?v=2';
+import * as sk from './stickers.js?v=1';
 
 const TRASH = 'trash';
 const BOARD = 'board';
@@ -679,6 +680,23 @@ function renderCanvasMiniPreview(cv, cards) {
   }
 
   const shapesSVG = layout.shapes.map((s) => {
+    if (s.t === 'sticker') {
+      const p = sk.stickerById(s.sk);
+      const cx = (s.x + s.w / 2).toFixed(1), cy = (s.y + s.h / 2).toFixed(1);
+      const rot = sk.clampStickerRot(s.rot);
+      const tr = rot ? ` transform="rotate(${rot} ${cx} ${cy})"` : '';
+      if (p.kind === 'emoji') {
+        const r = Math.max(3, Math.min(s.w, s.h) * 0.42).toFixed(1);
+        return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#ffd43b" stroke="#ffffff" stroke-width="1"${tr}/>`;
+      }
+      if (p.kind === 'seal') {
+        const r = Math.max(3.5, Math.min(s.w, s.h) * 0.46).toFixed(1);
+        return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${p.bg}" stroke="#ffffff" stroke-width="1"${tr}/>`;
+      }
+      const sw = Math.max(8, s.w).toFixed(1), sh = Math.max(4.5, s.h).toFixed(1);
+      const rx = (Math.min(Number(sw), Number(sh)) / 2).toFixed(1);
+      return `<rect x="${s.x.toFixed(1)}" y="${s.y.toFixed(1)}" width="${sw}" height="${sh}" rx="${rx}" fill="${p.bg}" stroke="#ffffff" stroke-width="0.9"${tr}/>`;
+    }
     const col = (s.fill === 'none' || s.fill == null) ? null : (SH_COLORS[s.fill] || SH_COLORS[0]);
     const fill = col ? col.bg : 'none';
     const stroke = col ? col.bd : (s.t === 'text' ? 'none' : 'var(--text-3)');
@@ -3353,7 +3371,7 @@ const SH_COLORS = [
   { n: '灰', bg: '#e7e7ea', bd: '#97999f' }, { n: '白', bg: '#ffffff', bd: '#c2c3c9' },
 ];
 const LINK_COLORS = [null, '#f2643b', '#d6455d', '#3b82f6', '#2f9e55', '#8b5cf6'];
-const SHAPE_NAMES = { sticky: '便签', rect: '矩形', round: '圆角矩形', ellipse: '圆形', diamond: '菱形', text: '文字', frame: '画框' };
+const SHAPE_NAMES = { sticky: '便签', rect: '矩形', round: '圆角矩形', ellipse: '圆形', diamond: '菱形', text: '文字', frame: '画框', sticker: '贴纸' };
 const SH_DEF = {
   sticky: { w: 200, h: 200, fill: 0, fs: 18, al: 'center' }, rect: { w: 200, h: 120, fill: 4, fs: 16, al: 'center' },
   round: { w: 200, h: 120, fill: 5, fs: 16, al: 'center' }, ellipse: { w: 160, h: 160, fill: 2, fs: 16, al: 'center' },
@@ -3362,8 +3380,9 @@ const SH_DEF = {
   frame: { w: 640, h: 420, fill: 'none', fs: 14, al: 'left' },
 };
 const FONT_SIZES = [12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64, 80, 96];
-const TOOL_KEYS = { v: 'select', n: 'sticky', t: 'text', r: 'rect', o: 'ellipse', d: 'diamond', a: 'frame', l: 'arrow', c: 'comment' };
+const TOOL_KEYS = { v: 'select', n: 'sticky', t: 'text', r: 'rect', o: 'ellipse', d: 'diamond', a: 'frame', l: 'arrow', c: 'comment', s: 'sticker' };
 const isFrame = (s) => s?.t === 'frame';
+const isSticker = (s) => s?.t === 'sticker';
 // 完全落在画框范围内的形状 / 卡片
 const insideBox = (f, b) => b.x >= f.x - 1 && b.y >= f.y - 1 && b.x + b.w <= f.x + f.w + 1 && b.y + b.h <= f.y + f.h + 1;
 const TOOL_HINT = {
@@ -3371,11 +3390,14 @@ const TOOL_HINT = {
   sticky: '点击贴一张便签，或拖出大小', text: '点击放置文字框，然后直接输入', rect: '点击放置，或拖出大小（Shift 画正方形）',
   ellipse: '点击放置，或拖出大小（Shift 画正圆）', diamond: '点击放置，或拖出大小', arrow: '从一个对象拖到另一个对象',
   comment: '点击画布或任意卡片 / 形状添加备注评论，协作者会收到实时提醒',
+  sticker: '点击画布或任意便签贴上贴纸；也可直接从左侧面板拖上去',
 };
 const ALIGN_OPS = { smart: '✨ 智能对齐行列', l: '左对齐', ch: '水平居中', r: '右对齐', t: '顶部对齐', cv: '垂直居中', b: '底部对齐', dh: '横向均匀分布', dv: '纵向均匀分布', ew: '统一等宽' };
 state.tool = 'select';
 state.toolLock = false;
 state.bsel = null; // { type: 'shape', ids: [...] } | { type: 'link', id }
+state.activeSticker = ls.get('activeSticker', 'done');
+state.stickerCat = ls.get('stickerCat', 'status');
 let editingShape = null, editSnap = null, editOrig = '', bd = null, hoverRef = null, boardRendering = false;
 let spaceDown = false, fmtPop = null, boardClip = null, lastPointer = null, pasteN = 0;
 const boardOf = (id = state.view) => { const a = area(id); if (!a || a.kind !== 'canvas') return null; a.shapes ||= []; a.links ||= []; a.comments ||= []; return a; };
@@ -3407,11 +3429,30 @@ async function toggleLock(on) {
   toast(`${on ? '已锁定' : '已解锁'} ${shapes.length + cards.length} 个对象${on ? '（Ctrl + Shift + L 解锁）' : ''}`);
 }
 
+function stickerInnerHTML(s, previewText) {
+  const p = sk.stickerById(s.sk || s.id);
+  const rot = sk.clampStickerRot(s.rot ?? p.rot);
+  if (p.kind === 'emoji') {
+    return `<div class="sk-body sk-emoji" style="--rot:${rot}deg" aria-label="${esc(p.label)}"><span>${p.emoji}</span></div>`;
+  }
+  const label = esc(previewText ?? (s.text || p.label));
+  const cls = p.kind === 'seal' ? 'sk-seal' : 'sk-badge';
+  return `<div class="sk-body ${cls}" style="--rot:${rot}deg;--sk-bg:${p.bg};--sk-fg:${p.fg}"><i class="sk-ico">${esc(p.icon)}</i><span class="sk-tx">${label}</span></div>`;
+}
 function shapeHTML(s) {
-  const col = shColor(s);
   const sel = isPicked(s.id), single = sel && selIds().length === 1;
   // 画框始终压在最底层：比箭头层（z-index 0）、所有形状和卡片都低，框之间仍保持各自先后
   const zi = isFrame(s) ? -100000 + Math.max(-50000, Math.min(50000, Number.isFinite(s.z) ? s.z : 0)) : (Number.isFinite(s.z) ? s.z : 1);
+  if (isSticker(s)) {
+    const p = sk.stickerById(s.sk);
+    const w = Math.round(s.w || p.w), h = Math.round(s.h || p.h);
+    const style = `left:${Math.round(s.x)}px;top:${Math.round(s.y)}px;width:${w}px;height:${h}px;z-index:${zi};--sk-w:${w}px;--sk-h:${h}px;`;
+    const handles = single && !s.lk
+      ? ['nw', 'ne', 'se', 'sw'].map((k) => `<i class="sh-h h-${k}" data-handle="${k}"></i>`).join('')
+      : '';
+    return `<div class="shape st-sticker${sel ? ' picked' : ''}${s.lk ? ' locked' : ''}" data-sid="${s.id}" style="${style}">${stickerInnerHTML(s)}${handles}${s.lk ? `<i class="lock-badge" title="已锁定">${LOCK_SVG}</i>` : ''}</div>`;
+  }
+  const col = shColor(s);
   const style = `left:${Math.round(s.x)}px;top:${Math.round(s.y)}px;width:${Math.round(s.w)}px;height:${Math.round(s.h)}px;z-index:${zi};`
     + `--fs:${s.fs || 16}px;--sb:${col ? col.bg : 'transparent'};--sd:${col ? col.bd : 'var(--text-3)'};--tc:${col ? '#1f2023' : 'var(--text)'};text-align:${s.al || 'center'}`;
   const bg = s.t === 'diamond'
@@ -3486,6 +3527,7 @@ function autoContrast() {
   };
   const filled = b.shapes.filter((s) => own(s)).sort((x, y) => zOf(y) - zOf(x)); // 上层在前
   for (const s of b.shapes) {
+    if (isSticker(s)) continue;
     const el = shEl(s.id);
     if (!el) continue;
     let bg = isFrame(s) ? null : own(s);
@@ -3629,7 +3671,48 @@ function drawLinks() {
 // 缩略图加载后卡片变高，连线跟着重算
 $('#world').addEventListener('load', () => { if (boardOf()?.links.length) drawLinks(); }, true);
 
-// ---- 工具 ----
+// ---- 工具 & 贴纸选择器 ----
+function updateToolHint(t = state.tool) {
+  const hint = $('#toolHint');
+  if (!hint) return;
+  hint.hidden = t === 'select';
+  if (t === 'select') return;
+  const text = t === 'sticker'
+    ? `点击画布或任意便签贴上「${sk.stickerById(state.activeSticker).label}」；或直接从面板拖出`
+    : (TOOL_HINT[t] || '');
+  hint.innerHTML = `${esc(text)}<span>${state.toolLock ? '已锁定，可以连续放置' : '双击工具可连续使用'} · Esc 退出</span>`;
+}
+function renderStickerPopover() {
+  const pop = $('#stickerPopover');
+  if (!pop) return;
+  const cat = state.stickerCat === 'emoji' ? 'emoji' : 'status';
+  const items = sk.stickersInCat(cat);
+  pop.innerHTML = `
+    <div class="sk-pop-head">
+      <div class="sk-cat-tabs" role="tablist" aria-label="贴纸分类">
+        ${sk.STICKER_CATS.map((c) => `<button type="button" role="tab" class="sk-cat-btn${cat === c.id ? ' on' : ''}" data-sk-cat="${c.id}" aria-selected="${cat === c.id}">${c.label}</button>`).join('')}
+      </div>
+      <button type="button" class="icon-btn sk-pop-close" data-sk-close aria-label="关闭贴纸面板"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+    <div class="sk-grid cat-${cat}">
+      ${items.map((p) => {
+        const active = state.activeSticker === p.id;
+        return `<button type="button" class="sk-pick${active ? ' on' : ''}" data-pick-sticker="${p.id}" title="${esc(p.label)}（点击选择后盖章，或直接拖到画布）">${stickerInnerHTML(p, p.label)}</button>`;
+      }).join('')}
+    </div>
+    <div class="sk-pop-foot">点选后在画布单击盖章，或直接拖到便签/卡片上</div>`;
+}
+function toggleStickerPopover(force) {
+  const pop = $('#stickerPopover');
+  if (!pop) return;
+  const show = typeof force === 'boolean' ? force : pop.hidden;
+  if (show && isCanvas(state.view)) {
+    renderStickerPopover();
+    pop.hidden = false;
+  } else {
+    pop.hidden = true;
+  }
+}
 function setTool(t, lock = false) {
   state.tool = t;
   state.toolLock = lock && t !== 'select';
@@ -3638,11 +3721,9 @@ function setTool(t, lock = false) {
     b.classList.toggle('on', on); b.classList.toggle('locked', on && state.toolLock); b.setAttribute('aria-pressed', on);
   });
   $('#viewport').dataset.tool = t;
-  const hint = $('#toolHint');
-  if (hint) {
-    hint.hidden = t === 'select';
-    if (t !== 'select') hint.innerHTML = `${esc(TOOL_HINT[t] || '')}<span>${state.toolLock ? '已锁定，可以连续放置' : '双击工具可连续使用'} · Esc 退出</span>`;
-  }
+  updateToolHint(t);
+  if (t === 'sticker' && isCanvas(state.view)) toggleStickerPopover(true);
+  else toggleStickerPopover(false);
   hideDots();
 }
 function afterCreateTool() { if (!state.toolLock) setTool('select'); }
@@ -3653,6 +3734,62 @@ $('#canvasPalette').addEventListener('click', (e) => {
 $('#canvasPalette').addEventListener('dblclick', (e) => {
   const b = e.target.closest('[data-tool]');
   if (b && b.dataset.tool !== 'select') setTool(b.dataset.tool, true);
+});
+let skDrag = null;
+$('#stickerPopover')?.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  const btn = e.target.closest('[data-pick-sticker]');
+  if (!btn) return;
+  skDrag = { id: btn.dataset.pickSticker, sx: e.clientX, sy: e.clientY, moved: false, ghost: null };
+});
+document.addEventListener('pointermove', (e) => {
+  if (!skDrag) return;
+  if (!skDrag.moved && Math.hypot(e.clientX - skDrag.sx, e.clientY - skDrag.sy) < 7) return;
+  if (!skDrag.moved) {
+    skDrag.moved = true;
+    const p = sk.stickerById(skDrag.id);
+    const g = document.createElement('div');
+    g.className = 'sticker-drag-ghost';
+    g.style.setProperty('--sk-w', `${p.w}px`);
+    g.style.setProperty('--sk-h', `${p.h}px`);
+    g.style.width = `${p.w}px`;
+    g.style.height = `${p.h}px`;
+    g.innerHTML = stickerInnerHTML(p, p.label);
+    document.body.appendChild(g);
+    skDrag.ghost = g;
+  }
+  skDrag.ghost.style.left = `${e.clientX}px`;
+  skDrag.ghost.style.top = `${e.clientY}px`;
+});
+document.addEventListener('pointerup', (e) => {
+  if (!skDrag) return;
+  const d = skDrag; skDrag = null;
+  d.ghost?.remove();
+  if (!d.moved) return;
+  state.activeSticker = d.id;
+  ls.set('activeSticker', d.id);
+  const vr = $('#viewport')?.getBoundingClientRect();
+  if (vr && e.clientX >= vr.left && e.clientX <= vr.right && e.clientY >= vr.top && e.clientY <= vr.bottom) {
+    const p = toWorld(e.clientX, e.clientY);
+    placeSticker(d.id, p.x, p.y);
+  }
+});
+$('#stickerPopover')?.addEventListener('click', (e) => {
+  const catBtn = e.target.closest('[data-sk-cat]');
+  if (catBtn) {
+    state.stickerCat = catBtn.dataset.skCat;
+    ls.set('stickerCat', state.stickerCat);
+    renderStickerPopover();
+    return;
+  }
+  if (e.target.closest('[data-sk-close]')) return setTool('select');
+  const pick = e.target.closest('[data-pick-sticker]');
+  if (pick) {
+    state.activeSticker = pick.dataset.pickSticker;
+    ls.set('activeSticker', state.activeSticker);
+    renderStickerPopover();
+    updateToolHint('sticker');
+  }
 });
 
 async function saveBoard() { const b = boardOf(); if (b) { await saveArea(b); await changed(); } }
@@ -3689,6 +3826,43 @@ async function createShape(t, x, y, w, h, { like, linkFrom } = {}) {
   return s;
 }
 // 在已选形状旁边（某个方向）新建一个相连的同款形状
+async function placeSticker(skId, wx, wy) {
+  const b = boardOf();
+  if (!b) return null;
+  record();
+  const s = sk.createStickerShape(skId || state.activeSticker, wx, wy, { id: uid(), z: topOrder(state.view) });
+  b.shapes.push(s);
+  state.bsel = pickShapes([s.id]);
+  afterCreateTool();
+  renderCanvas();
+  const el = shEl(s.id);
+  if (el && !reduceMotion.matches) {
+    el.animate([
+      { transform: 'scale(.5)', opacity: 0.4 },
+      { transform: 'scale(1.1)', opacity: 1, offset: 0.65 },
+      { transform: 'scale(1)', opacity: 1 },
+    ], { duration: 240, easing: 'cubic-bezier(.2, 1.3, .35, 1)' });
+  }
+  await saveBoard();
+  return s;
+}
+async function editStickerText(id) {
+  const s = shapeById(id);
+  if (!s || !isSticker(s)) return;
+  if (s.lk) return toast('已锁定：先解锁（Ctrl + Shift + L）才能修改');
+  const p = sk.stickerById(s.sk);
+  if (p.kind === 'emoji') {
+    state.bsel = pickShapes([id]);
+    fmtPop = 'sticker';
+    positionFmt();
+    return;
+  }
+  const next = await prompt({ title: '修改贴纸文字', value: s.text || p.label, placeholder: p.label, ok: '保存' });
+  if (next == null || next === (s.text || p.label)) return;
+  record();
+  s.text = next;
+  await saveBoard();
+}
 async function createConnected(s, dir) {
   const gap = 90, w = s.w, h = s.h;
   const pos = { ArrowRight: [s.x + s.w + gap, s.y], ArrowLeft: [s.x - gap - w, s.y], ArrowDown: [s.x, s.y + s.h + gap], ArrowUp: [s.x, s.y - gap - h] }[dir];
@@ -3713,12 +3887,15 @@ function commitEditingText() {
   if (b) saveArea(b);
 }
 function startEdit(id, opts = {}) {
-  if (!shapeById(id)) return;
-  if (shapeById(id).lk) { toast('已锁定：先解锁（Ctrl + Shift + L）才能编辑文字'); return; }
+  let s = shapeById(id);
+  if (!s) return;
+  if (isSticker(s)) { editStickerText(id); return; }
+  if (s.lk) { toast('已锁定：先解锁（Ctrl + Shift + L）才能编辑文字'); return; }
   if (editingShape && editingShape !== id) commitEditingText();
   // 先确保它是唯一选中的（只重绘一次，不递归）
   if (!(isPicked(id) && selIds().length === 1)) { state.bsel = pickShapes([id]); renderCanvas(); }
-  const s = shapeById(id), el = shEl(id);
+  s = shapeById(id);
+  const el = shEl(id);
   if (!s || !el) return;
   if (!opts.keep) { editSnap = opts.fresh ? null : snapBoard(); editOrig = s.text || ''; }
   const tx = el.querySelector('.sh-tx');
@@ -3756,7 +3933,7 @@ function fitSticky(s, el) {
   }
   el.style.setProperty('--fs', `${Math.floor(lo * 10) / 10}px`);
 }
-const fitAllShapeText = () => { for (const s of boardOf()?.shapes || []) if (s.text && s.t !== 'text' && s.t !== 'frame') fitSticky(s, shEl(s.id)); };
+const fitAllShapeText = () => { for (const s of boardOf()?.shapes || []) if (s.text && s.t !== 'text' && s.t !== 'frame' && !isSticker(s)) fitSticky(s, shEl(s.id)); };
 // 网页字体加载完成后字宽会变，重新量一次，避免文字溢出
 document.fonts?.ready?.then(() => { if (isCanvas(state.view)) fitAllShapeText(); });
 document.fonts?.addEventListener?.('loadingdone', () => { if (isCanvas(state.view)) fitAllShapeText(); });
@@ -3960,6 +4137,11 @@ function boardDown(e) {
     e.preventDefault();
     return true;
   }
+  if (state.tool === 'sticker' && e.button === 0) {
+    placeSticker(state.activeSticker, p.x, p.y);
+    e.preventDefault();
+    return true;
+  }
   const gh = e.target.closest('[data-ghandle]');
   if (gh && e.button === 0) {
     const g = groupItems();
@@ -4118,6 +4300,25 @@ function boardMove(e) {
   } else if (bd.mode === 'resize') {
     const { o, k, s } = bd, min = 30;
     let { x, y, w, h } = o, gx = null, gy = null;
+    if (isSticker(s)) {
+      const ratio = o.w / Math.max(1, o.h);
+      const rawW = k.includes('e') ? (o.w + dx) : (k.includes('w') ? (o.w - dx) : (k.includes('s') ? (o.h + dy) * ratio : (o.h - dy) * ratio));
+      w = Math.max(44, Math.min(420, rawW));
+      h = w / ratio;
+      if (e.altKey) { x = o.x + (o.w - w) / 2; y = o.y + (o.h - h) / 2; }
+      else {
+        if (k.includes('w')) x = o.x + o.w - w;
+        if (k.includes('n')) y = o.y + o.h - h;
+      }
+      Object.assign(s, { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) });
+      Object.assign(bd.el.style, { left: `${s.x}px`, top: `${s.y}px`, width: `${s.w}px`, height: `${s.h}px` });
+      bd.el.style.setProperty('--sk-w', `${s.w}px`);
+      bd.el.style.setProperty('--sk-h', `${s.h}px`);
+      showSizeTip(e, s.w, s.h);
+      drawLinks();
+      sendCollabShapeLive([s], '正在缩放贴纸');
+      return;
+    }
     if (k.includes('e')) { w = Math.max(min, o.w + dx); if (snapOn && (gx = nearest([x + w], bd.snapT.xs, tol))) w += gx.d; }
     if (k.includes('w')) { x = o.x + dx; if (snapOn && (gx = nearest([x], bd.snapT.xs, tol))) x += gx.d; w = Math.max(min, o.x + o.w - x); x = o.x + o.w - w; }
     if (k.includes('s')) { h = Math.max(min, o.h + dy); if (snapOn && (gy = nearest([y + h], bd.snapT.ys, tol))) h += gy.d; }
@@ -4151,8 +4352,13 @@ function boardMove(e) {
       const el = shEl(it.s.id);
       if (el) {
         Object.assign(el.style, { left: `${it.s.x}px`, top: `${it.s.y}px`, width: `${it.s.w}px`, height: `${it.s.h}px` });
-        el.style.setProperty('--fs', `${it.s.fs}px`);
-        fitSticky(it.s, el);
+        if (isSticker(it.s)) {
+          el.style.setProperty('--sk-w', `${it.s.w}px`);
+          el.style.setProperty('--sk-h', `${it.s.h}px`);
+        } else {
+          el.style.setProperty('--fs', `${it.s.fs}px`);
+          fitSticky(it.s, el);
+        }
       }
     }
     for (const it of g.cards) {
@@ -4257,7 +4463,7 @@ async function boardUp(e) {
       if (d.copied) toast(`已复制 ${d.items.length} 个形状`);
     }
     else if (d.shiftToggle) selectBoard(pickShapes(selIds().filter((x) => x !== d.clicked))); // Shift + 点已选中的 → 移出多选
-    else if (d.mode === 'move' && d.was && !isFrame(shapeById(d.clicked))) startEdit(d.clicked); // 再点一下已选中的形状 → 编辑文字（画框改名用双击标题）
+    else if (d.mode === 'move' && d.was && !isFrame(shapeById(d.clicked)) && !isSticker(shapeById(d.clicked))) startEdit(d.clicked); // 再点一下已选中的形状 → 编辑文字（画框/贴纸用双击）
     else { decorateBoard(); positionFmt(); }
     return true;
   }
@@ -4623,6 +4829,9 @@ const FI = {
   trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>', label: '<path d="M5 6V4h14v2M12 4v16M9 20h6"/>',
   dash: '<path d="M3 12h4M10 12h4M17 12h4"/>', curve: '<path d="M4 18C10 18 14 6 20 6"/>', swap: '<path d="M4 8h14l-3-3M20 16H6l3 3"/>',
   chev: '<path d="m7 10 5 5 5-5"/>', lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  rotL: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"/>',
+  rotR: '<path d="m15 14 5-5-5-5"/><path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5v0A5.5 5.5 0 0 0 9.5 20H13"/>',
+  rot0: '<circle cx="12" cy="12" r="7"/><path d="M12 8v4l2.5 2.5"/>',
   back: '<rect x="4" y="4" width="12" height="12" rx="1.5"/><path d="M20 8v11a1 1 0 0 1-1 1H8"/>',
 };
 const fbtn = (act, icon, tip, on) => `<button type="button" class="icon-btn${on ? ' on' : ''}" data-fmt="${act}" data-tip="${tip}" aria-label="${tip}"${on != null ? ` aria-pressed="${!!on}"` : ''}><svg viewBox="0 0 24 24">${FI[icon]}</svg></button>`;
@@ -4635,11 +4844,24 @@ function positionFmt() {
   const key = `${sel.type}:${JSON.stringify(items, (k, v) => (k === '_t' ? undefined : v))}:${fmtPop}`;
   if (bar.dataset.for !== key) {
     bar.dataset.for = key;
-    if (sel.type === 'shape') {
+    if (sel.type === 'shape' && items.every(isSticker)) {
+      const s = items[items.length - 1], many = items.length > 1;
+      const p = sk.stickerById(s.sk);
+      const canText = !many && p.kind !== 'emoji';
+      bar.innerHTML = `${many ? `<span class="fb-count">${items.length} 个贴纸</span>` : ''}
+        <button type="button" class="fb-chip sk-swap-chip${fmtPop === 'sticker' ? ' open' : ''}" data-fmt="pop" data-v="sticker" data-tip="更换贴纸样式" aria-label="更换贴纸样式" aria-expanded="${fmtPop === 'sticker'}">
+          <span>${p.emoji || p.icon}</span><b>更换贴纸</b><svg viewBox="0 0 24 24">${FI.chev}</svg></button>
+        <span class="sep"></span>
+        ${fbtn('rot-', 'rotL', '向左旋转 6°')}${fbtn('rot0', 'rot0', '摆正 0°')}${fbtn('rot+', 'rotR', '向右旋转 6°')}
+        ${canText ? `<span class="sep"></span>${fbtn('sk-text', 'label', '修改贴纸文字')}` : ''}
+        <span class="sep"></span>
+        ${fbtn('front', 'front', '置于顶层 · Ctrl+]')}${fbtn('back', 'back', '置于底层 · Ctrl+[')}${fbtn('dup', 'copy', '复制一份 · Ctrl+D')}${fbtn('lock', 'lock', items.every((x) => x.lk) ? '解锁 · Ctrl+Shift+L' : '锁定 · Ctrl+Shift+L', items.every((x) => x.lk))}${fbtn('del', 'trash', '删除 · Delete')}
+        ${fmtPop === 'sticker' ? `<div class="fb-pop sk-swap-pop" role="menu">${sk.STICKERS.map((st) => `<button type="button" class="sk-pick mini${s.sk === st.id ? ' on' : ''}" data-fmt="sk" data-v="${st.id}" title="${esc(st.label)}">${stickerInnerHTML(st, st.label)}</button>`).join('')}</div>` : ''}`;
+    } else if (sel.type === 'shape') {
       const s = items[items.length - 1], many = items.length > 1, col = shColor(s);
       const sameT = items.every((x) => x.t === s.t);
       bar.innerHTML = `${many ? `<span class="fb-count">${items.length} 个</span>` : ''}
-        <select data-fmt="shape" aria-label="形状" data-tip="形状">${sameT ? '' : '<option value="" selected>混合</option>'}${Object.entries(SHAPE_NAMES).map(([k, n]) => `<option value="${k}" ${sameT && k === s.t ? 'selected' : ''}>${n}</option>`).join('')}</select>
+        <select data-fmt="shape" aria-label="形状" data-tip="形状">${sameT ? '' : '<option value="" selected>混合</option>'}${Object.entries(SHAPE_NAMES).filter(([k]) => k !== 'sticker').map(([k, n]) => `<option value="${k}" ${sameT && k === s.t ? 'selected' : ''}>${n}</option>`).join('')}</select>
         <span class="sep"></span>
         <button type="button" class="fb-chip${fmtPop === 'fill' ? ' open' : ''}" data-fmt="pop" data-v="fill" data-tip="填充颜色" aria-label="填充颜色" aria-expanded="${fmtPop === 'fill'}">
           <i class="sw${col ? '' : ' none'}" style="--c:${col ? col.bg : 'transparent'};--d:${col ? col.bd : 'var(--border)'}"></i><svg viewBox="0 0 24 24">${FI.chev}</svg></button>
@@ -4686,14 +4908,30 @@ async function applyFmt(act, v) {
   if (act === 'lock') return toggleLock();
   if (act === 'arrange') return v && alignSel(v);
   if (act === 'label') return editLinkLabel(sel.id);
+  if (act === 'sk-text') return selShapes()[0] && editStickerText(selShapes()[0].id);
   if (act === 'shape' && !v) return;
   record();
-  if (act === 'fill' || act === 'lcolor') fmtPop = null;
+  if (act === 'fill' || act === 'lcolor' || act === 'sk') fmtPop = null;
   if (sel.type === 'shape') {
     const list = selShapes();
     const top = topOrder(state.view), boldOn = !list.every((x) => x.b), al = list[list.length - 1].al === 'left' ? 'center' : 'left';
     const bottom = Math.min(1, ...boardOf().shapes.map((s) => (Number.isFinite(s.z) ? s.z : 1)), ...cardsIn(state.view, false).map((c) => c.order || 1));
     list.forEach((s, i) => {
+      if (act === 'sk' && isSticker(s)) {
+        const prev = sk.stickerById(s.sk);
+        const next = sk.stickerById(v);
+        const scale = (s.w || prev.w) / Math.max(1, prev.w);
+        const cx = s.x + s.w / 2, cy = s.y + s.h / 2;
+        const nw = Math.round(next.w * scale), nh = Math.round(next.h * scale);
+        s.sk = next.id;
+        s.w = nw; s.h = nh;
+        s.x = Math.round(cx - nw / 2); s.y = Math.round(cy - nh / 2);
+        s.rot = next.rot;
+        s.text = next.kind === 'emoji' ? '' : next.label;
+      }
+      if (act === 'rot-' && isSticker(s)) s.rot = sk.clampStickerRot((s.rot || 0) - 6);
+      if (act === 'rot+' && isSticker(s)) s.rot = sk.clampStickerRot((s.rot || 0) + 6);
+      if (act === 'rot0' && isSticker(s)) s.rot = 0;
       if (act === 'shape') {
         const was = s.t; s.t = v;
         if (v === 'text' && was !== 'text') { s.fill = 'none'; s.al = 'left'; }
@@ -4943,7 +5181,7 @@ async function insertTemplate(id) {
   toast(`已插入「${tpl.name}」模板，双击便签就能改文字`, { action: '撤销', onAction: () => undoBoard() });
 }
 const SHORTCUTS = [
-  ['工具', [['V', '选择'], ['N', '便签'], ['T', '文字'], ['R', '矩形'], ['O', '圆形'], ['D', '菱形'], ['L', '箭头连线'], ['C', '备注评论'], ['双击工具', '锁定工具，连续放置'], ['Esc', '退出工具 / 取消选中']]],
+  ['工具', [['V', '选择'], ['N', '便签'], ['T', '文字'], ['R', '矩形'], ['O', '圆形'], ['D', '菱形'], ['A', '画框'], ['L', '箭头连线'], ['C', '备注评论'], ['S', '贴纸（印章/表情）'], ['双击工具', '锁定工具，连续放置'], ['Esc', '退出工具 / 取消选中']]],
   ['拖动', [['Shift + 拖动', '只水平或只垂直移动'], ['Alt + 拖动', '复制一份拖走（形状、文件卡片都可以）'], ['Ctrl + 拖动', '暂时关闭对齐吸附（文件卡片上是转换圆环）'], ['Shift + 拖角', '等比缩放'], ['Alt + 拖边 / 角', '以中心对称缩放'], ['Shift / Alt + 画形状', '画正方形 / 从中心向外画'], ['拖连接点到空白处', '新建一个相连的形状']]],
   ['选择', [['左键拖空白处', '拉出多选框（框选卡片与形状）'], ['Shift + 点击', '加选 / 减选'], ['Ctrl + A', '全选画布内容'], ['Enter / 双击', '编辑文字 / 预览卡片'], ['Esc / Ctrl + Enter', '结束编辑']]],
   ['编辑', [['Ctrl + Z', '撤销'], ['Ctrl + Y / Ctrl + Shift + Z', '重做'], ['Ctrl + C / X / V', '复制 / 剪切 / 粘贴'], ['Ctrl + D', '原地复制'], ['Ctrl + Shift + L', '锁定 / 解锁'], ['多选后拖外框角点', '整体等比缩放（Alt 以中心）'], ['Delete', '删除'], ['方向键', '微移（Shift 每次 40）'], ['Ctrl + 方向键', '在该方向新建相连形状'], ['Ctrl + ] / [', '置于顶层 / 底层'], ['Ctrl + B', '加粗'], ['Ctrl + Shift + . / ,', '放大 / 缩小字号']]],
@@ -5870,6 +6108,7 @@ function setView(v) {
     if (tp) tp.hidden = true;
     const cp = $('#commentsPopover');
     if (cp) cp.hidden = true;
+    toggleStickerPopover(false);
   }
   if (!isCanvas(v) && document.body.classList.contains('canvas-maximized')) toggleCanvasMax(false);
   state.view = v;

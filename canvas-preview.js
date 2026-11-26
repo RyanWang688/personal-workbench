@@ -163,6 +163,8 @@ export function computeCanvasPreviewLayout(cards = [], shapes = [], links = [], 
   const mappedShapes = shapeEntries.map(({ s, box }) => ({
     id: s.id,
     t: box.t,
+    sk: s.sk || '',
+    rot: Number.isFinite(Number(s.rot)) ? Number(s.rot) : 0,
     x: px(box.x),
     y: py(box.y),
     w: box.w * scale,

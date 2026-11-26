@@ -1397,6 +1397,98 @@ body.board-dragging .group-box:not(.scaling), body.is-dragging-card .group-box {
 .fb-pop { position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); display: flex; gap: 6px; padding: 8px 10px;
   background: var(--surface); border: 1px solid var(--border); border-radius: 11px; box-shadow: var(--shadow-lg); animation: fmtIn .12s ease-out; }
 .fmt-bar.below .fb-pop { top: auto; bottom: calc(100% + 6px); }
+
+/* ===== 画布贴纸（状态印章 & 表情贴纸） ===== */
+.shape.st-sticker { background: transparent; border: 0; overflow: visible; padding: 0; }
+.shape.st-sticker .sh-bg, .shape.st-sticker .sh-tx { display: none; }
+.viewport[data-tool="sticker"] .viewport, .viewport[data-tool="sticker"] { cursor: copy; }
+.viewport[data-tool="sticker"] .shape, .viewport[data-tool="sticker"] .card.on-canvas { cursor: copy; }
+.sk-body {
+  width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+  transform: rotate(var(--rot, 0deg)); user-select: none; pointer-events: none;
+  transition: transform .18s cubic-bezier(.22, 1.35, .36, 1);
+}
+.sk-badge {
+  position: relative; gap: calc(var(--sk-h, 44px) * 0.14); padding: 0 calc(var(--sk-h, 44px) * 0.34);
+  border-radius: 999px; border: 2.5px solid #ffffff;
+  background: linear-gradient(180deg, color-mix(in srgb, #fff 16%, var(--sk-bg, #16a34a)) 0%, var(--sk-bg, #16a34a) 100%);
+  color: var(--sk-fg, #ffffff);
+  font-size: calc(var(--sk-h, 44px) * 0.36); line-height: 1; font-weight: 800; letter-spacing: .04em; white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .28), 0 1px 2px rgba(0, 0, 0, .22), inset 0 1px 0 rgba(255, 255, 255, .32);
+}
+.sk-badge::after {
+  content: ''; position: absolute; inset: 3px; border-radius: 999px;
+  border: 1px dashed color-mix(in srgb, var(--sk-fg, #fff) 45%, transparent); pointer-events: none;
+}
+.sk-badge .sk-ico { font-style: normal; font-size: 1.05em; line-height: 1; }
+.sk-seal {
+  position: relative; flex-direction: column; gap: 2px; border-radius: 50%; border: 3px solid #ffffff;
+  background: radial-gradient(circle at 32% 28%, color-mix(in srgb, #fff 20%, var(--sk-bg, #059669)), var(--sk-bg, #059669) 72%);
+  color: var(--sk-fg, #ffffff); text-align: center;
+  box-shadow: 0 5px 14px rgba(0, 0, 0, .3), inset 0 1px 1px rgba(255, 255, 255, .35);
+}
+.sk-seal::after {
+  content: ''; position: absolute; inset: 5px; border-radius: 50%;
+  border: 1.5px dashed color-mix(in srgb, var(--sk-fg, #fff) 60%, transparent); pointer-events: none;
+}
+.sk-seal .sk-ico { font-style: normal; font-size: calc(var(--sk-h, 92px) * 0.28); font-weight: 900; line-height: 1; }
+.sk-seal .sk-tx { font-size: calc(var(--sk-h, 92px) * 0.17); font-weight: 800; letter-spacing: .06em; line-height: 1.1; max-width: 82%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-emoji span {
+  display: inline-block; font-size: calc(min(var(--sk-w, 76px), var(--sk-h, 76px)) * 0.72); line-height: 1;
+  filter: drop-shadow(2px 0 0 #fff) drop-shadow(-2px 0 0 #fff) drop-shadow(0 2px 0 #fff) drop-shadow(0 -2px 0 #fff) drop-shadow(0 4px 8px rgba(0, 0, 0, .3));
+}
+.shape.st-sticker.picked::after { border-style: dashed; border-radius: 10px; }
+
+.sticker-popover {
+  position: absolute; left: 68px; top: 50%; transform: translateY(-50%); z-index: 25;
+  width: 292px; max-height: min(460px, calc(100% - 24px)); display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow-lg);
+  overflow: hidden; animation: fmtIn .16s ease-out;
+}
+.sk-pop-head { display: flex; align-items: center; gap: 6px; padding: 8px 8px 8px 10px; border-bottom: 1px solid var(--border); }
+.sk-cat-tabs { display: flex; gap: 4px; flex: 1; background: var(--surface-2); padding: 3px; border-radius: 9px; }
+.sk-cat-btn {
+  flex: 1; border: 0; background: transparent; color: var(--text-3); font-size: 12.5px; font-weight: 600;
+  padding: 5px 8px; border-radius: 7px; cursor: pointer; transition: background .15s, color .15s;
+}
+.sk-cat-btn.on { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+.sk-pop-close { width: 26px; height: 26px; border-radius: 7px; color: var(--text-3); }
+.sk-grid { padding: 10px; overflow-y: auto; display: grid; gap: 8px; }
+.sk-grid.cat-status { grid-template-columns: 1fr 1fr; }
+.sk-grid.cat-emoji { grid-template-columns: repeat(4, 1fr); }
+.sk-pick {
+  border: 1.5px solid transparent; background: var(--surface-2); border-radius: 11px; padding: 8px 6px;
+  min-height: 54px; display: flex; align-items: center; justify-content: center; cursor: grab;
+  transition: transform .16s cubic-bezier(.22, 1.4, .36, 1), border-color .15s, background .15s;
+}
+.sk-pick:hover { background: var(--surface-3); transform: scale(1.05); }
+.sk-pick.on { border-color: var(--accent); background: var(--accent-soft); }
+.sk-pick .sk-badge { --sk-h: 34px; width: auto; height: 32px; padding: 0 11px; border-width: 2px; font-size: 12.5px; }
+.sk-pick .sk-seal { --sk-h: 46px; width: 46px; height: 46px; border-width: 2px; }
+.sk-pick .sk-seal .sk-tx { font-size: 9px; }
+.sk-pick .sk-emoji { --sk-w: 44px; --sk-h: 44px; height: 42px; }
+.sk-pick .sk-emoji span { font-size: 28px; filter: drop-shadow(1.5px 0 0 #fff) drop-shadow(-1.5px 0 0 #fff) drop-shadow(0 1.5px 0 #fff) drop-shadow(0 -1.5px 0 #fff) drop-shadow(0 2px 4px rgba(0, 0, 0, .25)); }
+.sk-pop-foot { padding: 7px 12px 9px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-3); text-align: center; }
+
+.sticker-drag-ghost {
+  position: fixed; transform: translate(-50%, -50%) scale(1.06); z-index: 2000;
+  pointer-events: none; opacity: .95;
+}
+.fb-chip.sk-swap-chip { gap: 5px; padding: 0 8px; font-size: 12.5px; color: var(--text); }
+.fb-chip.sk-swap-chip b { font-weight: 600; }
+.fb-pop.sk-swap-pop {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 8px; width: 320px;
+  max-height: 240px; overflow-y: auto;
+}
+.sk-pick.mini { min-height: 40px; padding: 4px; border-radius: 8px; cursor: pointer; }
+.sk-pick.mini .sk-badge { --sk-h: 26px; height: 26px; padding: 0 7px; font-size: 10.5px; border-width: 1.5px; }
+.sk-pick.mini .sk-seal { --sk-h: 34px; width: 34px; height: 34px; border-width: 1.5px; }
+.sk-pick.mini .sk-seal .sk-tx { font-size: 7.5px; }
+.sk-pick.mini .sk-emoji { --sk-w: 32px; --sk-h: 32px; height: 30px; }
+.sk-pick.mini .sk-emoji span { font-size: 21px; }
+@media (max-width: 720px) {
+  .sticker-popover { left: 52px; width: min(260px, calc(100vw - 68px)); }
+}
 @media (max-width: 720px) {
   .canvas-palette { left: 8px; top: 12px; transform: none; }
   .canvas-palette .icon-btn { width: 32px; height: 32px; }
