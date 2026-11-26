@@ -251,7 +251,7 @@ const highlight = (s) => {
 };
 const MORE = `<button class="more" data-action="card-menu" aria-label="更多操作" aria-haspopup="menu"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>`;
 const RENAME_BTN = `<button type="button" class="quick-rename-btn" data-action="quick-rename" title="快速重命名（F2 · Tab 连续改下一个）" aria-label="快速重命名"><svg viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="m13.5 6.5 3 3"/></svg></button>`;
-const HANDLE = `<span class="export-handle" draggable="true" title="拖到桌面导出"><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg></span>`;
+const HANDLE = `<span class="export-handle" draggable="true" title="按住拖出去：拖到桌面 / 文件夹即保存，拖到别的网站或 AI Agent 输入框即发送文件"><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg></span>`;
 const fmtDur = (s) => { s = Math.round(s || 0); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 function metaText(c, t) {
   const i = c.info || {};
@@ -7303,9 +7303,29 @@ function realIndex(areaId, before) {
 }
 const isFileDrag = (e) => !state.dragId && [...(e.dataTransfer?.types || [])].includes('Files');
 
+// 拖出去用的真实文件：鼠标移到卡片上时先准备好（dragstart 里只能同步放数据），最多缓存 60 个
+const dragFiles = new Map();
+async function prepDragFile(id) {
+  if (dragFiles.has(id)) return dragFiles.get(id);
+  const c = findCard(id);
+  if (!c) return null;
+  let file = null;
+  if (c.kind === 'note') file = new File([c.text || ''], `${String(c.name || '便签').replace(/[\\/:*?"<>|]/g, '_')}.txt`, { type: 'text/plain' });
+  else { const blob = await db.getBlob(id); if (blob) file = new File([blob], c.name || 'file', { type: c.type || blob.type || 'application/octet-stream', lastModified: c.updatedAt || Date.now() }); }
+  if (!file) return null;
+  dragFiles.set(id, file);
+  if (dragFiles.size > 60) dragFiles.delete(dragFiles.keys().next().value);
+  return file;
+}
 document.addEventListener('pointerover', (e) => {
   const card = e.target.closest?.('.card');
-  if (card && findCard(card.dataset.id)?.kind === 'file') urlFor(card.dataset.id).catch(() => {}); // 预先准备，以便拖到桌面
+  if (!card) return;
+  const c = findCard(card.dataset.id);
+  if (!c) return;
+  if (c.kind === 'file') urlFor(c.id).catch(() => {}); // 预先准备，以便拖到桌面
+  prepDragFile(c.id).catch(() => {}); // 预先准备，以便拖到别的网站 / Agent
+  // 多选时一起准备，拖一张就能把选中的全部带出去
+  if (state.selected.has(c.id)) [...state.selected].slice(0, 30).forEach((id) => prepDragFile(id).catch(() => {}));
 });
 document.addEventListener('pointerleave', () => { hoverGroup = null; highlightGroup(null); });
 document.addEventListener('dragstart', (e) => {
@@ -7325,6 +7345,16 @@ document.addEventListener('dragstart', (e) => {
   } else if (state.urls.has(card.id)) {
     e.dataTransfer.setData('DownloadURL', `${card.type || 'application/octet-stream'}:${card.name}:${state.urls.get(card.id)}`);
   }
+  // 同时带上真实文件：拖到别的网站（上传框、聊天框）、AI Agent 的输入框里，对方收到的就是文件本身
+  // （多选时把已选中的都带上；只是本页内部的移动不受影响 —— 本页的放下逻辑认的是卡片 ID）
+  const ids = state.selected.has(card.id) && state.selected.size > 1 ? [...state.selected] : [card.id];
+  let attached = 0;
+  for (const id of ids) {
+    const f = dragFiles.get(id);
+    if (f) { try { e.dataTransfer.items.add(f); attached++; } catch {} }
+  }
+  if (!attached) prepDragFile(card.id).catch(() => {}); // 这次还没准备好：下次拖就有了
+  if (ids.length > 1) e.dataTransfer.setData('text/plain', ids.map((id) => findCard(id)?.name).filter(Boolean).join('\n'));
   requestAnimationFrame(() => el.classList.add('dragging'));
   document.body.classList.add('is-dragging-card');
 });
