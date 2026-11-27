@@ -451,6 +451,12 @@ function render() {
   $('#storeView').hidden = !onStore;
   $('#canvasDirectory').hidden = state.view !== CANVASES;
   $('#canvasWorkspace').hidden = !isCanvas(state.view);
+  if (pendingViewEnter) {
+    pendingViewEnter = false;
+    const viewEl = onBoard ? $('#board') : onArchive ? $('#archiveView') : onWorks ? $('#worksView') : onStore ? $('#storeView')
+      : state.view === CANVASES ? $('#canvasDirectory') : $('#canvasWorkspace');
+    playViewEnter(viewEl);
+  }
   if (onBoard) renderBoard();
   else if (onArchive) renderArchive();
   else if (onWorks) renderWorks();
@@ -654,11 +660,46 @@ function refreshCard(c) {
   if (before) playFlip(before);
 }
 const CANVAS_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="2"/><circle cx="9" cy="9" r="1"/><circle cx="15" cy="15" r="1"/><circle cx="15" cy="9" r="1"/><circle cx="9" cy="15" r="1"/></svg>`;
+let pendingViewEnter = false;
+function playViewEnter(el) {
+  if (!el || reduceMotion.matches) return;
+  el.classList.remove('view-entering');
+  void el.offsetWidth;
+  el.classList.add('view-entering');
+  el.addEventListener('animationend', () => el.classList.remove('view-entering'), { once: true });
+}
+function syncViewPill(prev = null) {
+  const views = $('#views'), pill = $('#viewPill'), active = views?.querySelector('.view-tab[aria-selected="true"]');
+  if (!views || !pill || !active) return;
+  views.classList.add('has-pill');
+  if (views.scrollWidth > views.clientWidth + 2) {
+    const aL = active.offsetLeft, aR = aL + active.offsetWidth;
+    if (aL < views.scrollLeft) views.scrollLeft = Math.max(0, aL - 8);
+    else if (aR > views.scrollLeft + views.clientWidth) views.scrollLeft = aR - views.clientWidth + 8;
+  }
+  const nextLeft = active.offsetLeft, nextW = active.offsetWidth;
+  pill.style.width = `${nextW}px`;
+  pill.style.transform = `translate3d(${nextLeft}px, 0, 0)`;
+  pill.classList.add('ready');
+  if (prev && prev.view !== active.dataset.view && prev.width > 0 && !reduceMotion.matches) {
+    const dir = nextLeft >= prev.left ? 1 : -1;
+    const overshoot = nextLeft + dir * 3;
+    pill.animate([
+      { transform: `translate3d(${prev.left}px, 0, 0) scaleY(1)`, width: `${prev.width}px` },
+      { transform: `translate3d(${(prev.left + nextLeft) / 2}px, 0, 0) scaleY(0.94)`, width: `${Math.max(prev.width, nextW) * 1.08}px`, offset: 0.42 },
+      { transform: `translate3d(${overshoot}px, 0, 0) scaleY(1.02)`, width: `${nextW * 0.985}px`, offset: 0.78 },
+      { transform: `translate3d(${nextLeft}px, 0, 0) scaleY(1)`, width: `${nextW}px` },
+    ], { duration: 360, easing: 'cubic-bezier(.22, 1, .36, 1)' });
+  }
+}
 function renderViews() {
+  const views = $('#views');
+  const curEl = views?.querySelector('.view-tab[aria-selected="true"]');
+  const prev = curEl ? { view: curEl.dataset.view, left: curEl.offsetLeft, width: curEl.offsetWidth } : null;
   const count = (id) => cardsIn(id, false).length;
   const boardCount = columns().reduce((n, c) => n + count(c.id), 0);
   const unreadCm = unreadCommentCountAll();
-  $('#views').innerHTML = `
+  views.innerHTML = `<i class="view-pill" id="viewPill" aria-hidden="true"></i>
     <button role="tab" class="view-tab" data-view="${BOARD}" aria-selected="${state.view === BOARD}">
       <svg viewBox="0 0 24 24"><rect x="4" y="4" width="4.5" height="16" rx="1"/><rect x="10" y="4" width="4.5" height="11" rx="1"/><rect x="16" y="4" width="4" height="7" rx="1"/></svg>看板<b>${boardCount}</b></button>
     <button role="tab" class="view-tab archive-tab" data-view="${ARCHIVE}" data-drop="${PICK}" aria-selected="${state.view === ARCHIVE}" title="彻底完成的项目归档在这里；把卡片拖到这里即可归档">
@@ -670,6 +711,7 @@ function renderViews() {
     <span class="view-sep" aria-hidden="true"></span>
     <button role="tab" class="view-tab canvas-tab" data-view="${CANVASES}" data-drop="${CANVAS_PICK}" aria-selected="${state.view === CANVASES || isCanvas(state.view)}" aria-controls="${isCanvas(state.view) ? 'canvasWorkspace' : 'canvasDirectory'}" title="查看全部画布工作区">
       ${CANVAS_SVG}画布<b>${canvases().length}</b>${unreadCm ? `<span class="tab-unread-badge" title="${unreadCm} 条未读备注">${unreadCm}</span>` : ''}</button>`;
+  syncViewPill(prev);
 }
 function renderCanvasMiniPreview(cv, cards) {
   const layout = cpv.computeCanvasPreviewLayout(cards, cv.shapes || [], cv.links || [], {
@@ -6108,6 +6150,7 @@ async function pickCanvas(exceptId) {
 }
 function setView(v) {
   if (v !== state.view) {
+    pendingViewEnter = true;
     openCommentId = null;
     draftComment = null;
     const tp = $('#commentThreadPop');
@@ -8115,7 +8158,7 @@ $('#search').addEventListener('input', (e) => {
 let scrollExpandRaf = 0;
 document.addEventListener('scroll', (e) => {
   const scroller = e.target;
-  if (!scroller?.querySelector) return;
+  if (typeof scroller?.matches !== 'function') return;
   if (!scroller.matches('.list, #archiveView, #worksView')) return;
   if (scrollExpandRaf) return;
   scrollExpandRaf = requestAnimationFrame(() => {
@@ -10382,6 +10425,8 @@ async function openBatchRename(cards, contextTitle = '') {
     await load();
     await ensureDefaults();
     render();
+    const viewsEl = $('#views');
+    if (viewsEl && typeof ResizeObserver === 'function') new ResizeObserver(() => syncViewPill()).observe(viewsEl);
     refreshStatus();
     agentCfg(); // 先读出「发给 Agent」的设置，点按钮时少等一步（浏览器的授权弹窗需要紧跟点击）
     if (state.cards.length) requestPersist();
