@@ -12,6 +12,25 @@ export const COLLAB_COLORS = [
   { name: '靛青色', hex: '#4f46e5' },
 ];
 
+export function pickDistinctColor(usedColors = [], preferredColor = '') {
+  const counts = new Map();
+  for (const raw of usedColors || []) {
+    const k = String(raw || '').trim().toLowerCase();
+    if (k) counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  const pref = String(preferredColor || '').trim();
+  if (pref && !counts.has(pref.toLowerCase())) return pref;
+  for (const c of COLLAB_COLORS) {
+    if (!counts.has(c.hex.toLowerCase())) return c.hex;
+  }
+  let best = COLLAB_COLORS[0].hex, bestCount = Infinity;
+  for (const c of COLLAB_COLORS) {
+    const n = counts.get(c.hex.toLowerCase()) || 0;
+    if (n < bestCount) { bestCount = n; best = c.hex; }
+  }
+  return best;
+}
+
 const ROOM_CHARS = '23456789abcdefghjkmnpqrstuvwxyz';
 export const CHUNK_SIZE = 48 * 1024; // 48KB 原始二进制分片（WebRTC DataChannel 安全水位）
 
@@ -385,8 +404,10 @@ export class CollabSession {
     this.joining = Boolean(joining);
     this.self = {
       id: user.id || uid(),
+      clientId: user.clientId || '',
       name: (user.name || '').trim() || `协作者 ${Math.floor(100 + Math.random() * 900)}`,
       color: user.color || COLLAB_COLORS[0].hex,
+      colorLocked: Boolean(user.colorLocked),
       isHost: !joining,
     };
     this.onEvent = onEvent;
@@ -465,9 +486,10 @@ export class CollabSession {
     this.peers.clear();
   }
 
-  updateSelf({ name, color }) {
+  updateSelf({ name, color, colorLocked }) {
     if (name && name.trim()) this.self.name = name.trim().slice(0, 24);
     if (color) this.self.color = color;
+    if (typeof colorLocked === 'boolean') this.self.colorLocked = colorLocked;
     this._announceHello(false);
     this._emit('peers', this.getPeers());
   }
@@ -508,7 +530,7 @@ export class CollabSession {
       msgId: uid(),
       roomId: this.roomId,
       senderId: this.self.id,
-      sender: { id: this.self.id, name: this.self.name, color: this.self.color, isHost: this.self.isHost },
+      sender: { id: this.self.id, clientId: this.self.clientId, name: this.self.name, color: this.self.color, isHost: this.self.isHost },
       ts: Date.now(),
       type,
       ...payload,
@@ -742,12 +764,49 @@ export class CollabSession {
     }
   }
 
+  _resolveColorConflict() {
+    if (this.self.colorLocked || !this.peers.size) return;
+    const myColor = (this.self.color || '').toLowerCase();
+    const myHost = Boolean(this.self.isHost);
+    let collision = false;
+    const used = [];
+    for (const p of this.peers.values()) {
+      if (p.color) used.push(p.color);
+      const pHost = Boolean(p.isHost);
+      const pWins = (pHost && !myHost) || (pHost === myHost && String(p.id) < String(this.self.id));
+      if (pWins && (p.color || '').toLowerCase() === myColor) collision = true;
+    }
+    if (!collision) return;
+    const next = pickDistinctColor(used, '');
+    if (next && next.toLowerCase() !== myColor) {
+      this.self.color = next;
+      this._emit('self-update', { ...this.self });
+      this._emit('status', this.getStatus());
+      this._announceHello(false);
+    }
+  }
+
   _touchPeer(pkt) {
     if (!pkt?.senderId || pkt.senderId === this.self.id) return null;
+    const cid = pkt.sender?.clientId || '';
+    if (this.self.clientId && cid && cid === this.self.clientId) {
+      if (this.joining) this.markSynced();
+      return null;
+    }
+    let removedDup = false;
+    if (cid) {
+      for (const [eid, ep] of this.peers) {
+        if (eid !== pkt.senderId && ep.clientId === cid) {
+          this.peers.delete(eid);
+          removedDup = true;
+        }
+      }
+    }
     const prev = this.peers.get(pkt.senderId) || {};
     const next = {
       ...prev,
       id: pkt.senderId,
+      clientId: cid || prev.clientId || '',
       name: pkt.sender?.name || prev.name || '协作者',
       color: pkt.sender?.color || prev.color || COLLAB_COLORS[1].hex,
       isHost: Boolean(pkt.sender?.isHost),
@@ -756,7 +815,8 @@ export class CollabSession {
     const isNew = !this.peers.has(pkt.senderId);
     const changedMeta = prev.name !== next.name || prev.color !== next.color || prev.isHost !== next.isHost;
     this.peers.set(pkt.senderId, next);
-    if (isNew || changedMeta) {
+    if (isNew || changedMeta) this._resolveColorConflict();
+    if (isNew || changedMeta || removedDup) {
       this._emit('peers', this.getPeers());
       this._emit('status', this.getStatus());
     }
@@ -769,9 +829,12 @@ export class CollabSession {
     if (pkt.msgId && this.seenMsgs.has(pkt.msgId)) return;
     this._rememberMsg(pkt.msgId);
 
-    // 房主节点承担星型中继（将某位 WebRTC 访客或本地通道的消息转发给其他远端访客）
+    // 房主节点承担星型中继（将某位 WebRTC 访客或本地通道的消息转发给其他远端访客）；
+    // 同浏览器副标签页发出的本地消息也由主标签页代为转发给远端（避免副标签重复登录 WebRTC）
     if (this.self.isHost && this.rtcConns.size > 0) {
       this._dispatchRaw(pkt, via === 'local' ? null : via, via === 'local');
+    } else if (via === 'local' && this.self.clientId && pkt.sender?.clientId === this.self.clientId && this.rtcConns.size > 0) {
+      this._dispatchRaw(pkt, null, true);
     }
 
     if (pkt.tombstones) {

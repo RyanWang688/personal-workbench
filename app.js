@@ -1,6 +1,6 @@
 import * as db from './db.js?v=8';
 import * as pv from './preview.js?v=7';
-import * as collab from './collab.js?v=7';
+import * as collab from './collab.js?v=8';
 import * as rn from './rename.js?v=1';
 import * as cpv from './canvas-preview.js?v=1';
 import * as zip from './zip.js?v=1';
@@ -4073,21 +4073,30 @@ function commitEditingText() {
   if (!id) return;
   editingShape = null;
   const s = shapeById(id), el = shEl(id), tx = el?.querySelector('.sh-tx');
+  let changedText = false;
   if (s && tx) {
     s.text = tx.innerText.replace(/\n$/, '').replace(/^\n+|\n+$/g, '');
     tx.contentEditable = 'false';
     el.classList.remove('editing');
-    if (editSnap && s.text !== editOrig) record(editSnap);
+    changedText = s.text !== editOrig;
+    if (editSnap && changedText) record(editSnap);
   }
   editSnap = null;
+  sendCollabCursor(undefined, undefined, '', { immediate: true });
   const b = boardOf();
-  if (b) saveArea(b);
+  if (b && changedText) saveArea(b);
+  flushDeferredCollab();
 }
 function startEdit(id, opts = {}) {
   let s = shapeById(id);
   if (!s) return;
   if (isSticker(s)) { editStickerText(id); return; }
   if (s.lk) { toast('已锁定：先解锁（Ctrl + Shift + L）才能编辑文字'); return; }
+  const editingPeer = !opts.keep && collabSession?.getPeers?.().find((p) => p.editingId === id && Date.now() - (p.lastSeen || 0) < 10000);
+  if (editingPeer) {
+    toast(`${editingPeer.name} 正在编辑此内容，请稍候`);
+    return;
+  }
   if (editingShape && editingShape !== id) commitEditingText();
   // 先确保它是唯一选中的（只重绘一次，不递归）
   if (!(isPicked(id) && selIds().length === 1)) { state.bsel = pickShapes([id]); renderCanvas(); }
@@ -4106,6 +4115,7 @@ function startEdit(id, opts = {}) {
   if (opts.keep || s.text) r.collapse(false);
   const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
   fitShapeText(s, el);
+  sendCollabCursor(undefined, undefined, '正在编辑文字', { immediate: true });
 }
 // 便签：字多了自动缩小字号（不改便签大小）；其他形状：字多了自动长高
 // 文字放不下时自动缩小字号（设置的字号是上限，最小 10px），按各形状实际的内边距算可用高度；
@@ -4148,17 +4158,20 @@ async function finishEdit() {
   if (!id) return;
   editingShape = null;
   const s = shapeById(id), el = shEl(id);
-  if (!s || !el) return;
+  if (!s || !el) { sendCollabCursor(undefined, undefined, '', { immediate: true }); flushDeferredCollab(); return; }
   const tx = el.querySelector('.sh-tx');
   tx.contentEditable = 'false';
   el.classList.remove('editing');
   s.text = tx.innerText.replace(/\n$/, '').replace(/^\n+|\n+$/g, '');
   s.h = Math.max(s.t === 'text' ? 24 : 30, parseFloat(el.style.height) || s.h);
-  if (editSnap && s.text !== editOrig) record(editSnap);
+  const changedText = s.text !== editOrig;
+  if (editSnap && changedText) record(editSnap);
   editSnap = null;
   const b = boardOf();
-  if (s.t === 'text' && !s.text.trim()) { b.shapes = b.shapes.filter((x) => x !== s); b.links = b.links.filter((l) => l.from.id !== id && l.to.id !== id); state.bsel = null; }
-  await saveBoard();
+  const removedEmpty = s.t === 'text' && !s.text.trim();
+  if (removedEmpty) { b.shapes = b.shapes.filter((x) => x !== s); b.links = b.links.filter((l) => l.from.id !== id && l.to.id !== id); state.bsel = null; }
+  sendCollabCursor(undefined, undefined, '', { immediate: true });
+  if (changedText || removedEmpty) await saveBoard();
   flushDeferredCollab();
 }
 document.addEventListener('input', (e) => {
@@ -4168,6 +4181,9 @@ document.addEventListener('input', (e) => {
     fitShapeText(s, el);
     const liveText = e.target.innerText.replace(/\n$/, '').replace(/^\n+|\n+$/g, '');
     const liveH = Math.max(s.t === 'text' ? 24 : 30, parseFloat(el.style.height) || s.h);
+    s.text = liveText;
+    s.h = liveH;
+    s._u = Date.now();
     sendCollabShapeLive([{ ...s, text: liveText, h: liveH }], '正在输入文字');
   }
 });
@@ -8386,20 +8402,22 @@ function getCollabProfile() {
   if (tabCollabProfile) return tabCollabProfile;
   const saved = ls.get('collabProfile', null);
   const colorIdx = Math.floor(Math.random() * collab.COLLAB_COLORS.length);
+  const clientId = saved?.clientId || uid();
   tabCollabProfile = {
     id: TAB_PEER_ID,
+    clientId,
     name: saved?.name || `设计师 ${Math.floor(100 + Math.random() * 900)}`,
     color: saved?.color || collab.COLLAB_COLORS[colorIdx].hex,
   };
-  if (!saved) ls.set('collabProfile', { name: tabCollabProfile.name, color: tabCollabProfile.color });
+  if (!saved || !saved.clientId) ls.set('collabProfile', { clientId: tabCollabProfile.clientId, name: tabCollabProfile.name, color: tabCollabProfile.color });
   return tabCollabProfile;
 }
 
-function saveCollabProfile(patch) {
+function saveCollabProfile(patch, opts = {}) {
   const cur = getCollabProfile();
-  tabCollabProfile = { ...cur, ...patch, id: TAB_PEER_ID };
-  ls.set('collabProfile', { name: tabCollabProfile.name, color: tabCollabProfile.color });
-  if (collabSession) collabSession.updateSelf({ name: tabCollabProfile.name, color: tabCollabProfile.color });
+  tabCollabProfile = { ...cur, ...patch, id: TAB_PEER_ID, clientId: cur.clientId };
+  ls.set('collabProfile', { clientId: tabCollabProfile.clientId, name: tabCollabProfile.name, color: tabCollabProfile.color });
+  if (collabSession) collabSession.updateSelf({ name: tabCollabProfile.name, color: tabCollabProfile.color, ...(opts.colorLocked ? { colorLocked: true } : {}) });
   renderCollabUI();
   if (!$('#collabPopover').hidden) renderCollabPopover();
   return tabCollabProfile;
@@ -8512,13 +8530,12 @@ function scheduleCollabSync() {
   }, 30);
 }
 
-function sendCollabCursor(wx, wy, act = '') {
+function sendCollabCursor(wx, wy, act = '', { immediate = false } = {}) {
   if (!collabSession || collabSession.joining || !isCanvas(state.view) || state.view !== collabSession.canvasId) return;
   if (typeof wx === 'number') lastCollabCursor.x = wx;
   if (typeof wy === 'number') lastCollabCursor.y = wy;
   if (act !== undefined) lastCollabCursor.act = act;
-  if (collabCursorTimer) return;
-  collabCursorTimer = setTimeout(() => {
+  const emitCursor = () => {
     collabCursorTimer = 0;
     if (!collabSession || collabSession.joining) return;
     const picked = [...selIds(), ...state.selected, ...(state.pickedCard ? [state.pickedCard] : [])];
@@ -8534,7 +8551,14 @@ function sendCollabCursor(wx, wy, act = '') {
       action: editingShape ? '正在输入…' : (bd?.moved || cardDrag?.moved ? '正在调整…' : lastCollabCursor.act || ''),
       cam: { cx: Math.round(viewCenterW.x), cy: Math.round(viewCenterW.y), z: Number(c.z.toFixed(3)) },
     });
-  }, 42);
+  };
+  if (immediate) {
+    clearTimeout(collabCursorTimer);
+    emitCursor();
+    return;
+  }
+  if (collabCursorTimer) return;
+  collabCursorTimer = setTimeout(emitCursor, 42);
 }
 
 let pendingLiveShapes = null;
@@ -8682,7 +8706,7 @@ function applyRemoteCardLive(pkt) {
 async function applyRemoteSnapshot(pkt, isWelcome = false) {
   const snap = pkt?.snapshot;
   if (!collabSession || !snap) return;
-  if (bd?.moved || cardDrag?.moved) {
+  if (bd?.moved || cardDrag?.moved || editingShape) {
     deferredCollabPkts.push({ pkt, isWelcome });
     return;
   }
@@ -9159,6 +9183,39 @@ async function copyTextWithToast(text, msg) {
   }
 }
 
+const COLLAB_TAB_KEY = (roomId) => `wb:collabActive:${roomId}`;
+let collabTabBeat = 0, collabTabOwnerRoom = '';
+function hasActiveBrowserRoomTab(roomId, clientId) {
+  try {
+    const raw = localStorage.getItem(COLLAB_TAB_KEY(roomId));
+    if (!raw) return false;
+    const rec = JSON.parse(raw);
+    return rec && rec.tabId !== TAB_PEER_ID && rec.clientId === clientId && (Date.now() - (rec.ts || 0)) < 8000;
+  } catch { return false; }
+}
+function startCollabTabLease(roomId, clientId) {
+  stopCollabTabLease();
+  collabTabOwnerRoom = roomId;
+  const write = () => {
+    try { localStorage.setItem(COLLAB_TAB_KEY(roomId), JSON.stringify({ tabId: TAB_PEER_ID, clientId, ts: Date.now() })); } catch {}
+  };
+  write();
+  collabTabBeat = setInterval(write, 2500);
+}
+function stopCollabTabLease() {
+  clearInterval(collabTabBeat);
+  collabTabBeat = 0;
+  if (!collabTabOwnerRoom) return;
+  const rId = collabTabOwnerRoom;
+  collabTabOwnerRoom = '';
+  try {
+    const raw = localStorage.getItem(COLLAB_TAB_KEY(rId));
+    const rec = raw ? JSON.parse(raw) : null;
+    if (rec?.tabId === TAB_PEER_ID) localStorage.removeItem(COLLAB_TAB_KEY(rId));
+  } catch {}
+}
+window.addEventListener('beforeunload', stopCollabTabLease);
+
 async function startCollabRoom(customRoomId = '', { autoCopy = true, quiet = false, isJoining = false } = {}) {
   let cvId = isCanvas(state.view) ? state.view : canvases()[0]?.id;
   if (!cvId) {
@@ -9177,22 +9234,31 @@ async function startCollabRoom(customRoomId = '', { autoCopy = true, quiet = fal
     collabSession.stop();
     collabSession = null;
   }
+  stopCollabTabLease();
   followPeerId = null;
   recordCanvasBaseline(area(cvId));
   const prof = getCollabProfile();
-  if (!isJoining) {
+  const sameBrowserActive = hasActiveBrowserRoomTab(roomId, prof.clientId);
+  if (!sameBrowserActive) startCollabTabLease(roomId, prof.clientId);
+  const joinMode = sameBrowserActive ? true : isJoining;
+  if (!joinMode) {
     try { sessionStorage.setItem('wb:collabHostRoom', roomId); } catch {}
   }
 
   collabSession = new collab.CollabSession({
     roomId,
     canvasId: cvId,
-    joining: isJoining,
+    joining: joinMode,
+    enableWebRTC: !sameBrowserActive,
     user: prof,
     getSnapshot: () => (collabSession?.joining ? null : buildCanvasSnapshot(collabSession?.canvasId || cvId)),
     getBlobById: async (cardId, kind) => (kind === 'thumb' ? db.getThumb(cardId) : db.getBlob(cardId)),
     onEvent: (type, detail) => {
-      if (type === 'status' || type === 'peers') {
+      if (type === 'self-update') {
+        if (detail?.color && tabCollabProfile) tabCollabProfile.color = detail.color;
+        renderCollabUI();
+        if (!$('#collabPopover').hidden) renderCollabPopover();
+      } else if (type === 'status' || type === 'peers') {
         renderCollabUI();
         if (!$('#collabPopover').hidden) renderCollabPopover();
         renderCollabOverlay();
@@ -9230,7 +9296,7 @@ async function startCollabRoom(customRoomId = '', { autoCopy = true, quiet = fal
 
   if (autoCopy) {
     await copyTextWithToast(getInviteMessage(collabSession.roomId), '已开启多人协作并复制邀请，发给同伴打开即可一起编辑');
-  } else if (!quiet) {
+  } else if (!quiet && !sameBrowserActive) {
     toast('已加入多人实时协作');
   }
 }
@@ -9238,6 +9304,7 @@ async function startCollabRoom(customRoomId = '', { autoCopy = true, quiet = fal
 function leaveCollabRoom() {
   if (!collabSession) return;
   try { sessionStorage.removeItem('wb:collabHostRoom'); } catch {}
+  stopCollabTabLease();
   collabSession.stop();
   collabSession = null;
   followPeerId = null;
@@ -9321,7 +9388,7 @@ $('#canvasWorkspace').addEventListener('click', async (e) => {
   }
   const sw = e.target.closest('[data-collab-color]');
   if (sw) {
-    saveCollabProfile({ color: sw.dataset.collabColor });
+    saveCollabProfile({ color: sw.dataset.collabColor }, { colorLocked: true });
     return;
   }
   const actBtn = e.target.closest('[data-collab-act]');

@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  COLLAB_COLORS,
+  pickDistinctColor,
   generateRoomId,
   normalizeRoomId,
   formatInviteMessage,
@@ -33,6 +35,16 @@ test('formatInviteMessage prepends initiator nickname and canvas prompt cleanly 
 
   const fallbackHost = formatInviteMessage(url, { hostName: '   ', canvasTitle: '' });
   assert.equal(fallbackHost, '同伴 邀请你一起在方寸协作创作画布，打开浏览器进入：https://ryanwang688.github.io/personal-workbench/?v=99435fa&room=af654s');
+});
+
+test('pickDistinctColor avoids colliding peer colors and falls back when all palette entries are used', () => {
+  const c0 = COLLAB_COLORS[0].hex;
+  const c1 = COLLAB_COLORS[1].hex;
+  assert.equal(pickDistinctColor([c0], c1), c1);
+  assert.equal(pickDistinctColor([c0], c0), c1);
+  assert.equal(pickDistinctColor(COLLAB_COLORS.slice(0, 7).map((c) => c.hex), c0), COLLAB_COLORS[7].hex);
+  const all = COLLAB_COLORS.map((c) => c.hex);
+  assert.ok(all.includes(pickDistinctColor([...all, ...all.slice(0, 5)], '')));
 });
 
 test('mergeBoardState merges concurrent shapes, resolves LWW conflicts, and enforces deletion tombstones', () => {
@@ -765,4 +777,132 @@ test('CollabSession delivers real-time comment-notify events through WebRTC star
   host.stop();
   guestB.stop();
   guestC.stop();
+});
+
+test('CollabSession deduplicates same-browser tabs sharing clientId locally and for remote peers', async () => {
+  function makeMockRtcPair(hostSession, hostPeerLabel, guestSession, guestPeerLabel) {
+    const hostConn = {
+      peer: guestPeerLabel, open: true, handlers: {},
+      on(ev, fn) { (this.handlers[ev] ||= []).push(fn); },
+      send(pkt) { queueMicrotask(() => guestConn._emit('data', structuredClone(pkt))); },
+      close() { this.open = false; this._emit('close'); },
+      _emit(ev, arg) { (this.handlers[ev] || []).forEach((f) => f(arg)); },
+    };
+    const guestConn = {
+      peer: hostPeerLabel, open: true, handlers: {},
+      on(ev, fn) { (this.handlers[ev] ||= []).push(fn); },
+      send(pkt) { queueMicrotask(() => hostConn._emit('data', structuredClone(pkt))); },
+      close() { this.open = false; this._emit('close'); },
+      _emit(ev, arg) { (this.handlers[ev] || []).forEach((f) => f(arg)); },
+    };
+    hostSession._bindRTCConn(hostConn);
+    guestSession._bindRTCConn(guestConn);
+  }
+  const buses = new Map();
+  const makeBus = (name, fn) => {
+    let subs = buses.get(name);
+    if (!subs) buses.set(name, (subs = new Set()));
+    subs.add(fn);
+    return {
+      postMessage(pkt) { for (const s of subs) if (s !== fn) s(pkt); },
+      close() { subs.delete(fn); },
+    };
+  };
+  const isolated = () => {
+    const fns = new Set();
+    return (_, fn) => { fns.add(fn); return { postMessage: () => {}, close: () => fns.delete(fn) }; };
+  };
+
+  const tab1 = new CollabSession({
+    roomId: 'dup01',
+    canvasId: 'cv-1',
+    user: { id: 'tab-1', clientId: 'browser-A', name: 'Ryan', color: '#2563eb' },
+    enableWebRTC: false,
+    transportFactory: makeBus,
+    getSnapshot: () => ({ canvasId: 'cv-1', title: '画布', _u: 10, shapes: [], links: [], comments: [], cards: [] }),
+  });
+  const tab2 = new CollabSession({
+    roomId: 'dup01',
+    canvasId: 'cv-tmp',
+    joining: true,
+    user: { id: 'tab-2', clientId: 'browser-A', name: 'Ryan', color: '#2563eb' },
+    enableWebRTC: false,
+    transportFactory: makeBus,
+  });
+  const remote = new CollabSession({
+    roomId: 'dup01',
+    canvasId: 'cv-r',
+    joining: true,
+    user: { id: 'remote-1', clientId: 'browser-B', name: 'Bob', color: '#e11d48' },
+    enableWebRTC: false,
+    transportFactory: isolated(),
+    onEvent: (t, d) => { if (t === 'welcome') remote.markSynced(d.snapshot.canvasId); },
+  });
+
+  await tab1.start();
+  await tab2.start();
+  await remote.start();
+  makeMockRtcPair(tab1, 'fangcun-wb-v1-dup01', remote, 'rtc-r1');
+  await new Promise((r) => setTimeout(r, 35));
+
+  // Same-browser tabs must NOT see each other as duplicate peers; both only see remote Bob
+  assert.equal(tab1.getPeers().length, 1);
+  assert.equal(tab1.getPeers()[0].id, 'remote-1');
+  assert.equal(tab2.joining, false);
+  assert.equal(tab2.getPeers().length, 1);
+  assert.equal(tab2.getPeers()[0].id, 'remote-1');
+  // Remote peer sees only 1 Ryan (tab1), never 2
+  assert.equal(remote.getPeers().length, 1);
+  assert.equal(remote.getPeers()[0].clientId, 'browser-A');
+
+  tab1.stop();
+  tab2.stop();
+  remote.stop();
+});
+
+test('late-joining guest automatically switches to a non-colliding color and emits self-update', async () => {
+  const buses = new Map();
+  const makeBus = (name, fn) => {
+    let subs = buses.get(name);
+    if (!subs) buses.set(name, (subs = new Set()));
+    subs.add(fn);
+    return {
+      postMessage(pkt) { for (const s of subs) if (s !== fn) s(pkt); },
+      close() { subs.delete(fn); },
+    };
+  };
+
+  const selfUpdates = [];
+  const host = new CollabSession({
+    roomId: 'col01',
+    canvasId: 'cv-1',
+    user: { id: 'h-1', clientId: 'cid-h', name: '房主', color: COLLAB_COLORS[0].hex },
+    enableWebRTC: false,
+    transportFactory: makeBus,
+    getSnapshot: () => ({ canvasId: 'cv-1', title: '画布', _u: 10, shapes: [], links: [], comments: [], cards: [] }),
+  });
+  const guest = new CollabSession({
+    roomId: 'col01',
+    canvasId: 'cv-g',
+    joining: true,
+    user: { id: 'g-1', clientId: 'cid-g', name: '新成员', color: COLLAB_COLORS[0].hex },
+    enableWebRTC: false,
+    transportFactory: makeBus,
+    onEvent: (t, d) => {
+      if (t === 'welcome') guest.markSynced(d.snapshot.canvasId);
+      if (t === 'self-update') selfUpdates.push(d);
+    },
+  });
+
+  await host.start();
+  await guest.start();
+  await new Promise((r) => setTimeout(r, 35));
+
+  assert.equal(host.self.color, COLLAB_COLORS[0].hex);
+  assert.notEqual(guest.self.color, host.self.color);
+  assert.ok(selfUpdates.length >= 1);
+  assert.equal(host.getPeers()[0]?.color, guest.self.color);
+
+  host.stop();
+  guest.stop();
 });
