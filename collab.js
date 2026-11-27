@@ -45,6 +45,13 @@ export function normalizeRoomId(input) {
   return s.length >= 3 && s.length <= 32 ? s : '';
 }
 
+export function formatInviteMessage(url, { hostName = '', canvasTitle = '' } = {}) {
+  const who = String(hostName || '').trim() || '同伴';
+  const title = String(canvasTitle || '').trim();
+  const board = title && title !== '画布' ? `画布「${title}」` : '画布';
+  return `${who} 邀请你一起在方寸协作创作${board}，打开浏览器进入：${url}`;
+}
+
 export function clonePlain(obj) {
   if (!obj || typeof obj !== 'object') return obj;
   return JSON.parse(JSON.stringify(obj, (k, v) => (k === '_t' ? undefined : v)));

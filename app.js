@@ -1,6 +1,6 @@
 import * as db from './db.js?v=8';
 import * as pv from './preview.js?v=7';
-import * as collab from './collab.js?v=6';
+import * as collab from './collab.js?v=7';
 import * as rn from './rename.js?v=1';
 import * as cpv from './canvas-preview.js?v=1';
 import * as zip from './zip.js?v=1';
@@ -9077,7 +9077,7 @@ function renderCollabPopover() {
         <p class="cp-room-sub">无需房间号或配置服务器：点击下方按钮开启后，直接复制当前网址发给同伴，对方打开网页即可看到你的画布并实时一起编辑。</p>
         <button type="button" class="btn primary cp-start-btn" data-collab-act="start">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>
-          <span>开启多人协作并复制网址</span>
+          <span>开启多人协作并复制邀请</span>
         </button>
       </div>`;
     return;
@@ -9094,7 +9094,7 @@ function renderCollabPopover() {
       <div class="cp-room-actions">
         <button type="button" class="btn primary" data-collab-act="copy-link">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>
-          <span>复制协作网址</span>
+          <span>复制协作邀请</span>
         </button>
       </div>
     </div>
@@ -9135,6 +9135,13 @@ function getInviteUrl(roomId) {
   } catch {
     return `${location.origin}${location.pathname}?room=${roomId}`;
   }
+}
+
+function getInviteMessage(roomId) {
+  const url = getInviteUrl(roomId);
+  const prof = getCollabProfile();
+  const cvTitle = area(collabSession?.canvasId || state.view)?.title || '';
+  return collab.formatInviteMessage(url, { hostName: prof?.name, canvasTitle: cvTitle });
 }
 
 async function copyTextWithToast(text, msg) {
@@ -9222,7 +9229,7 @@ async function startCollabRoom(customRoomId = '', { autoCopy = true, quiet = fal
   renderCollabOverlay();
 
   if (autoCopy) {
-    await copyTextWithToast(getInviteUrl(collabSession.roomId), '已开启多人协作并复制网址，发给同伴打开即可一起编辑');
+    await copyTextWithToast(getInviteMessage(collabSession.roomId), '已开启多人协作并复制邀请，发给同伴打开即可一起编辑');
   } else if (!quiet) {
     toast('已加入多人实时协作');
   }
@@ -9323,7 +9330,7 @@ $('#canvasWorkspace').addEventListener('click', async (e) => {
   if (act === 'start') {
     await startCollabRoom('', { autoCopy: true, isJoining: false });
   } else if (act === 'copy-link' && collabSession) {
-    await copyTextWithToast(getInviteUrl(collabSession.roomId), '✓ 协作网址已复制，发给同伴打开即可进入画布');
+    await copyTextWithToast(getInviteMessage(collabSession.roomId), '✓ 协作邀请已复制，发给同伴打开即可进入画布');
   } else if (act === 'leave') {
     leaveCollabRoom();
   }

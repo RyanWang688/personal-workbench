@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   generateRoomId,
   normalizeRoomId,
+  formatInviteMessage,
   mergeBoardState,
   mergeComments,
   mergeCanvasCards,
@@ -19,6 +20,19 @@ test('generateRoomId and normalizeRoomId handle codes, hashes, and invite URLs',
   assert.equal(normalizeRoomId(`https://ryanwang688.github.io/personal-workbench/?room=${code}#canvas`), code);
   assert.equal(normalizeRoomId('?foo=1&room=team-room_01'), 'team-room_01');
   assert.equal(normalizeRoomId('ab'), '');
+});
+
+test('formatInviteMessage prepends initiator nickname and canvas prompt cleanly while preserving room parsing', () => {
+  const url = 'https://ryanwang688.github.io/personal-workbench/?v=99435fa&room=af654s';
+  const named = formatInviteMessage(url, { hostName: 'Ryan', canvasTitle: '产品原型' });
+  assert.equal(named, 'Ryan 邀请你一起在方寸协作创作画布「产品原型」，打开浏览器进入：https://ryanwang688.github.io/personal-workbench/?v=99435fa&room=af654s');
+  assert.equal(normalizeRoomId(named), 'af654s');
+
+  const defCanvas = formatInviteMessage(url, { hostName: 'Ryan', canvasTitle: '画布' });
+  assert.equal(defCanvas, 'Ryan 邀请你一起在方寸协作创作画布，打开浏览器进入：https://ryanwang688.github.io/personal-workbench/?v=99435fa&room=af654s');
+
+  const fallbackHost = formatInviteMessage(url, { hostName: '   ', canvasTitle: '' });
+  assert.equal(fallbackHost, '同伴 邀请你一起在方寸协作创作画布，打开浏览器进入：https://ryanwang688.github.io/personal-workbench/?v=99435fa&room=af654s');
 });
 
 test('mergeBoardState merges concurrent shapes, resolves LWW conflicts, and enforces deletion tombstones', () => {
