@@ -1048,7 +1048,7 @@ body.board-dragging .comment-pin { transition: none; }
 .viewport[data-bg="none"] { background-image: none; }
 .viewport.panning { cursor: grabbing; }
 .viewport.drop-active { box-shadow: inset 0 0 0 2px var(--accent); }
-.world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
 .card.on-canvas { position: absolute; width: 232px; cursor: grab; touch-action: none; }
 .card.on-canvas:not(.has-img) { padding-right: 92px; }
 .card.on-canvas .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

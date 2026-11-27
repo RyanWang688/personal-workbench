@@ -2569,9 +2569,9 @@ async function ensureCanvasPdf(img, force = false) {
   if (!card) return;
   const cardEl = img.closest('.card');
   const dpr = Math.min(3, window.devicePixelRatio || 1);
-  const zoom = Math.max(1, Math.min(2.5, cam().z || 1));
+  const zoom = Math.max(1, Math.min(6, cam().z || 1));
   const cssW = card.w || cardEl?.offsetWidth || 360;
-  const targetW = Math.min(2800, Math.max(1200, Math.ceil((cssW * dpr * zoom) / 200) * 200));
+  const targetW = Math.min(4096, Math.max(1200, Math.ceil((cssW * dpr * zoom) / 200) * 200));
   const rawPage = Math.max(1, card.pdfPage || 1);
   const key0 = `${id}:${rawPage}`;
   if (!force && pdfPageUrls.has(key0) && (pdfPageWidths.get(key0) || 0) >= targetW * 0.85) {
@@ -2745,6 +2745,8 @@ function loadThumbs(root = document) {
 
 // ---------- 无限画布 ----------
 const CARD_W = 232;
+const ZOOM_MIN = 0.1;  // 10%
+const ZOOM_MAX = 10;   // 1000%
 const cam = () => state.cams[state.view] || (state.cams[state.view] = { x: 80, y: 60, z: 1 });
 const saveCam = () => ls.set('cams', state.cams);
 // ---------- 画布背景：点阵 / 方格 / 纯色，间距随缩放自适应 ----------
@@ -2779,11 +2781,15 @@ function canvasBgMenu(anchor) {
 }
 function applyCam() {
   const c = cam();
-  $('#world').style.transform = `translate(${c.x}px, ${c.y}px) scale(${c.z})`;
+  const dpr = window.devicePixelRatio || 1;
+  const tx = Math.round(c.x * dpr) / dpr;
+  const ty = Math.round(c.y * dpr) / dpr;
+  const world = $('#world');
+  world.style.transform = `translate(${tx}px, ${ty}px) scale(${+c.z.toFixed(6)})`;
   const vp = $('#viewport');
   applyCanvasBg(vp, c);
   $('#zoomLabel').textContent = `${Math.round(c.z * 100)}%`;
-  $('#world').style.setProperty('--iz', (1 / c.z).toFixed(4)); // 选框、手柄不随缩放变粗变细
+  world.style.setProperty('--iz', (1 / c.z).toFixed(4)); // 选框、手柄不随缩放变粗变细
   positionFmt();
   positionCommentPop();
   scheduleCanvasPdfSharpen();
@@ -2871,7 +2877,7 @@ function zoomAt(factor, clientX, clientY, animate = false) {
   stopInertia();
   const c = cam(), r = $('#viewport').getBoundingClientRect();
   if (clientX == null) { clientX = r.left + r.width / 2; clientY = r.top + r.height / 2; }
-  const z = Math.min(3, Math.max(0.15, c.z * factor));
+  const z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, c.z * factor));
   const px = clientX - r.left, py = clientY - r.top;
   const to = { x: px - (px - c.x) * (z / c.z), y: py - (py - c.y) * (z / c.z), z };
   if (animate) return tweenCam(to);
@@ -2888,7 +2894,7 @@ function zoomFit() {
     x1 = Math.min(x1, x); y1 = Math.min(y1, y); x2 = Math.max(x2, x + el.offsetWidth); y2 = Math.max(y2, y + el.offsetHeight);
   }
   const r = $('#viewport').getBoundingClientRect(), pad = 60;
-  const z = Math.min(1.2, Math.max(0.15, Math.min((r.width - pad * 2) / (x2 - x1), (r.height - pad * 2) / (y2 - y1))));
+  const z = Math.min(1.2, Math.max(ZOOM_MIN, Math.min((r.width - pad * 2) / (x2 - x1), (r.height - pad * 2) / (y2 - y1))));
   tweenCam({ z, x: (r.width - (x2 - x1) * z) / 2 - x1 * z, y: (r.height - (y2 - y1) * z) / 2 - y1 * z });
 }
 // 整理排列：选中了多个形状 → 把这些形状排成整齐的网格；否则 → 把文件卡片排成瀑布流（放在白板形状右侧，不压住它们）
@@ -4985,7 +4991,7 @@ $('#fmtBar').addEventListener('change', (e) => {
 // ---- 缩放到选中 / 快捷键速查 ----
 function zoomToBox(box, maxZ = 2) {
   const r = $('#viewport').getBoundingClientRect(), pad = 80;
-  const z = Math.min(maxZ, Math.max(0.15, Math.min((r.width - pad * 2) / Math.max(box.w, 1), (r.height - pad * 2) / Math.max(box.h, 1))));
+  const z = Math.min(maxZ, Math.max(ZOOM_MIN, Math.min((r.width - pad * 2) / Math.max(box.w, 1), (r.height - pad * 2) / Math.max(box.h, 1))));
   tweenCam({ z, x: r.width / 2 - (box.x + box.w / 2) * z, y: r.height / 2 - (box.y + box.h / 2) * z });
 }
 function zoomToSelection() {
