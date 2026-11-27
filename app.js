@@ -1835,13 +1835,15 @@ function coverCard(w) {
   return cardsIn(w.id, false).find((c) => c.thumb === 'ok' && typeOf(c).k === 'image');
 }
 const coverKey = (w) => `${w.cover || 'auto'}|${coverCard(w)?.id || ''}|${safeUrl(w.url)}`;
-const MAX_WORK_LIVE_IFRAMES = 3;
+const MAX_WORK_LIVE_IFRAMES = 12;
 let workLiveTimer = 0, workLiveIO = null, workLiveQueue = [], workLiveActive = false, workLiveRunId = 0;
+const workLiveVisible = new Set();
 function teardownWorkLiveCovers() {
   clearTimeout(workLiveTimer);
   workLiveTimer = 0;
   workLiveRunId++;
   workLiveQueue = [];
+  workLiveVisible.clear();
   workLiveActive = false;
   if (workLiveIO) { workLiveIO.disconnect(); workLiveIO = null; }
   const root = $('#worksView');
@@ -1858,10 +1860,15 @@ async function pumpWorkLiveQueue(runId) {
       if (!box?.isConnected || box.querySelector('iframe') || !box.dataset.src) continue;
       const root = $('#worksView');
       const mounted = [...(root?.querySelectorAll('.work-live') || [])].filter((el) => el.querySelector('iframe'));
-      while (mounted.length >= MAX_WORK_LIVE_IFRAMES) {
-        const victim = mounted.shift();
-        victim?.querySelector('iframe')?.remove();
-        victim?.classList.remove('loading', 'loaded');
+      if (mounted.length >= MAX_WORK_LIVE_IFRAMES) {
+        const offscreen = mounted.filter((el) => !workLiveVisible.has(el));
+        while (mounted.length >= MAX_WORK_LIVE_IFRAMES && offscreen.length) {
+          const victim = offscreen.shift();
+          const idx = mounted.indexOf(victim);
+          if (idx >= 0) mounted.splice(idx, 1);
+          victim?.querySelector('iframe')?.remove();
+          victim?.classList.remove('loading', 'loaded');
+        }
       }
       box.style.setProperty('--s', (box.clientWidth || 250) / 1280);
       box.classList.add('loading');
@@ -1873,22 +1880,27 @@ async function pumpWorkLiveQueue(runId) {
       ifr.setAttribute('referrerpolicy', 'no-referrer');
       ifr.title = '';
       await new Promise((resolve) => {
-        let done = false;
-        const finish = () => {
-          if (done) return;
-          done = true;
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
           clearTimeout(tm);
-          box.classList.remove('loading');
-          if (box.isConnected && ifr.isConnected) box.classList.add('loaded');
           resolve();
         };
-        const tm = setTimeout(finish, 2500);
-        ifr.addEventListener('load', finish, { once: true });
-        ifr.addEventListener('error', finish, { once: true });
+        const tm = setTimeout(done, 1800);
+        ifr.addEventListener('load', () => {
+          box.classList.remove('loading');
+          if (box.isConnected && ifr.isConnected) box.classList.add('loaded');
+          done();
+        }, { once: true });
+        ifr.addEventListener('error', () => {
+          box.classList.remove('loading');
+          done();
+        }, { once: true });
         box.appendChild(ifr);
       });
       if (runId !== workLiveRunId) break;
-      await new Promise((r) => setTimeout(r, 180));
+      await new Promise((r) => setTimeout(r, 120));
     }
   } finally {
     workLiveActive = false;
@@ -1901,12 +1913,13 @@ function scheduleWorkLiveCovers() {
   clearTimeout(workLiveTimer);
   if (workLiveIO) { workLiveIO.disconnect(); workLiveIO = null; }
   workLiveQueue = [];
+  workLiveVisible.clear();
   if (EMBEDDED || state.view !== WORKS || openWork()) return;
   const runId = ++workLiveRunId;
   workLiveTimer = setTimeout(() => {
     if (runId !== workLiveRunId || state.view !== WORKS || openWork()) return;
     const root = $('#worksView');
-    const targets = [...(root?.querySelectorAll('.work-live[data-src]') || [])].filter((b) => !b.querySelector('iframe'));
+    const targets = [...(root?.querySelectorAll('.work-live[data-src]') || [])];
     if (!targets.length) return;
     const enqueue = (box) => {
       if (!box.isConnected || box.querySelector('iframe') || workLiveQueue.includes(box)) return;
@@ -1914,15 +1927,19 @@ function scheduleWorkLiveCovers() {
       pumpWorkLiveQueue(runId);
     };
     if (typeof IntersectionObserver !== 'function') {
+      targets.forEach((b) => workLiveVisible.add(b));
       targets.slice(0, MAX_WORK_LIVE_IFRAMES).forEach(enqueue);
       return;
     }
     workLiveIO = new IntersectionObserver((entries) => {
       if (runId !== workLiveRunId) return;
       for (const e of entries) {
-        if (!e.isIntersecting) continue;
-        workLiveIO?.unobserve(e.target);
-        enqueue(e.target);
+        if (e.isIntersecting) {
+          workLiveVisible.add(e.target);
+          if (!e.target.querySelector('iframe')) enqueue(e.target);
+        } else {
+          workLiveVisible.delete(e.target);
+        }
       }
     }, { root, rootMargin: '40px' });
     targets.forEach((b) => workLiveIO.observe(b));
