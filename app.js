@@ -1795,13 +1795,28 @@ const allWorkCats = () => [...new Set([...(state.workCats || []), ...works().map
 const visibleLogs = (w) => (w.logs || []).filter((l) => !l.hidden).sort((a, b) => b.at - a.at);
 const lastActivity = (w) => Math.max(w.createdAt || 0, visibleLogs(w)[0]?.at || 0);
 const agoLong = (ts) => (Date.now() - ts > 30 * 86400e3 ? fmtDate(ts) : ago(ts));
+let _wDayKey = 0, _wYestKey = 0, _wDayYear = 0, _wDayAt = 0;
 function dayLabel(ts) {
-  const d = new Date(ts), now = new Date(), y = new Date(now); y.setDate(now.getDate() - 1);
-  if (d.toDateString() === now.toDateString()) return '今天';
-  if (d.toDateString() === y.toDateString()) return '昨天';
-  return d.getFullYear() === now.getFullYear() ? `${d.getMonth() + 1}月${d.getDate()}日` : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+  const nowMs = Date.now();
+  if (nowMs - _wDayAt > 30000) {
+    const now = new Date(nowMs);
+    const y = new Date(nowMs - 86400e3);
+    _wDayYear = now.getFullYear();
+    _wDayKey = _wDayYear * 10000 + (now.getMonth() + 1) * 100 + now.getDate();
+    _wYestKey = y.getFullYear() * 10000 + (y.getMonth() + 1) * 100 + y.getDate();
+    _wDayAt = nowMs;
+  }
+  const d = new Date(ts);
+  const yr = d.getFullYear(), mo = d.getMonth() + 1, da = d.getDate();
+  const k = yr * 10000 + mo * 100 + da;
+  if (k === _wDayKey) return '今天';
+  if (k === _wYestKey) return '昨天';
+  return yr === _wDayYear ? `${mo}月${da}日` : `${yr}年${mo}月${da}日`;
 }
-const hm = (ts) => new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+function hm(ts) {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
 function abbr(t) {
   const s = (t || '').trim();
   if (/^[\x00-\x7f]+$/.test(s)) { const ws = s.split(/[\s\-_.]+/).filter(Boolean); return (ws.length > 1 ? ws[0][0] + ws[1][0] : s.slice(0, 2)).toUpperCase(); }
@@ -1820,17 +1835,111 @@ function coverCard(w) {
   return cardsIn(w.id, false).find((c) => c.thumb === 'ok' && typeOf(c).k === 'image');
 }
 const coverKey = (w) => `${w.cover || 'auto'}|${coverCard(w)?.id || ''}|${safeUrl(w.url)}`;
+const MAX_WORK_LIVE_IFRAMES = 3;
+let workLiveTimer = 0, workLiveIO = null, workLiveQueue = [], workLiveActive = false, workLiveRunId = 0;
+function teardownWorkLiveCovers() {
+  clearTimeout(workLiveTimer);
+  workLiveTimer = 0;
+  workLiveRunId++;
+  workLiveQueue = [];
+  workLiveActive = false;
+  if (workLiveIO) { workLiveIO.disconnect(); workLiveIO = null; }
+  const root = $('#worksView');
+  if (!root) return;
+  root.querySelectorAll('.work-live iframe').forEach((f) => f.remove());
+  root.querySelectorAll('.work-live').forEach((box) => box.classList.remove('loading', 'loaded'));
+}
+async function pumpWorkLiveQueue(runId) {
+  if (workLiveActive || runId !== workLiveRunId) return;
+  workLiveActive = true;
+  try {
+    while (workLiveQueue.length && runId === workLiveRunId && state.view === WORKS && !openWork()) {
+      const box = workLiveQueue.shift();
+      if (!box?.isConnected || box.querySelector('iframe') || !box.dataset.src) continue;
+      const root = $('#worksView');
+      const mounted = [...(root?.querySelectorAll('.work-live') || [])].filter((el) => el.querySelector('iframe'));
+      while (mounted.length >= MAX_WORK_LIVE_IFRAMES) {
+        const victim = mounted.shift();
+        victim?.querySelector('iframe')?.remove();
+        victim?.classList.remove('loading', 'loaded');
+      }
+      box.style.setProperty('--s', (box.clientWidth || 250) / 1280);
+      box.classList.add('loading');
+      const ifr = document.createElement('iframe');
+      ifr.src = box.dataset.src;
+      ifr.tabIndex = -1;
+      ifr.setAttribute('aria-hidden', 'true');
+      ifr.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+      ifr.setAttribute('referrerpolicy', 'no-referrer');
+      ifr.title = '';
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(tm);
+          box.classList.remove('loading');
+          if (box.isConnected && ifr.isConnected) box.classList.add('loaded');
+          resolve();
+        };
+        const tm = setTimeout(finish, 2500);
+        ifr.addEventListener('load', finish, { once: true });
+        ifr.addEventListener('error', finish, { once: true });
+        box.appendChild(ifr);
+      });
+      if (runId !== workLiveRunId) break;
+      await new Promise((r) => setTimeout(r, 180));
+    }
+  } finally {
+    workLiveActive = false;
+    if (workLiveQueue.length && runId === workLiveRunId && state.view === WORKS && !openWork()) {
+      pumpWorkLiveQueue(runId);
+    }
+  }
+}
+function scheduleWorkLiveCovers() {
+  clearTimeout(workLiveTimer);
+  if (workLiveIO) { workLiveIO.disconnect(); workLiveIO = null; }
+  workLiveQueue = [];
+  if (EMBEDDED || state.view !== WORKS || openWork()) return;
+  const runId = ++workLiveRunId;
+  workLiveTimer = setTimeout(() => {
+    if (runId !== workLiveRunId || state.view !== WORKS || openWork()) return;
+    const root = $('#worksView');
+    const targets = [...(root?.querySelectorAll('.work-live[data-src]') || [])].filter((b) => !b.querySelector('iframe'));
+    if (!targets.length) return;
+    const enqueue = (box) => {
+      if (!box.isConnected || box.querySelector('iframe') || workLiveQueue.includes(box)) return;
+      workLiveQueue.push(box);
+      pumpWorkLiveQueue(runId);
+    };
+    if (typeof IntersectionObserver !== 'function') {
+      targets.slice(0, MAX_WORK_LIVE_IFRAMES).forEach(enqueue);
+      return;
+    }
+    workLiveIO = new IntersectionObserver((entries) => {
+      if (runId !== workLiveRunId) return;
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        workLiveIO?.unobserve(e.target);
+        enqueue(e.target);
+      }
+    }, { root, rootMargin: '40px' });
+    targets.forEach((b) => workLiveIO.observe(b));
+  }, 320);
+}
 function workCover(w) {
   const mode = w.cover || 'auto', url = safeUrl(w.url), pic = mode !== 'live' && mode !== 'mono' ? coverCard(w) : null;
   if (pic) {
     const u = state.urls.get(`thumb:${pic.id}`);
     return `<img class="thumb-img${u ? ' loaded' : ''}" data-thumb="${pic.id}" ${u ? `src="${u}"` : ''} alt="" draggable="false">`;
   }
-  if (url && mode !== 'mono' && !EMBEDDED) return `<div class="work-live" data-live><iframe src="${esc(url)}" loading="lazy" tabindex="-1" aria-hidden="true" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" title=""></iframe></div>`;
-  return `<div class="work-mono"><b>${esc(abbr(w.title))}</b>${url ? `<span>${esc(hostOf(url))}</span>` : ''}</div>`;
+  const mono = `<div class="work-mono"><b>${esc(abbr(w.title))}</b>${url ? `<span>${esc(hostOf(url))}</span>` : ''}</div>`;
+  if (url && mode !== 'mono' && !EMBEDDED) return `<div class="work-live" data-live data-src="${esc(url)}">${mono}</div>`;
+  return mono;
 }
-function workBody(w) {
-  const last = visibleLogs(w)[0], url = safeUrl(w.url), syncing = state.syncing.has(w.id);
+function workBody(w, logsOverride = null) {
+  const last = (logsOverride || visibleLogs(w))[0], url = safeUrl(w.url), syncing = state.syncing.has(w.id);
   return `<div class="work-top">${wstat(w)}${w.category ? `<span class="work-cat">${esc(w.category)}</span>` : ''}${syncing ? `<span class="work-spin" title="正在同步">${ICON_SYNC}</span>` : ''}</div>
     <h3 class="work-name">${highlight(w.title)}</h3>
     <p class="work-desc">${w.desc ? highlight(w.desc) : `<span class="dim">${url ? esc(hostOf(url)) : '还没有简介'}</span>`}</p>
@@ -1840,10 +1949,10 @@ function workBody(w) {
       ${w.repo ? `<a class="wl icon" href="https://github.com/${esc(w.repo)}" target="_blank" rel="noopener" title="GitHub：${esc(w.repo)}" aria-label="GitHub 仓库">${ICON_GH}</a>` : ''}
     </div>`;
 }
-function workTile(w) {
-  return `<article class="work" role="button" tabindex="0" data-work="${w.id}" data-drop="${w.id}" draggable="${IS_TOUCH ? 'false' : 'true'}" style="--fc:${workColor(w)}" aria-label="作品 ${esc(w.title)}">
+function workTile(w, colorOverride = null, logsOverride = null) {
+  return `<article class="work" role="button" tabindex="0" data-work="${w.id}" data-drop="${w.id}" draggable="${IS_TOUCH ? 'false' : 'true'}" style="--fc:${colorOverride || workColor(w)}" aria-label="作品 ${esc(w.title)}">
     <div class="work-cover">${workCover(w)}</div>
-    <div class="work-body">${workBody(w)}</div>
+    <div class="work-body">${workBody(w, logsOverride)}</div>
     <button class="more" data-action="work-menu" data-id="${w.id}" aria-label="作品设置" aria-haspopup="menu">${DOTS}</button>
   </article>`;
 }
@@ -1855,50 +1964,64 @@ function renderWorks() {
   const el = $('#worksView');
   const wid = openWork();
   if (wid) return renderWorkDetail(el, area(wid));
-  const all = works().filter(workMatch).sort((a, b) => lastActivity(b) - lastActivity(a));
+  const listAll = works();
+  const logsById = new Map();
+  const actById = new Map();
+  const colorById = new Map();
+  for (let i = 0; i < listAll.length; i++) {
+    const w = listAll[i];
+    const vlogs = visibleLogs(w);
+    logsById.set(w.id, vlogs);
+    actById.set(w.id, Math.max(w.createdAt || 0, vlogs[0]?.at || 0));
+    colorById.set(w.id, FCOLORS[(w.color ?? i) % FCOLORS.length].c);
+  }
+  const all = listAll.filter(workMatch).sort((a, b) => actById.get(b.id) - actById.get(a.id));
   const cats = allWorkCats();
   const cur = state.workCat === '__none' || cats.includes(state.workCat) ? state.workCat : 'all';
   const inCat = (name) => all.filter((w) => (name === '__none' ? !w.category || !cats.includes(w.category) : w.category === name));
   const shown = cur === 'all' ? all : inCat(cur);
-  const live = works().filter((w) => w.status === 'live').length;
-  const lastAt = Math.max(0, ...works().map(lastActivity));
+  const live = listAll.filter((w) => w.status === 'live').length;
+  let lastAt = 0;
+  for (const t of actById.values()) if (t > lastAt) lastAt = t;
   const chip = (key, label, n, drop) => `<button class="cat-chip" role="tab" aria-selected="${cur === key}" data-wcat="${esc(key)}" ${drop != null ? `data-wcatdrop="${esc(drop)}"` : ''}>${esc(label)}<b>${n}</b></button>`;
   const head = `<header class="archive-head works-head">
       <div class="ah-text"><h2>作品</h2>
-        <div class="meta">${works().length ? `${works().length} 个作品 · ${live} 个已上线${lastAt ? ` · 最近更新 ${agoLong(lastAt)}` : ''}` : '放你做过的网站、设计和项目：分类整理，更新日志自动从 GitHub 同步，点开就能预览。'}</div></div>
+        <div class="meta">${listAll.length ? `${listAll.length} 个作品 · ${live} 个已上线${lastAt ? ` · 最近更新 ${agoLong(lastAt)}` : ''}` : '放你做过的网站、设计和项目：分类整理，更新日志自动从 GitHub 同步，点开就能预览。'}</div></div>
       <button class="btn" data-action="work-import">${ICON_GH}<span>从 GitHub 导入</span></button>
-      ${works().some((w) => w.repo) ? `<button class="btn" data-action="work-sync-all" ${state.syncing.size ? 'disabled' : ''}>${ICON_SYNC}<span>${state.syncing.size ? '同步中…' : '同步全部'}</span></button>` : ''}
+      ${listAll.some((w) => w.repo) ? `<button class="btn" data-action="work-sync-all" ${state.syncing.size ? 'disabled' : ''}>${ICON_SYNC}<span>${state.syncing.size ? '同步中…' : '同步全部'}</span></button>` : ''}
       <button class="btn primary" data-action="work-new"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>新建作品</span></button>
     </header>`;
-  const bar = works().length ? `<div class="cat-bar" role="tablist" aria-label="作品分类">
+  const bar = listAll.length ? `<div class="cat-bar" role="tablist" aria-label="作品分类">
       ${chip('all', '全部', all.length)}${cats.map((c) => chip(c, c, inCat(c).length, c)).join('')}
       ${cats.length ? chip('__none', '未分类', inCat('__none').length, '') : ''}
       <button class="cat-add" data-action="wcat-add" title="新建分类，然后把作品拖到分类上">+ 分类</button></div>` : '';
   let grid;
-  if (!works().length) grid = `<div class="archive-empty works-empty">${WORK_SVG}<b>还没有作品</b><span>点「新建作品」填上网站链接；或「从 GitHub 导入」一次把仓库都加进来 —— 提交记录会自动变成更新日志。</span></div>`;
+  if (!listAll.length) grid = `<div class="archive-empty works-empty">${WORK_SVG}<b>还没有作品</b><span>点「新建作品」填上网站链接；或「从 GitHub 导入」一次把仓库都加进来 —— 提交记录会自动变成更新日志。</span></div>`;
   else if (!shown.length) grid = `<div class="archive-empty slim"><b>${state.query ? '没有匹配的作品' : '这个分类还是空的'}</b><span>${state.query ? '' : '把作品拖到上方的分类标签上，或在作品菜单里选择分类。'}</span></div>`;
-  else grid = `<div class="work-grid">${shown.map(workTile).join('')}</div>`;
-  const feedList = all.flatMap((w) => visibleLogs(w).slice(0, 30).map((l) => ({ l, w }))).sort((a, b) => b.l.at - a.l.at).slice(0, 40);
+  else grid = `<div class="work-grid">${shown.map((w) => workTile(w, colorById.get(w.id), logsById.get(w.id))).join('')}</div>`;
+  const feedList = all.flatMap((w) => (logsById.get(w.id) || []).slice(0, 30).map((l) => ({ l, w }))).sort((a, b) => b.l.at - a.l.at).slice(0, 40);
   let day = '';
-  const feed = works().length ? `<aside class="works-feed" aria-label="更新动态"><h3 class="cat-h"><span>更新动态</span><b>${feedList.length}</b></h3>
+  const feed = listAll.length ? `<aside class="works-feed" aria-label="更新动态"><h3 class="cat-h"><span>更新动态</span><b>${feedList.length}</b></h3>
       ${feedList.length ? `<ol class="feed">${feedList.map(({ l, w }) => {
         const d = dayLabel(l.at), sep = d !== day ? `<li class="feed-day">${d}</li>` : ''; day = d;
-        return `${sep}<li class="feed-item" data-work="${w.id}" style="--fc:${workColor(w)}" role="button" tabindex="0"><span class="fi-sq" aria-hidden="true"></span>
+        return `${sep}<li class="feed-item" data-work="${w.id}" style="--fc:${colorById.get(w.id) || workColor(w)}" role="button" tabindex="0"><span class="fi-sq" aria-hidden="true"></span>
           <div class="fi-main"><div class="fi-top"><b>${esc(w.title)}</b><time>${hm(l.at)}</time></div>
           <div class="fi-text">${l.ver ? `<span class="tl-ver">${esc(l.ver)}</span>` : ''}${esc(l.text)}</div></div></li>`;
       }).join('')}</ol>` : `<p class="feed-empty">作品的更新会按时间汇总在这里。</p>`}</aside>` : '';
   // 封面里有实时网页（iframe）：结构没变时只更新文字部分，避免每次刷新都重新加载网站
-  const key = `${cur}|${shown.map((w) => `${w.id}:${coverKey(w)}:${workColor(w)}`).join(',')}`;
+  const key = `${cur}|${shown.map((w) => `${w.id}:${coverKey(w)}:${colorById.get(w.id) || workColor(w)}`).join(',')}`;
   if (el.dataset.wkey === key && !el.dataset.wid && $('.work-grid', el)) {
     $('.works-head', el).outerHTML = head;
     const oldBar = $('.cat-bar', el); if (oldBar) oldBar.outerHTML = bar;
-    for (const w of shown) { const b = $(`.work[data-work="${CSS.escape(w.id)}"] .work-body`, el); if (b) b.innerHTML = workBody(w); }
+    for (const w of shown) { const b = $(`.work[data-work="${CSS.escape(w.id)}"] .work-body`, el); if (b) b.innerHTML = workBody(w, logsById.get(w.id)); }
     const oldFeed = $('.works-feed', el); if (oldFeed) oldFeed.outerHTML = feed;
   } else {
+    teardownWorkLiveCovers();
     el.dataset.wkey = key; el.dataset.wid = '';
     el.innerHTML = `${head}<div class="works-layout"><div class="works-main">${bar}${grid}</div>${feed}</div>`;
   }
   fitPreview();
+  scheduleWorkLiveCovers();
   autoSync();
 }
 
@@ -1950,6 +2073,7 @@ function previewSite(w) {
 }
 
 function renderWorkDetail(el, w) {
+  teardownWorkLiveCovers();
   const url = safeUrl(w.url), syncing = state.syncing.has(w.id), logs = visibleLogs(w);
   const metaParts = [`${logs.length} 条更新`];
   if (w.repoInfo?.lang) metaParts.push(esc(w.repoInfo.lang));
@@ -2110,9 +2234,9 @@ function mergeCommits(w, commits) {
   }
   return added;
 }
-async function syncWork(w) {
+async function syncWork(w, { batch = false } = {}) {
   state.syncing.add(w.id);
-  render();
+  if (!batch) render();
   try {
     const [info, commits] = await Promise.all([gh(`/repos/${w.repo}`), gh(`/repos/${w.repo}/commits?per_page=100`)]);
     const added = mergeCommits(w, commits);
@@ -2127,7 +2251,7 @@ async function syncWork(w) {
   } finally {
     state.syncing.delete(w.id);
     if (area(w.id)) await saveArea(w);
-    await changed();
+    if (!batch) await changed();
   }
 }
 async function syncMany(list, { quiet = false } = {}) {
@@ -2135,8 +2259,9 @@ async function syncMany(list, { quiet = false } = {}) {
   if (!list.length) return;
   let added = 0, failed = 0, lastErr = null;
   for (const w of list) {
-    try { added += await syncWork(w); } catch (e) { failed++; lastErr = e; if (e.code === 'RATE') break; }
+    try { added += await syncWork(w, { batch: true }); } catch (e) { failed++; lastErr = e; if (e.code === 'RATE') break; }
   }
+  await changed();
   if (lastErr && (!quiet || lastErr.code === 'RATE') && failed) toast(list.length === 1 ? `同步失败：${lastErr.message}` : `${failed} 个作品同步失败：${lastErr.message}`, { error: true });
   else if (added) toast(`同步完成：新增 ${added} 条更新日志`);
   else if (!quiet) toast('已是最新，没有新的提交');
@@ -2148,7 +2273,7 @@ function autoSync() {
   const stale = works().filter((w) => w.repo && Date.now() - Math.max(w.syncedAt || 0, w.syncTry || 0) > 3600e3);
   if (!stale.length) return;
   autoSyncAt = Date.now();
-  setTimeout(() => syncMany(stale, { quiet: true }), 600);
+  setTimeout(() => syncMany(stale, { quiet: true }), 1500);
 }
 const pagesUrl = (r) => {
   const o = (r.owner?.login || '').toLowerCase();
@@ -6247,6 +6372,7 @@ async function pickCanvas(exceptId) {
 }
 function setView(v) {
   if (v !== state.view) {
+    if (state.view === WORKS && v !== WORKS) teardownWorkLiveCovers();
     pendingViewEnter = true;
     openCommentId = null;
     draftComment = null;
