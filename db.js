@@ -434,6 +434,18 @@ export const setMeta = (key, value) => {
   return put('meta', { key, value });
 };
 
+export async function loadSnapshot() {
+  return tx(['columns', 'cards', 'meta'], 'readonly', (t) => {
+    const m = t.objectStore('meta');
+    return Promise.all([
+      wrap(t.objectStore('columns').getAll()),
+      wrap(t.objectStore('cards').getAll()),
+      wrap(m.get('categories')).then((r) => (r ? r.value : [])),
+      wrap(m.get('workCategories')).then((r) => (r ? r.value : [])),
+    ]).then(([areas, cards, cats, workCats]) => ({ areas, cards, cats, workCats }));
+  });
+}
+
 // ---------- 备份文件格式 (.wbk) ----------
 // [ "WBK1" 4字节 ][ 清单长度 uint32 LE ][ 清单 JSON (UTF-8) ][ 文件内容依次拼接 ]
 const MAGIC = 'WBK1';
@@ -496,9 +508,11 @@ export async function importBackup({ manifest, base, file }, onProgress) {
     }
   }
   let done = 0;
-  if (noteCards.length) {
-    await putMany('cards', noteCards);
-    done += noteCards.length;
+  const NOTE_BATCH = 1000;
+  for (let i = 0; i < noteCards.length; i += NOTE_BATCH) {
+    const slice = noteCards.slice(i, i + NOTE_BATCH);
+    await putMany('cards', slice);
+    done += slice.length;
     onProgress?.(done, total);
   }
   if (fileItems.length) {

@@ -1,4 +1,4 @@
-import * as db from './db.js?v=7';
+import * as db from './db.js?v=8';
 import * as pv from './preview.js?v=7';
 import * as collab from './collab.js?v=6';
 import * as rn from './rename.js?v=1';
@@ -32,6 +32,7 @@ const state = {
   view: ls.get('view', BOARD), zone: ls.get('zone', 'drafts'), cams: ls.get('cams', {}),
   fresh: new Set(), // 新加入的卡片，渲染时播放入场动画
   listLimits: new Map(), // 列表区域当前渲染上限（按区域窗口化渲染，避免千卡级 DOM 卡顿）
+  folderLimits: new Map(), // 文件夹网格当前渲染上限（避免百文件夹级 DOM 卡顿）
   folder: ls.get('folder', null), // 「已完成项目」里当前打开的文件夹
   shelf: ls.get('shelf', null), // 「云仓库」里当前打开的文件夹
   selected: new Set(), // 多选中的卡片
@@ -69,11 +70,21 @@ function fmtSize(n) {
   do { n /= 1024; i++; } while (n >= 1024 && i < 2);
   return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${u[i]}`;
 }
+let _todayKey = 0, _todayYear = 0, _todayAt = 0;
 function fmtDate(ts) {
-  const d = new Date(ts), now = new Date();
-  const hm = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-  if (d.toDateString() === now.toDateString()) return `今天 ${hm}`;
-  return d.getFullYear() === now.getFullYear() ? `${d.getMonth() + 1}月${d.getDate()}日` : d.toLocaleDateString('zh-CN');
+  const nowMs = Date.now();
+  if (nowMs - _todayAt > 30000) {
+    const now = new Date(nowMs);
+    _todayYear = now.getFullYear();
+    _todayKey = _todayYear * 10000 + (now.getMonth() + 1) * 100 + now.getDate();
+    _todayAt = nowMs;
+  }
+  const d = new Date(ts);
+  const y = d.getFullYear(), m = d.getMonth() + 1, day = d.getDate();
+  if (y * 10000 + m * 100 + day === _todayKey) {
+    return `今天 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+  return y === _todayYear ? `${m}月${day}日` : `${y}/${m}/${day}`;
 }
 function ago(ts) {
   const s = (Date.now() - ts) / 1000;
@@ -86,6 +97,7 @@ function ago(ts) {
 // ---------- 数据 ----------
 const byOrder = (a, b) => a.order - b.order;
 let areaById = new Map();
+let areasByKind = new Map();
 let cardById = new Map();
 let cardsByCol = new Map();
 let foldersSorted = [];
@@ -97,6 +109,14 @@ const invalidateIndexes = () => { indexesDirty = true; };
 function ensureIndexes() {
   if (!indexesDirty && cardById.size === state.cards.length && areaById.size === state.areas.length) return;
   areaById = new Map(state.areas.map((a) => [a.id, a]));
+  areasByKind = new Map();
+  for (const a of state.areas) {
+    const k = a.kind || 'column';
+    let arr = areasByKind.get(k);
+    if (!arr) areasByKind.set(k, (arr = []));
+    arr.push(a);
+  }
+  for (const arr of areasByKind.values()) arr.sort(byOrder);
   cardById = new Map(state.cards.map((c) => [c.id, c]));
   cardsByCol = new Map();
   for (const c of state.cards) {
@@ -108,7 +128,7 @@ function ensureIndexes() {
     if (colId === TRASH) arr.sort((a, b) => (b.trashedAt || 0) - (a.trashedAt || 0));
     else arr.sort(byOrder);
   }
-  foldersSorted = state.areas.filter((a) => (a.kind || 'column') === 'folder').sort(byOrder);
+  foldersSorted = areasByKind.get('folder') || [];
   childrenByParent = new Map();
   for (const f of foldersSorted) {
     const pid = f.parentId && areaById.get(f.parentId)?.kind === 'folder' ? f.parentId : '';
@@ -121,7 +141,7 @@ function ensureIndexes() {
   indexesDirty = false;
 }
 const kindOf = (a) => a.kind || 'column';
-const areasOf = (kind) => (kind === 'folder' ? (ensureIndexes(), foldersSorted) : state.areas.filter((a) => kindOf(a) === kind).sort(byOrder));
+const areasOf = (kind) => { ensureIndexes(); return areasByKind.get(kind) || []; };
 const columns = () => areasOf('column');
 const zones = () => areasOf('zone');
 const canvases = () => areasOf('canvas');
@@ -150,7 +170,12 @@ function orderAt(areaId, index, excludeId) {
   if (!next) return prev.order + 1024;
   return (prev.order + next.order) / 2;
 }
-const topOrder = (areaId) => Math.max(0, ...cardsIn(areaId, false).map((c) => c.order), ...(area(areaId)?.shapes || []).map((s) => s.z || 0)) + 1;
+function topOrder(areaId) {
+  let max = 0;
+  for (const c of cardsIn(areaId, false)) if (c.order > max) max = c.order;
+  for (const s of (area(areaId)?.shapes || [])) if ((s.z || 0) > max) max = s.z;
+  return max + 1;
+}
 // 当前「默认投放位置」：看板 → 第一列；画布 → 画布视野中央
 const folders = () => areasOf('folder');
 // 项目文件夹可以整个移进云仓库：根文件夹带 stored 标记，子文件夹跟着根走
@@ -172,7 +197,7 @@ function defaultTarget() {
 }
 
 async function load() {
-  const [areas, cards] = await Promise.all([db.getAll('columns'), db.getAll('cards')]);
+  const { areas, cards, cats, workCats } = await db.loadSnapshot();
   state.areas = areas;
   state.cards = cards;
   invalidateIndexes();
@@ -183,8 +208,8 @@ async function load() {
   if (state.folder && !area(state.folder)) state.folder = null;
   if (state.shelf && area(state.shelf)?.kind !== 'shelf') state.shelf = null;
   if (state.work && area(state.work)?.kind !== 'work') state.work = null;
-  state.cats = await db.getMeta('categories', []).catch(() => []);
-  state.workCats = await db.getMeta('workCategories', []).catch(() => []);
+  state.cats = Array.isArray(cats) ? cats : [];
+  state.workCats = Array.isArray(workCats) ? workCats : [];
   if (state.zone !== TRASH && !area(state.zone)) state.zone = fallbackZone() || TRASH;
 }
 let suppressCollabDepth = 0;
@@ -221,6 +246,7 @@ async function ensureDefaults() {
   if (!add.length) return;
   await db.putMany('columns', add);
   state.areas.push(...add);
+  invalidateIndexes();
   if (!area(state.zone)) state.zone = fallbackZone();
 }
 
@@ -276,12 +302,43 @@ const dismissed = new Set(ls.get('dismissed', []));
 const pairKey = assoc.pairKey;
 let lastAssocSig = '';
 
+const ASSOC_SYNC_LIMIT = 400;
+let assocIdleHandle = 0;
+function cancelAssocIdle() {
+  if (!assocIdleHandle) return;
+  if (typeof cancelIdleCallback === 'function') cancelIdleCallback(assocIdleHandle);
+  else clearTimeout(assocIdleHandle);
+  assocIdleHandle = 0;
+}
 function buildGroups(force = false) {
   ensureIndexes();
   const live = state.cards.filter(isActive);
   const key = sensKey();
   const sig = assoc.computeAssocSignature(live, key, dismissed.size);
   if (!force && sig === lastAssocSig && state.groups) return;
+  cancelAssocIdle();
+  if (!force && live.length > ASSOC_SYNC_LIMIT) {
+    if (!state.groups) state.groups = new Map();
+    if (!state.suggestions) state.suggestions = [];
+    if (!state.suggestOf) state.suggestOf = new Map();
+    const run = () => {
+      assocIdleHandle = 0;
+      const curLive = state.cards.filter(isActive);
+      const curKey = sensKey();
+      const curSig = assoc.computeAssocSignature(curLive, curKey, dismissed.size);
+      if (curSig !== sig && curSig === lastAssocSig) return;
+      const res = assoc.buildAssocGroups(curLive, { sensKey: curKey, dismissed, cardById });
+      state.groups = res.groups;
+      state.suggestions = res.suggestions;
+      state.suggestOf = res.suggestOf;
+      lastAssocSig = curSig;
+      renderAssocChip();
+    };
+    assocIdleHandle = typeof requestIdleCallback === 'function'
+      ? requestIdleCallback(run, { timeout: 600 })
+      : setTimeout(run, 16);
+    return;
+  }
   const res = assoc.buildAssocGroups(live, { sensKey: key, dismissed, cardById });
   state.groups = res.groups;
   state.suggestions = res.suggestions;
@@ -439,7 +496,6 @@ function appendMoreCards(areaId, btnEl) {
 // ---------- 渲染 ----------
 const DOTS = `<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>`;
 function render() {
-  invalidateIndexes();
   ensureIndexes();
   const before = snapshot();
   buildGroups();
@@ -705,7 +761,7 @@ function renderViews() {
     <button role="tab" class="view-tab archive-tab" data-view="${ARCHIVE}" data-drop="${PICK}" aria-selected="${state.view === ARCHIVE}" title="彻底完成的项目归档在这里；把卡片拖到这里即可归档">
       ${FOLDER_SVG}已完成项目<b>${folders().filter((f) => !isStoredFolder(f)).length}</b></button>
     <button role="tab" class="view-tab store-tab" data-view="${STORE}" data-drop="${esc(shelves()[0]?.id || '')}" aria-selected="${state.view === STORE}" title="云仓库：长期保存的文件，不会被自动清理；把卡片或文件拖到这里即可存入">
-      ${STORE_SVG}云仓库<b>${shelfCards().length + storedFolders().reduce((n, f) => n + deepCards(f.id).length, 0)}</b></button>
+      ${STORE_SVG}云仓库<b>${shelves().reduce((n, s) => n + cardsIn(s.id, false).length, 0) + storedFolders().reduce((n, f) => n + deepCards(f.id).length, 0)}</b></button>
     <button role="tab" class="view-tab works-tab" data-view="${WORKS}" aria-selected="${state.view === WORKS}" title="个人作品：网站、设计、项目，含更新日志和在线预览">
       ${WORK_SVG}作品<b>${works().length}</b></button>
     <span class="view-sep" aria-hidden="true"></span>
@@ -919,6 +975,33 @@ function folderTile(f) {
     <button class="more" data-action="folder-menu" data-id="${f.id}" aria-label="文件夹设置" aria-haspopup="menu">${DOTS}</button>
   </div>`;
 }
+const FOLDER_PAGE_SIZE = 60;
+const folderGridCache = new Map();
+function folderGridHTML(key, list, tileFn = folderTile) {
+  if (!list.length) return '';
+  folderGridCache.set(key, { list, tileFn });
+  const limit = state.folderLimits.get(key) || FOLDER_PAGE_SIZE;
+  const slice = list.length > limit ? list.slice(0, limit) : list;
+  const more = list.length > limit
+    ? `<button type="button" class="load-more-cards load-more-folders" data-action="load-more-folders" data-fkey="${esc(key)}">已显示 ${slice.length} / ${list.length} 个文件夹 · 向下滚动或点击加载更多</button>`
+    : '';
+  return `<div class="folder-grid" data-fgrid="${esc(key)}">${slice.map(tileFn).join('')}${more}</div>`;
+}
+function appendMoreFolders(key, btnEl) {
+  const entry = folderGridCache.get(key);
+  if (!entry || !btnEl?.isConnected) return;
+  const { list, tileFn } = entry;
+  const prevLimit = state.folderLimits.get(key) || FOLDER_PAGE_SIZE;
+  if (prevLimit >= list.length) { btnEl.remove(); return; }
+  const nextLimit = Math.min(list.length, prevLimit + FOLDER_PAGE_SIZE);
+  state.folderLimits.set(key, nextLimit);
+  btnEl.insertAdjacentHTML('beforebegin', list.slice(prevLimit, nextLimit).map(tileFn).join(''));
+  const parent = btnEl.parentElement;
+  if (nextLimit >= list.length) btnEl.remove();
+  else btnEl.textContent = `已显示 ${nextLimit} / ${list.length} 个文件夹 · 向下滚动或点击加载更多`;
+  loadThumbs(parent || document);
+  queueThumbs();
+}
 function renderArchive() {
   const el = $('#archiveView');
   const fid = openFolder();
@@ -948,7 +1031,7 @@ function renderFolderPage(el, fid) {
         <button class="btn${activeShare?.area.id === fid ? ' on' : ''}" data-action="area-share" data-id="${fid}" ${n ? '' : 'disabled'} title="生成链接，对方打开即可直接从这台电脑下载">${SHARE_SVG}<span>${activeShare?.area.id === fid ? '分享中' : '分享'}</span></button>
         <button class="icon-btn" data-action="folder-menu" aria-label="文件夹设置" aria-haspopup="menu">${DOTS}</button>
       </header>
-      ${subs.length ? `<section class="cat-sec"><h3 class="cat-h"><span>子文件夹</span><b>${subs.length}</b></h3><div class="folder-grid">${subs.map(folderTile).join('')}</div></section>` : ''}
+      ${subs.length ? `<section class="cat-sec"><h3 class="cat-h"><span>子文件夹</span><b>${subs.length}</b></h3>${folderGridHTML(`sub:${fid}`, subs)}</section>` : ''}
       <section class="cat-sec"><h3 class="cat-h"><span>文件</span><b>${own}</b></h3>
       <div class="list folder-list" data-col="${fid}">${listHTML(fid, subs.length ? '把卡片拖到这里，或拖到上面的子文件夹里' : '把卡片或文件拖到这里归档；也可以「新建子文件夹」再细分')}</div></section>`;
   }
@@ -960,7 +1043,7 @@ function renderArchiveRoot(el) {
   const cats = allCats();
   const cur = state.archCat === '__none' || cats.includes(state.archCat) ? state.archCat : 'all';
   const inCat = (name) => all.filter((f) => (name === '__none' ? !f.category || !cats.includes(f.category) : f.category === name));
-  const grid = (list) => `<div class="folder-grid">${list.map(folderTile).join('')}</div>`;
+  const grid = (list, key = 'arch') => folderGridHTML(key, list);
   const uncategorized = inCat('__none');
   const chip = (key, label, n, drop) => `<button class="cat-chip" role="tab" aria-selected="${cur === key}" data-cat="${esc(key)}" ${drop != null ? `data-catdrop="${esc(drop)}"` : ''}>${esc(label)}<b>${n}</b></button>`;
   const bar = folders().length ? `<div class="cat-bar" role="tablist" aria-label="分类">
@@ -971,9 +1054,9 @@ function renderArchiveRoot(el) {
     </div>` : '';
   let body;
   if (!all.length) body = `<div class="archive-empty">${FOLDER_SVG}<b>${state.query ? '没有匹配的项目' : '还没有已完成的项目'}</b><span>${state.query ? '' : '回到看板，长按一个做完的文件 —— 它和同项目的文件会被自动打包送到这里。'}</span></div>`;
-  else if (cur !== 'all') body = inCat(cur).length ? grid(inCat(cur)) : `<div class="archive-empty slim"><b>这个分类还是空的</b><span>把文件夹拖到上方的「${esc(cur === '__none' ? '未分类' : cur)}」标签上，或在文件夹菜单里选择分类。</span></div>`;
-  else if (!cats.length) body = grid(all);
-  else body = [...cats, '__none'].map((c) => { const list = inCat(c); return list.length ? `<section class="cat-sec"><h3 class="cat-h"><span>${esc(c === '__none' ? '未分类' : c)}</span><b>${list.length}</b></h3>${grid(list)}</section>` : ''; }).join('');
+  else if (cur !== 'all') body = inCat(cur).length ? grid(inCat(cur), `arch:${cur}`) : `<div class="archive-empty slim"><b>这个分类还是空的</b><span>把文件夹拖到上方的「${esc(cur === '__none' ? '未分类' : cur)}」标签上，或在文件夹菜单里选择分类。</span></div>`;
+  else if (!cats.length) body = grid(all, 'arch:all');
+  else body = [...cats, '__none'].map((c) => { const list = inCat(c); return list.length ? `<section class="cat-sec"><h3 class="cat-h"><span>${esc(c === '__none' ? '未分类' : c)}</span><b>${list.length}</b></h3>${grid(list, `arch:${c}`)}</section>` : ''; }).join('');
   el.innerHTML = `
     <header class="archive-head">
       <div class="ah-text">
@@ -1062,7 +1145,7 @@ function renderStore() {
     </header>
     ${list.length || projs.length
       // 项目文件夹和仓库文件夹放在同一个网格里，不再分成两块；有内容的排前面，空的默认文件夹排最后
-      ? `<div class="folder-grid">${[...projs.map(folderTile), ...list.filter((s) => cardsIn(s.id, false).length).map(shelfTile), ...list.filter((s) => !cardsIn(s.id, false).length).map(shelfTile)].join('')}</div>`
+      ? folderGridHTML('store:root', [...projs, ...list.filter((s) => cardsIn(s.id, false).length), ...list.filter((s) => !cardsIn(s.id, false).length)], (x) => (kindOf(x) === 'folder' ? folderTile(x) : shelfTile(x)))
       : `<div class="archive-empty slim"><b>没有匹配的文件夹</b></div>`}
     ${!q && !projs.length && rootFolders().length ? `<div class="store-hint">提示：在「已完成项目」里把项目文件夹拖到顶部「云仓库」标签上（或在文件夹菜单里选「移到云仓库」），整个项目连同子文件夹会一起移过来。</div>` : ''}`;
 }
@@ -2327,6 +2410,7 @@ function syncZoneScrollState(zt = $('#zoneTabs')) {
   zt.classList.toggle('can-scroll-l', zt.scrollLeft > 2);
   zt.classList.toggle('can-scroll-r', maxScroll > 2 && zt.scrollLeft < maxScroll - 2);
 }
+let draftsListDirty = false;
 function renderZones() {
   const zs = zones();
   const nt = cardsIn(TRASH, false).length;
@@ -2342,7 +2426,13 @@ function renderZones() {
   const z = area(state.zone);
   const dl = $('#draftsList');
   dl.dataset.col = state.zone;
-  dl.innerHTML = listHTML(state.zone, state.zone === TRASH ? '回收站是空的' : `把文件拖到「${esc(z?.title)}」`);
+  const draftsVisible = !draftsCollapsed() || document.body.classList.contains('drafts-open') || document.body.classList.contains('drafts-peek');
+  if (draftsVisible) {
+    draftsListDirty = false;
+    dl.innerHTML = listHTML(state.zone, state.zone === TRASH ? '回收站是空的' : `把文件拖到「${esc(z?.title)}」`);
+  } else {
+    draftsListDirty = true;
+  }
   let desc;
   if (state.zone === TRASH) desc = '删除的卡片先进入这里，可恢复；只有「永久删除」才会真正移除。';
   else desc = (z?.desc || '自定义功能区，放什么都行。') + (z?.ttlDays > 0 ? ` 放入超过 ${z.ttlDays} 天会自动移到回收站。` : '');
@@ -2453,6 +2543,7 @@ function setDraftsCollapsed(v) {
   ls.set('draftsCollapsed', v);
   $('#drafts').setAttribute('data-state', v ? 'collapsed' : 'open');
   syncSidebarToggleChip();
+  if (!v && draftsListDirty) { renderZones(); loadThumbs($('#draftsList')); queueThumbs(); }
   const btn = v ? $('#draftsRail .rail-expand') : $('#drafts .collapse-drafts');
   setTimeout(() => { if (state.view && isCanvas(state.view)) positionFmt(); if (!v) syncZoneInk(); }, 450);
   return btn;
@@ -2472,7 +2563,13 @@ function toggleCanvasMax(force) {
 function peekDrafts(on) {
   clearTimeout(peekTimer);
   const canPeek = draftsCollapsed() || document.body.classList.contains('canvas-maximized');
-  if (on) { if (canPeek) document.body.classList.add('drafts-peek'); return; }
+  if (on) {
+    if (canPeek) {
+      document.body.classList.add('drafts-peek');
+      if (draftsListDirty) { renderZones(); loadThumbs($('#draftsList')); }
+    }
+    return;
+  }
   if (document.body.classList.contains('drafts-peek')) peekTimer = setTimeout(() => document.body.classList.remove('drafts-peek'), 650);
 }
 (function initDrafts() {
@@ -7925,6 +8022,7 @@ document.addEventListener('click', async (e) => {
     }
     case 'accept-suggest': return acceptSuggestion(btn.dataset.id);
     case 'load-more-cards': return appendMoreCards(btn.dataset.area, btn);
+    case 'load-more-folders': return appendMoreFolders(btn.dataset.fkey, btn);
     case 'assoc-panel': return openAssocPanel();
     case 'select': return toggleSelect(cardEl.dataset.id, rangeList);
     case 'sel-done': return completeCards([...state.selected]);
@@ -8018,6 +8116,7 @@ document.addEventListener('click', async (e) => {
     case 'toggle-drafts': {
       const open = document.body.classList.toggle('drafts-open');
       $('.drafts-toggle').setAttribute('aria-expanded', String(open));
+      if (open && draftsListDirty) { renderZones(); loadThumbs($('#draftsList')); queueThumbs(); }
       return;
     }
     case 'clear-zone': {
@@ -8153,21 +8252,26 @@ document.addEventListener('paste', async (e) => {
 let searchTimer;
 $('#search').addEventListener('input', (e) => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { state.query = e.target.value.trim(); state.listLimits.clear(); render(); }, 120);
+  searchTimer = setTimeout(() => { state.query = e.target.value.trim(); state.listLimits.clear(); state.folderLimits.clear(); render(); }, 120);
 });
 let scrollExpandRaf = 0;
 document.addEventListener('scroll', (e) => {
   const scroller = e.target;
   if (typeof scroller?.matches !== 'function') return;
-  if (!scroller.matches('.list, #archiveView, #worksView')) return;
+  if (!scroller.matches('.list, #archiveView, #worksView, #storeView')) return;
   if (scrollExpandRaf) return;
   scrollExpandRaf = requestAnimationFrame(() => {
     scrollExpandRaf = 0;
-    const btn = scroller.querySelector('.load-more-cards');
-    if (!btn || !btn.isConnected) return;
     const sr = scroller.getBoundingClientRect();
-    const br = btn.getBoundingClientRect();
-    if (br.top <= sr.bottom + 320) appendMoreCards(btn.dataset.area, btn);
+    const btns = scroller.querySelectorAll('.load-more-cards');
+    for (const btn of btns) {
+      if (!btn.isConnected) continue;
+      const br = btn.getBoundingClientRect();
+      if (br.top <= sr.bottom + 320) {
+        if (btn.classList.contains('load-more-folders')) appendMoreFolders(btn.dataset.fkey, btn);
+        else appendMoreCards(btn.dataset.area, btn);
+      }
+    }
   });
 }, { passive: true, capture: true });
 $('#fileInput').addEventListener('change', (e) => {
@@ -8635,6 +8739,7 @@ async function applyRemoteSnapshot(pkt, isWelcome = false) {
 
     const cardMerge = collab.mergeCanvasCards(state.cards, snap.cards || [], cv.id, collabSession.tombstones);
     state.cards = cardMerge.cards;
+    invalidateIndexes();
     const toSave = [...cardMerge.added, ...cardMerge.updated];
     if (toSave.length) await db.putMany('cards', toSave);
     for (const rId of cardMerge.removedIds) {
@@ -9001,6 +9106,7 @@ async function startCollabRoom(customRoomId = '', { autoCopy = true, quiet = fal
     const a = { id: uid(), kind: 'canvas', title: '协作画布', order: 0, shapes: [], links: [] };
     await saveArea(a);
     state.areas.push(a);
+    invalidateIndexes();
     cvId = a.id;
   }
   if (state.view !== cvId) {

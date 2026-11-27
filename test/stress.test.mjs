@@ -9,6 +9,7 @@ import {
 } from '../assoc.js';
 import { computeCanvasPreviewLayout } from '../canvas-preview.js';
 import { buildStoreZip } from '../zip.js';
+import { buildUploadPlan } from '../upload-tree.js';
 
 function makeHeavyDataset(n, sameBatch = true) {
   const cards = [];
@@ -124,4 +125,67 @@ test('stress benchmark: 5,000 cards assoc, 400-shape canvas preview, and 300-ent
   const zipMs = performance.now() - tZip;
   assert.ok(zipBlob.size > 0);
   assert.ok(zipMs < 200, `300-entry STORE ZIP took ${zipMs.toFixed(1)}ms`);
+});
+
+test('extreme stress benchmark: 20,000 cards assoc, 20,000-file upload tree, 1,000-shape canvas preview, and 1,000-entry ZIP', async () => {
+  // 1) 20,000-card smart association + incremental signature cache
+  const cards20k = makeHeavyDataset(20000, true);
+  const tAssoc = performance.now();
+  const sig1 = computeAssocSignature(cards20k, 'normal', 0);
+  const res20k = buildAssocGroups(cards20k, { sensKey: 'normal' });
+  const assocMs = performance.now() - tAssoc;
+  const tSig = performance.now();
+  const sig2 = computeAssocSignature(cards20k, 'normal', 0);
+  const sigMs = performance.now() - tSig;
+  assert.equal(sig1, sig2);
+  assert.equal(res20k.groups.size, 20000);
+  assert.ok(sigMs < 40, `20k signature check took ${sigMs.toFixed(2)}ms`);
+  assert.ok(assocMs < 1500, `20k assoc took ${assocMs.toFixed(1)}ms`);
+  for (const ids of res20k.groups.values()) assert.ok(ids.length <= MAX_AUTO_GROUP);
+  for (const sg of res20k.suggestions) assert.ok(sg.ids.length <= MAX_SUGGEST_CLUSTER);
+
+  // 2) 20,000-file across 500-folder upload tree planning
+  const rawFiles = Array.from({ length: 20000 }, (_, i) => {
+    const top = Math.floor(i / 40); // 500 folders
+    const sub = i % 5;
+    return {
+      file: { name: `doc_${i}.pdf`, size: 1024 + (i % 4096) },
+      relPath: `Year_${2000 + (top % 25)}/Dept_${top}/Sub_${sub}/doc_${i}.pdf`,
+    };
+  });
+  const tTree = performance.now();
+  const plan = buildUploadPlan(rawFiles, []);
+  const treeMs = performance.now() - tTree;
+  assert.equal(plan.stats.fileCount, 20000);
+  assert.ok(plan.dirPaths.length >= 500);
+  assert.ok(treeMs < 600, `20k-file upload tree plan took ${treeMs.toFixed(1)}ms`);
+
+  // 3) 1,000-shape + 500-card + 600-link canvas mini-preview projection
+  const cvCards = Array.from({ length: 500 }, (_, i) => ({
+    id: `ec-${i}`, kind: 'file', name: `asset_${i}.png`, mime: 'image/png',
+    x: (i % 25) * 320, y: Math.floor(i / 25) * 280, order: i,
+  }));
+  const shapes = Array.from({ length: 1000 }, (_, i) => ({
+    id: `es-${i}`, t: i % 10 === 0 ? 'frame' : 'sticky',
+    x: (i % 25) * 320, y: Math.floor(i / 25) * 280, w: 200, h: 120, z: i,
+  }));
+  const links = Array.from({ length: 600 }, (_, i) => ({
+    id: `el-${i}`, from: { id: `es-${i}` }, to: { id: `es-${(i + 1) % 1000}` }, end: 'arrow',
+  }));
+  const tCpv = performance.now();
+  const layout = computeCanvasPreviewLayout(cvCards, shapes, links);
+  const cpvMs = performance.now() - tCpv;
+  assert.equal(layout.empty, false);
+  assert.ok(cpvMs < 200, `1,500-item canvas preview took ${cpvMs.toFixed(1)}ms`);
+
+  // 4) 1,000-entry streaming STORE ZIP
+  const zipEntries = Array.from({ length: 1000 }, (_, i) => ({
+    name: `archive/dir_${i % 20}/file_${i}.txt`,
+    data: `extreme-stress-payload-${i}`,
+  }));
+  const tZip = performance.now();
+  const zipBlob = await buildStoreZip(zipEntries);
+  const zipMs = performance.now() - tZip;
+  assert.ok(zipBlob.size > 0);
+  assert.ok(zipMs < 500, `1,000-entry STORE ZIP took ${zipMs.toFixed(1)}ms`);
 });
