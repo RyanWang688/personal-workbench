@@ -1835,116 +1835,20 @@ function coverCard(w) {
   return cardsIn(w.id, false).find((c) => c.thumb === 'ok' && typeOf(c).k === 'image');
 }
 const coverKey = (w) => `${w.cover || 'auto'}|${coverCard(w)?.id || ''}|${safeUrl(w.url)}`;
-const MAX_WORK_LIVE_IFRAMES = 12;
-let workLiveTimer = 0, workLiveIO = null, workLiveQueue = [], workLiveActive = false, workLiveRunId = 0;
-const workLiveVisible = new Set();
-function teardownWorkLiveCovers() {
-  clearTimeout(workLiveTimer);
-  workLiveTimer = 0;
-  workLiveRunId++;
-  workLiveQueue = [];
-  workLiveVisible.clear();
-  workLiveActive = false;
-  if (workLiveIO) { workLiveIO.disconnect(); workLiveIO = null; }
-  const root = $('#worksView');
-  if (!root) return;
-  root.querySelectorAll('.work-live iframe').forEach((f) => f.remove());
-  root.querySelectorAll('.work-live').forEach((box) => box.classList.remove('loading', 'loaded'));
-}
-async function pumpWorkLiveQueue(runId) {
-  if (workLiveActive || runId !== workLiveRunId) return;
-  workLiveActive = true;
+function isPublicSiteUrl(url) {
   try {
-    while (workLiveQueue.length && runId === workLiveRunId && state.view === WORKS && !openWork()) {
-      const box = workLiveQueue.shift();
-      if (!box?.isConnected || box.querySelector('iframe') || !box.dataset.src) continue;
-      const root = $('#worksView');
-      const mounted = [...(root?.querySelectorAll('.work-live') || [])].filter((el) => el.querySelector('iframe'));
-      if (mounted.length >= MAX_WORK_LIVE_IFRAMES) {
-        const offscreen = mounted.filter((el) => !workLiveVisible.has(el));
-        while (mounted.length >= MAX_WORK_LIVE_IFRAMES && offscreen.length) {
-          const victim = offscreen.shift();
-          const idx = mounted.indexOf(victim);
-          if (idx >= 0) mounted.splice(idx, 1);
-          victim?.querySelector('iframe')?.remove();
-          victim?.classList.remove('loading', 'loaded');
-        }
-      }
-      box.style.setProperty('--s', (box.clientWidth || 250) / 1280);
-      box.classList.add('loading');
-      const ifr = document.createElement('iframe');
-      ifr.src = box.dataset.src;
-      ifr.tabIndex = -1;
-      ifr.setAttribute('aria-hidden', 'true');
-      ifr.setAttribute('sandbox', 'allow-scripts allow-same-origin');
-      ifr.setAttribute('referrerpolicy', 'no-referrer');
-      ifr.title = '';
-      await new Promise((resolve) => {
-        let settled = false;
-        const done = () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(tm);
-          resolve();
-        };
-        const tm = setTimeout(done, 1800);
-        ifr.addEventListener('load', () => {
-          box.classList.remove('loading');
-          if (box.isConnected && ifr.isConnected) box.classList.add('loaded');
-          done();
-        }, { once: true });
-        ifr.addEventListener('error', () => {
-          box.classList.remove('loading');
-          done();
-        }, { once: true });
-        box.appendChild(ifr);
-      });
-      if (runId !== workLiveRunId) break;
-      await new Promise((r) => setTimeout(r, 120));
-    }
-  } finally {
-    workLiveActive = false;
-    if (workLiveQueue.length && runId === workLiveRunId && state.view === WORKS && !openWork()) {
-      pumpWorkLiveQueue(runId);
-    }
-  }
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    const h = u.hostname.toLowerCase();
+    if (!h || h === 'localhost' || h === '0.0.0.0' || h === '[::1]' || h.endsWith('.local')) return false;
+    if (/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h)) return false;
+    return true;
+  } catch { return false; }
 }
-function scheduleWorkLiveCovers() {
-  clearTimeout(workLiveTimer);
-  if (workLiveIO) { workLiveIO.disconnect(); workLiveIO = null; }
-  workLiveQueue = [];
-  workLiveVisible.clear();
-  if (EMBEDDED || state.view !== WORKS || openWork()) return;
-  const runId = ++workLiveRunId;
-  workLiveTimer = setTimeout(() => {
-    if (runId !== workLiveRunId || state.view !== WORKS || openWork()) return;
-    const root = $('#worksView');
-    const targets = [...(root?.querySelectorAll('.work-live[data-src]') || [])];
-    if (!targets.length) return;
-    const enqueue = (box) => {
-      if (!box.isConnected || box.querySelector('iframe') || workLiveQueue.includes(box)) return;
-      workLiveQueue.push(box);
-      pumpWorkLiveQueue(runId);
-    };
-    if (typeof IntersectionObserver !== 'function') {
-      targets.forEach((b) => workLiveVisible.add(b));
-      targets.slice(0, MAX_WORK_LIVE_IFRAMES).forEach(enqueue);
-      return;
-    }
-    workLiveIO = new IntersectionObserver((entries) => {
-      if (runId !== workLiveRunId) return;
-      for (const e of entries) {
-        if (e.isIntersecting) {
-          workLiveVisible.add(e.target);
-          if (!e.target.querySelector('iframe')) enqueue(e.target);
-        } else {
-          workLiveVisible.delete(e.target);
-        }
-      }
-    }, { root, rootMargin: '40px' });
-    targets.forEach((b) => workLiveIO.observe(b));
-  }, 320);
-}
+const workShotUrls = (url) => ({
+  primary: `https://image.thum.io/get/width/640/crop/800/noanimate/${url}`,
+  fallback: `https://s0.wp.com/mshots/v1/${encodeURIComponent(url)}?w=640&h=400`,
+});
 function workCover(w) {
   const mode = w.cover || 'auto', url = safeUrl(w.url), pic = mode !== 'live' && mode !== 'mono' ? coverCard(w) : null;
   if (pic) {
@@ -1952,7 +1856,10 @@ function workCover(w) {
     return `<img class="thumb-img${u ? ' loaded' : ''}" data-thumb="${pic.id}" ${u ? `src="${u}"` : ''} alt="" draggable="false">`;
   }
   const mono = `<div class="work-mono"><b>${esc(abbr(w.title))}</b>${url ? `<span>${esc(hostOf(url))}</span>` : ''}</div>`;
-  if (url && mode !== 'mono' && !EMBEDDED) return `<div class="work-live" data-live data-src="${esc(url)}">${mono}</div>`;
+  if (url && mode !== 'mono' && !EMBEDDED && isPublicSiteUrl(url)) {
+    const { primary, fallback } = workShotUrls(url);
+    return `<div class="work-shot">${mono}<img class="work-shot-img" src="${esc(primary)}" data-fallback="${esc(fallback)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" draggable="false"></div>`;
+  }
   return mono;
 }
 function workBody(w, logsOverride = null) {
@@ -2033,12 +1940,10 @@ function renderWorks() {
     for (const w of shown) { const b = $(`.work[data-work="${CSS.escape(w.id)}"] .work-body`, el); if (b) b.innerHTML = workBody(w, logsById.get(w.id)); }
     const oldFeed = $('.works-feed', el); if (oldFeed) oldFeed.outerHTML = feed;
   } else {
-    teardownWorkLiveCovers();
     el.dataset.wkey = key; el.dataset.wid = '';
     el.innerHTML = `${head}<div class="works-layout"><div class="works-main">${bar}${grid}</div>${feed}</div>`;
   }
   fitPreview();
-  scheduleWorkLiveCovers();
   autoSync();
 }
 
@@ -2070,12 +1975,18 @@ function fitPreview() {
     Object.assign(ifr.style, { width: `${dw}px`, height: `${H / s}px`, transform: `scale(${s})` });
     Object.assign(frame.style, { width: `${dw * s}px`, height: `${H}px` });
   });
-  $$('[data-live]').forEach((el) => { if (el.offsetParent) el.style.setProperty('--s', el.clientWidth / 1280); });
 }
 addEventListener('resize', () => { clearTimeout(fitPreview.t); fitPreview.t = setTimeout(fitPreview, 80); });
 document.addEventListener('load', (e) => {
   if (e.target.matches?.('.sp-iframe')) e.target.closest('.site-prev')?.classList.add('loaded');
-  if (e.target.matches?.('.work-live iframe')) e.target.parentElement.classList.add('loaded');
+  if (e.target.matches?.('.work-shot-img')) e.target.closest('.work-shot')?.classList.add('loaded');
+}, true);
+document.addEventListener('error', (e) => {
+  const img = e.target;
+  if (!img?.matches?.('.work-shot-img')) return;
+  const fb = img.dataset.fallback;
+  if (fb) { delete img.dataset.fallback; img.src = fb; return; }
+  img.hidden = true;
 }, true);
 function previewSite(w) {
   const url = safeUrl(w?.url);
@@ -2090,7 +2001,6 @@ function previewSite(w) {
 }
 
 function renderWorkDetail(el, w) {
-  teardownWorkLiveCovers();
   const url = safeUrl(w.url), syncing = state.syncing.has(w.id), logs = visibleLogs(w);
   const metaParts = [`${logs.length} 条更新`];
   if (w.repoInfo?.lang) metaParts.push(esc(w.repoInfo.lang));
@@ -2487,7 +2397,7 @@ function workMenu(anchor, w) {
   items.push({ text: '新建分类…', run: () => addWorkCat(w) });
   if (w.category) items.push({ text: '移出分类', run: () => setWorkCat(w, null) });
   items.push({ label: '封面' });
-  [['auto', '自动'], ['image', '用图片'], ['live', '网站实时画面'], ['mono', '文字']].forEach(([k, t]) => items.push({ text: t, checked: (w.cover || 'auto') === k, run: async () => { if (k === 'auto') delete w.cover; else w.cover = k; await saveArea(w); await changed(); } }));
+  [['auto', '自动'], ['image', '用图片'], ['live', '网站截图'], ['mono', '文字']].forEach(([k, t]) => items.push({ text: t, checked: (w.cover || 'auto') === k, run: async () => { if (k === 'auto') delete w.cover; else w.cover = k; await saveArea(w); await changed(); } }));
   items.push({ label: '颜色' });
   FCOLORS.forEach((fc, i) => items.push({ text: fc.n, swatch: fc.c, checked: workColor(w) === fc.c, run: async () => { w.color = i; await saveArea(w); await changed(); } }));
   const nWorkCards = cardsIn(w.id, false).length;
@@ -6389,7 +6299,6 @@ async function pickCanvas(exceptId) {
 }
 function setView(v) {
   if (v !== state.view) {
-    if (state.view === WORKS && v !== WORKS) teardownWorkLiveCovers();
     pendingViewEnter = true;
     openCommentId = null;
     draftComment = null;

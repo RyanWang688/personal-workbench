@@ -2314,13 +2314,17 @@ body.dragging-work .cat-chip[data-wcatdrop] { border-style: dashed; }
 .work-cover { position: relative; aspect-ratio: 16 / 10; overflow: hidden; background: color-mix(in srgb, var(--fc) 12%, var(--surface-2)); border-bottom: 1px solid var(--border); }
 .work-cover::after { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--fc); }
 .work-cover > img { width: 100%; height: 100%; object-fit: cover; object-position: top; background: #fff; }
-.work-live { --s: .2; position: absolute; inset: 0; background: color-mix(in srgb, var(--fc) 10%, var(--surface-2)); overflow: hidden; }
-.work-live .work-mono { z-index: 1; transition: opacity .3s ease; }
-.work-live.loaded { background: #fff; }
-.work-live.loaded .work-mono { opacity: 0; pointer-events: none; }
-.work-live iframe { position: absolute; left: 0; top: 0; z-index: 2; width: 1280px; height: 800px; border: 0; transform: scale(var(--s)); transform-origin: 0 0; pointer-events: none; opacity: 0; transition: opacity .35s ease; }
-.work-live.loaded iframe { opacity: 1; }
-.work-live.loading:not(.loaded)::before { content: ""; position: absolute; inset: 0; z-index: 3; pointer-events: none; background: linear-gradient(100deg, transparent 30%, color-mix(in srgb, var(--fc) 14%, transparent) 50%, transparent 70%) 0 0 / 200% 100%; animation: shimmer 1.4s linear infinite; }
+.work-shot { position: absolute; inset: 0; background: color-mix(in srgb, var(--fc) 10%, var(--surface-2)); overflow: hidden; }
+.work-shot .work-mono { z-index: 1; transition: opacity .3s ease; }
+.work-shot.loaded { background: var(--surface-2); }
+.work-shot.loaded .work-mono { opacity: 0; pointer-events: none; }
+.work-shot-img {
+  position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%;
+  object-fit: cover; object-position: top center; display: block;
+  opacity: 0; transition: opacity .35s ease, transform .45s var(--ease-smooth);
+}
+.work-shot.loaded .work-shot-img { opacity: 1; }
+.work:hover .work-shot.loaded .work-shot-img { transform: scale(1.03); }
 @keyframes shimmer { to { background-position: -200% 0; } }
 .work-mono { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 8px; color: var(--fc);
   background: repeating-linear-gradient(0deg, transparent 0 23px, color-mix(in srgb, var(--fc) 9%, transparent) 23px 24px), repeating-linear-gradient(90deg, transparent 0 23px, color-mix(in srgb, var(--fc) 9%, transparent) 23px 24px); }

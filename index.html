@@ -13,8 +13,8 @@
     // 尽早应用主题，避免刷新时闪一下
     try { var t = JSON.parse(localStorage.getItem('wb:theme') || '"auto"'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
   </script>
-  <link rel="stylesheet" href="style.css?v=74">
-  <link rel="modulepreload" href="app.js?v=94">
+  <link rel="stylesheet" href="style.css?v=75">
+  <link rel="modulepreload" href="app.js?v=95">
   <link rel="modulepreload" href="db.js?v=8">
 </head>
 <body>
@@ -190,6 +190,6 @@
   <input type="file" id="dirInput" webkitdirectory directory multiple hidden>
   <input type="file" id="restoreInput" accept=".wbk" hidden>
   <noscript>此工作台需要启用 JavaScript。</noscript>
-  <script type="module" src="app.js?v=94"></script>
+  <script type="module" src="app.js?v=95"></script>
 </body>
 </html>
