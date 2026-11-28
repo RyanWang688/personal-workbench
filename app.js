@@ -8300,6 +8300,54 @@ document.addEventListener('contextmenu', (e) => {
   e.preventDefault();
   cardMenu($('.more', cardEl), findCard(cardEl.dataset.id));
 });
+async function pasteCanvasText(areaId, rawText) {
+  const cleanText = rawText.replace(/\r\n?/g, '\n').replace(/^\n+|\n+$/g, '');
+  if (!cleanText.trim()) return;
+  const b = boardOf(areaId);
+  if (!b) return;
+  const lines = cleanText.split('\n');
+  let maxUnits = 0;
+  for (const line of lines) {
+    const expanded = line.replace(/\t/g, '    ');
+    let units = 0;
+    for (const ch of expanded) units += /[^\x00-\xff]/.test(ch) ? 1 : 0.56;
+    if (units > maxUnits) maxUnits = units;
+  }
+  const fs = SH_DEF.text.fs;
+  const w = Math.max(SH_DEF.text.w, Math.min(640, Math.ceil(maxUnits * fs + 28)));
+  const estH = Math.max(SH_DEF.text.h, lines.length * Math.ceil(fs * 1.45) + 12);
+  let x = 0, y = 0;
+  if (state.view === areaId) {
+    const r = $('#viewport').getBoundingClientRect();
+    const p = r.width ? toWorld(r.left + r.width / 2, r.top + r.height / 2) : { x: 0, y: 0 };
+    x = Math.round(p.x - w / 2);
+    y = Math.round(p.y - estH / 2);
+    record();
+  }
+  const s = newShape('text', x, y, w, estH);
+  s.text = cleanText;
+  b.shapes.push(s);
+  if (state.view === areaId) {
+    state.bsel = pickShapes([s.id]);
+    renderCanvas();
+    const el = shEl(s.id);
+    if (el) {
+      const tx = el.querySelector('.sh-tx');
+      if (tx) {
+        const exactH = Math.max(SH_DEF.text.h, Math.ceil(tx.scrollHeight + 8));
+        s.h = exactH;
+        el.style.height = `${exactH}px`;
+      }
+      if (!reduceMotion.matches) {
+        el.animate([{ transform: 'scale(.97)', opacity: 0.6 }, { transform: 'none', opacity: 1 }], { duration: 170, easing: 'cubic-bezier(.2,.9,.3,1.2)' });
+      }
+    }
+    await saveBoard();
+  } else {
+    await saveArea(b);
+  }
+  toast('已粘贴为文字框');
+}
 document.addEventListener('paste', async (e) => {
   // 输入框、对话框、正在编辑的便签 / 形状文字：交给它们自己处理，别变成新卡片
   if (e.target.closest?.('input, textarea, dialog') || e.target.isContentEditable || e.target.parentElement?.isContentEditable) return;
@@ -8310,6 +8358,7 @@ document.addEventListener('paste', async (e) => {
     e.preventDefault();
     const areaId = state.view === CANVASES ? await pickCanvas() : defaultTarget();
     if (!areaId) return;
+    if (isCanvas(areaId)) { await pasteCanvasText(areaId, text); return; }
     const now = Date.now();
     const card = { id: uid(), kind: 'note', name: text.trim().split('\n')[0].slice(0, 40), text, columnId: areaId,
       order: isCanvas(areaId) ? topOrder(areaId) : orderAt(areaId, cardsIn(areaId, false).length), createdAt: now, updatedAt: now, enteredAt: now };
