@@ -3238,7 +3238,6 @@ vp.addEventListener('pointermove', (e) => {
       if (!cardDrag.moved) {
         cardDrag.moved = true;
         hideDots();
-        cardDrag.el.style.zIndex = topOrder(state.view) + 1;
         document.body.classList.add('is-dragging-card');
       }
       const { o, k } = cardDrag, minW = 140, maxW = 4800, tol = 7 / z, snapOn = !(e.ctrlKey || e.metaKey);
@@ -3325,10 +3324,8 @@ vp.addEventListener('pointermove', (e) => {
     if (!cardDrag.moved) {
       cardDrag.moved = true;
       hideDots();
-      const topZ = topOrder(state.view);
-      (cardDrag.items || [{ el: cardDrag.el }]).forEach((it, i) => {
+      (cardDrag.items || [{ el: cardDrag.el }]).forEach((it) => {
         it.el.classList.add('lifting');
-        it.el.style.zIndex = topZ + 1 + i;
       });
       document.body.classList.add('is-dragging-card');
       cardDrag.snapT = snapTargets(
@@ -3429,7 +3426,6 @@ async function endPointer(e) {
       if (!d.moved || !d.cur) return;
       suppressClick = true; setTimeout(() => { suppressClick = false; }, 0);
       d.card.x = d.cur.x; d.card.y = d.cur.y; d.card.w = d.cur.w;
-      d.card.order = topOrder(state.view);
       await saveCard(d.card);
       const pdfImg = d.el.querySelector('img[data-canvas-pdf]');
       if (pdfImg) ensureCanvasPdf(pdfImg);
@@ -3461,11 +3457,9 @@ async function endPointer(e) {
       return moveCard(d.card.id, zone, 0);
     }
     if (d.items?.length > 1 || d.shapeItems?.length) {
-      const topZ = topOrder(state.view);
-      d.items.forEach((it, i) => {
+      d.items.forEach((it) => {
         it.card.x = parseFloat(it.el.style.left);
         it.card.y = parseFloat(it.el.style.top);
-        it.card.order = topZ + i;
         it.card.updatedAt = Date.now();
       });
       await db.putMany('cards', d.items.map((it) => it.card));
@@ -3474,7 +3468,6 @@ async function endPointer(e) {
       return;
     }
     d.card.x = parseFloat(d.el.style.left); d.card.y = parseFloat(d.el.style.top);
-    d.card.order = topOrder(state.view);
     await saveCard(d.card);
     await changed();
     return;
