@@ -3486,7 +3486,12 @@ async function endPointer(e) {
     if (pan.right && pan.moved) rightPanAt = Date.now();
     else if (pan.right && pan.menuHeld && e.type === 'pointerup') {
       const cardEl = pan.target?.closest?.('.card');
-      if (cardEl && findCard(cardEl.dataset.id)) cardMenu($('.more', cardEl), findCard(cardEl.dataset.id));
+      if (cardEl && findCard(cardEl.dataset.id)) cardMenu(cardEl.classList.contains('on-canvas') ? { x: e.clientX, y: e.clientY } : $('.more', cardEl), findCard(cardEl.dataset.id));
+      else if (isCanvas(state.view) && !editingShape) {
+        const sh = pan.target?.closest?.('.shape');
+        const s = sh && shapeById(sh.dataset.sid);
+        if (s) shapeMenu({ x: e.clientX, y: e.clientY }, s);
+      }
     }
   }
   if (!pointers.size) pan = null;
@@ -6687,18 +6692,90 @@ function openMenu(anchor, items) {
     : `<button role="menuitem" data-i="${i}" class="${it.danger ? 'danger' : ''}">${it.swatch ? `<span class="sw" style="background:${it.swatch}"></span>` : ''}${it.tag ? `<span class="prio" style="--pc:${it.tag.c}">${it.tag.t}</span>` : ''}${esc(it.text)}${it.checked ? '<span class="chk">✓</span>' : ''}</button>`).join('');
   m.hidden = false;
   m.onclick = (e) => { const b = e.target.closest('button[data-i]'); if (!b) return; closeMenu(); items[b.dataset.i].run(); };
-  const r = anchor.getBoundingClientRect();
   const w = m.offsetWidth, h = m.offsetHeight;
-  m.style.left = `${Math.max(8, Math.min(r.right - w, innerWidth - w - 8))}px`;
-  m.style.top = `${r.bottom + h + 8 > innerHeight ? Math.max(8, r.top - h - 4) : r.bottom + 4}px`;
-  menuAnchor = anchor;
-  anchor.setAttribute('aria-expanded', 'true');
+  if (typeof anchor?.getBoundingClientRect === 'function') {
+    const r = anchor.getBoundingClientRect();
+    m.style.left = `${Math.max(8, Math.min(r.right - w, innerWidth - w - 8))}px`;
+    m.style.top = `${r.bottom + h + 8 > innerHeight ? Math.max(8, r.top - h - 4) : r.bottom + 4}px`;
+    menuAnchor = anchor;
+    anchor.setAttribute('aria-expanded', 'true');
+  } else {
+    const ax = Number.isFinite(anchor?.x) ? anchor.x : 16;
+    const ay = Number.isFinite(anchor?.y) ? anchor.y : 16;
+    m.style.left = `${Math.max(8, Math.min(ax, innerWidth - w - 8))}px`;
+    m.style.top = `${Math.max(8, Math.min(ay, innerHeight - h - 8))}px`;
+    menuAnchor = null;
+  }
   m.querySelector('button')?.focus();
 }
 function closeMenu() {
   $('#menu').hidden = true;
-  menuAnchor?.setAttribute('aria-expanded', 'false');
+  menuAnchor?.setAttribute?.('aria-expanded', 'false');
   menuAnchor = null;
+}
+async function bringCardToFront(card) {
+  card.order = topOrder(card.columnId);
+  await saveCard(card);
+  await changed();
+}
+async function sendCardToBack(card) {
+  const b = boardOf(card.columnId);
+  const others = cardsIn(card.columnId, false).filter((c) => c.id !== card.id);
+  const shapes = (b?.shapes || []).filter((s) => !isFrame(s));
+  const zs = [...others.map((c) => c.order || 1), ...shapes.map((s) => (Number.isFinite(s.z) ? s.z : 1))];
+  const minZ = zs.length ? Math.min(...zs) : 2;
+  if (minZ > 1) {
+    card.order = Math.floor(minZ) - 1;
+    await saveCard(card);
+  } else {
+    const shift = Math.ceil(2 - minZ);
+    others.forEach((c) => { c.order = (c.order || 1) + shift; });
+    shapes.forEach((s) => { s.z = (Number.isFinite(s.z) ? s.z : 1) + shift; });
+    card.order = 1;
+    await db.putMany('cards', [card, ...others]);
+    if (b && shapes.length) await saveArea(b);
+  }
+  await changed();
+}
+function shapeMenu(anchor, s) {
+  if (!s) return;
+  if (!isPicked(s.id)) selectBoard(pickShapes([s.id]));
+  const items = [];
+  if (isSticker(s)) {
+    const preset = sk.stickerById(s.sk);
+    if (preset.kind !== 'emoji') items.push({ text: '编辑贴纸文字', run: () => editStickerText(s.id) });
+    if (s.rot) items.push({ text: '旋转归正', run: () => applyFmt('rot0') });
+    items.push(
+      { text: '复制一份', run: () => duplicateSel() },
+      '-', { label: '调整图层' },
+      { text: '置于顶层', run: () => applyFmt('front') },
+      { text: '置于底层', run: () => applyFmt('back') },
+      '-',
+      { text: s.lk ? '解锁' : '锁定', run: () => toggleLock() },
+      { text: '删除', danger: true, run: () => deleteBoardSel() },
+    );
+    return openMenu(anchor, items);
+  }
+  items.push(
+    { label: '文字' },
+    { text: '编辑文字', run: () => startEdit(s.id) },
+    { text: s.b ? '取消加粗' : '加粗', checked: !!s.b, run: () => applyFmt('bold') },
+    { text: '放大字号', run: () => applyFmt('fs+') },
+    { text: '缩小字号', run: () => applyFmt('fs-') },
+    { text: s.al === 'left' ? '居中对齐' : '左对齐', run: () => applyFmt('align') },
+    '-', { label: '图形变换' },
+    ...Object.entries(SHAPE_NAMES).filter(([k]) => k !== 'sticker').map(([k, n]) => ({
+      text: n, checked: s.t === k, run: () => applyFmt('shape', k),
+    })),
+    '-', { label: '调整图层' },
+    { text: '置于顶层', run: () => applyFmt('front') },
+    { text: '置于底层', run: () => applyFmt('back') },
+    '-',
+    { text: '复制一份', run: () => duplicateSel() },
+    { text: s.lk ? '解锁' : '锁定', run: () => toggleLock() },
+    { text: '删除', danger: true, run: () => deleteBoardSel() },
+  );
+  openMenu(anchor, items);
 }
 function cardMenu(anchor, card) {
   const items = [];
@@ -6708,6 +6785,27 @@ function cardMenu(anchor, card) {
         if (await confirmBox({ title: '永久删除？', body: `「${card.name}」将被彻底删除，无法恢复。`, ok: '永久删除', danger: true })) {
           await purgeCard(card.id); await changed();
         } } });
+    return openMenu(anchor, items);
+  }
+  if (isCanvas(card.columnId)) {
+    items.push(
+      { text: card.kind === 'note' ? '编辑文字' : '预览', run: () => preview(card.id) },
+      { text: '重命名', run: () => startInlineRename(card.id) },
+      { text: '复制一份', run: () => duplicateCardAt(card, { x: (card.x || 0) + 28, y: (card.y || 0) + 28 }) },
+    );
+    if (card.w) items.push({ text: '重置大小', run: async () => { delete card.w; await saveCard(card); await changed(); } });
+    items.push(
+      '-', { label: '调整图层' },
+      { text: '置于顶层', run: () => bringCardToFront(card) },
+      { text: '置于底层', run: () => sendCardToBack(card) },
+      '-',
+      { text: card.locked ? '解锁位置' : '锁定位置', run: async () => {
+        if (card.locked) delete card.locked; else card.locked = true;
+        await saveCard(card); await changed();
+        toast(card.locked ? `已锁定「${card.name}」` : `已解锁「${card.name}」`);
+      } },
+      { text: '删除', danger: true, run: () => trashCard(card.id) },
+    );
     return openMenu(anchor, items);
   }
   if (isActive(card)) {
@@ -8289,9 +8387,19 @@ applyTheme(themePref());
 
 document.addEventListener('contextmenu', (e) => {
   const cardEl = e.target.closest('.card');
-  if (!cardEl) return;
-  e.preventDefault();
-  cardMenu($('.more', cardEl), findCard(cardEl.dataset.id));
+  if (cardEl) {
+    e.preventDefault();
+    const anchor = cardEl.classList.contains('on-canvas') ? { x: e.clientX, y: e.clientY } : $('.more', cardEl);
+    return cardMenu(anchor, findCard(cardEl.dataset.id));
+  }
+  if (isCanvas(state.view) && !editingShape) {
+    const sh = e.target.closest('.shape');
+    const s = sh && shapeById(sh.dataset.sid);
+    if (s) {
+      e.preventDefault();
+      shapeMenu({ x: e.clientX, y: e.clientY }, s);
+    }
+  }
 });
 async function pasteCanvasText(areaId, rawText) {
   const cleanText = rawText.replace(/\r\n?/g, '\n').replace(/^\n+|\n+$/g, '');
